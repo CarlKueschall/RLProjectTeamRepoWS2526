@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# RL artifacts
+checkpoints/
+models/
+logs/
+runs/
+*.pth
+*.pt
+*.pkl
+*.ckpt
+
+# Data files
+*.csv
+*.xlsx
+*.xls
+*.h5
+*.hdf5
+*.npz
+
+# Outputs
+results/
+figures/
+plots/
+
+# Temporary
+*.log
+*.tmp
+.env
+
+**/wandb/
+*/wandb
+wandb/
+
+**.mp4
