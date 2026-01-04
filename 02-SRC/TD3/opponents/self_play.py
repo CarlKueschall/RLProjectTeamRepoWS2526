@@ -69,13 +69,13 @@ class SelfPlayManager:
         self.current_opponent_idx = -1
         self.current_opponent_episode = 0
 
-        ########################################################
+        ################################################
         # PFSP tracking
         self.opponent_winrates = {}  # {path: deque(results)}
         self.opponent_games_played = {}  # {path: int}
         self.opponent_episodes = {}  # {path: episode_num}
 
-        #########################################################
+        #################################################
         # Regression tracking
         
         self.best_eval_vs_weak = 0.0
@@ -83,9 +83,9 @@ class SelfPlayManager:
         self.consecutive_eval_drops = 0
 
     def activate(self, episode, checkpoints_dir, agent):
-        #########################################################
+        ######################################################
         # Activate self-play and seed the pool.
-        #########################################################
+        #####################################################
 
         if self.active:
             return
@@ -179,17 +179,15 @@ class SelfPlayManager:
         use_weak = np.random.random() < self.current_anchor_ratio
 
         if not use_weak:
-            #########################################################
+            ####################################
             # Select from pool
-            #########################################################
             if self.use_pfsp:
                 selected_path = self._pfsp_select()
             else:
                 selected_path = np.random.choice(self.pool)
 
-            #########################################################
             # Load opponent
-            #########################################################
+            
             self._load_opponent(selected_path)
 
         else:
@@ -198,16 +196,18 @@ class SelfPlayManager:
         return use_weak
 
     def _pfsp_select(self):
-        #########################################################
         # Select opponent using PFSP weighting.
-        #########################################################
+        
         weights = []
         valid_opponents = []
 
         for opp_path in self.pool:
             if opp_path in self.opponent_winrates and len(self.opponent_winrates[opp_path]) >= 10:
                 results = list(self.opponent_winrates[opp_path])
-                wins = sum(1 for r in results if r == 1)
+                wins = 0
+                for r in results:
+                    if r == 1:
+                        wins += 1
                 winrate = wins / len(results)
 
                 from .pfsp import pfsp_weight
@@ -249,12 +249,10 @@ class SelfPlayManager:
                 policy_state = opponent_state
 
             #########################################################
-            # Create opponent network if needed
-            #########################################################
+             # Create opponent network if neede
             if self.opponent is None:
                 #########################################################
                 # Need to infer sizes from policy_state
-                #########################################################
                 readout_shape = policy_state.get('readout.weight', 'N/A').shape if isinstance(policy_state, dict) else 'N/A'
                 output_size = readout_shape[1] if readout_shape != 'N/A' else 4
                 input_size = policy_state.get('0.weight', 'N/A').shape[1] if isinstance(policy_state, dict) else 18
@@ -267,7 +265,7 @@ class SelfPlayManager:
                 ).to(self.device)
 
             #########################################################
-            # Load the matching keys into the opponent
+                # Load the matching keys into the opponent
             current_state = self.opponent.state_dict()
             filtered_state = {}
             for key, param in policy_state.items():
@@ -283,19 +281,14 @@ class SelfPlayManager:
                 self.current_opponent_episode = self.opponent_episodes.get(path, 0)
 
         except Exception as e:
-            #########################################################
+            
             print(f"Failed to load self-play opponent: {e}")
-            #########################################################
+            
             self.opponent = None
 
     def get_action(self, obs):
         #########################################################
         # Get action from self-play opponent.
-        #########################################################
-        # Args:
-        #     obs: Opponent observation
-        # Returns:
-        #     action: Opponent action (or None if using fixed opponent)
         if self.opponent is None:
             return None
 
@@ -321,9 +314,7 @@ class SelfPlayManager:
     def update_anchor_ratio(self, drop_from_peak):
         #########################################################
         # Update anchor ratio based on forgetting detection.
-        #########################################################
-        # Args:
-        #     drop_from_peak: How much eval vs weak dropped from peak
+
         if not self.dynamic_anchor_mixing:
             return
 
@@ -344,10 +335,7 @@ class SelfPlayManager:
         #########################################################
         # Check for performance regression.
         #########################################################
-        # Args:
-        #     eval_vs_weak: Current evaluation vs weak
-        # Returns:
-        #     tuple: (should_rollback, checkpoint_path_to_load)
+
         if not self.regression_rollback:
             return False, None
 
@@ -364,15 +352,13 @@ class SelfPlayManager:
         if drop_from_best > self.regression_threshold:
             self.consecutive_eval_drops += 1
             if self.consecutive_eval_drops >= 2:
-                #########################################################
-                # Rollback!
-                #########################################################
+                
                 print(f"Regression detected! Dropping {drop_from_best:.1%} from best")
                 return True, self.best_checkpoint_path
         else:
-            #########################################################
+            
             # Minor drop or stable
-            #########################################################
+            
             self.consecutive_eval_drops = 0
             return False, None
 
@@ -400,7 +386,10 @@ class SelfPlayManager:
             all_winrates = []
             for results in self.opponent_winrates.values():
                 if len(results) >= 10: 
-                    wins = sum(1 for r in results if r == 1)
+                    wins = 0
+                    for r in results:
+                        if r == 1:
+                            wins += 1
                     all_winrates.append(wins / len(results))
 
             if all_winrates:

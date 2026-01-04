@@ -89,8 +89,7 @@ class TD3Agent:
         self._action_n = action_space.shape[0]
 
         force_cpu = userconfig.get("force_cpu", False) #added this to test overhead vs parallelization on MPS.
-        device_info = get_device(force_cpu=force_cpu)
-        self.device = device_info[0]
+        self.device = get_device(force_cpu=force_cpu)
 
         # Set up config dictionary
         self._config = {}
@@ -128,7 +127,6 @@ class TD3Agent:
         self._config["target_noise_clip"] = 0.5
         self._config["use_target_net"] = True
         self._config["grad_clip"] = 1.0
-        self._config["compile"] = True #compile the networks for speed
         self._config["q_clip"] = 25.0 #q-value clipping
         self._config["q_clip_mode"] = "hard"  #clipping mode hard or soft both work honestly didn't see much difference in testing
 
@@ -154,7 +152,7 @@ class TD3Agent:
             self.buffer_anchor = mem.Memory(max_size=buffer_size_each)
             self.buffer_pool = mem.Memory(max_size=buffer_size_each)
             self.buffer = self.buffer_anchor
-            print("✓ Dual replay buffers enabled: {} each (anchor + pool)".format(buffer_size_each))
+            print("Dual replay buffers enabled: {} each (anchor + pool)".format(buffer_size_each))
         else:
             self.buffer = mem.Memory(max_size=self._config["buffer_size"])
         # getting the aciton space bounds
@@ -194,7 +192,7 @@ class TD3Agent:
             # Add the minimum value to shift from [0, diff] to [low, high]
             # Example: [0, 5] + (-2) = [-2, 3]
             result = scaled + low
-            # result ∈ [low, high] ✓
+            # result ∈ [low, high]
             return result 
         #########################################################
         # building the policy network
@@ -283,32 +281,6 @@ class TD3Agent:
             betas=(0.9, 0.9), 
             weight_decay=1e-4
         )
-        #########################################################
-        # compile the networks for speed
-        compile_config = False
-        if "compile" in self._config:
-            compile_config = self._config["compile"]
-
-        if compile_config:
-            if self.device.type != "cpu":
-                torch_version_tuple = []
-                torch_version_str = torch.__version__
-                parts = torch_version_str.split(".")
-                for i in range(2):
-                    torch_version_tuple.append(int(parts[i]))
-                torch_version = tuple(torch_version_tuple)
-                if torch_version >= (2, 1):
-                    try:
-                        self.policy = torch.compile(self.policy, mode="reduce-overhead")
-                        self.Q1 = torch.compile(self.Q1, mode="reduce-overhead")
-                        self.Q2 = torch.compile(self.Q2, mode="reduce-overhead")
-                        self.policy_target = torch.compile(self.policy_target, mode="reduce-overhead")
-                        self.Q1_target = torch.compile(self.Q1_target, mode="reduce-overhead")
-                        self.Q2_target = torch.compile(self.Q2_target, mode="reduce-overhead")
-                    except Exception as e:
-                        print("Warning: torch.compile failed: {}. Using eager mode.".format(e))
-                else:
-                    print("Note: torch.compile requires PyTorch 2.1+ (you have {}). Skipping.".format(torch.__version__))
 
 
         ########################################################      

@@ -76,10 +76,6 @@ def parse_args():
     # Optimization
     parser.add_argument('--cpu', action='store_true',
                         help='Force CPU usage even if GPU is available')
-    parser.add_argument('--no_compile', action='store_true',
-                        help='Disable torch.compile optimization')
-    parser.add_argument('--no_amp', action='store_true',
-                        help='Disable automatic mixed precision (AMP)')
 
     # Logging
     parser.add_argument('--log_interval', type=int, default=10,

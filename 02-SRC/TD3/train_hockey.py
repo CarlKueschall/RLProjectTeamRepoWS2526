@@ -1,13 +1,3 @@
-"""
-TD3 Hockey Training Script with W&B Integration
-
-Refactored version using modular components.
-
-Usage:
-    python train_hockey.py --mode NORMAL --opponent weak --max_episodes 5000
-    python train_hockey.py --mode TRAIN_SHOOTING --max_episodes 2000
-"""
-
 import pickle
 import time
 from pathlib import Path
@@ -32,51 +22,60 @@ from rewards import PBRSReward, V10RewardShaper
 
 
 def train(args):
-    """Main training loop for hockey"""
-
-    # Set random seeds
+    #########################################################
+    # Main training loop for hockey
+    #########################################################
+    # Set random seeds for reproducibility
     if args.seed is not None:
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
 
+    #########################################################
     # Get device and check features
-    device, use_amp = get_device(force_cpu=args.cpu)
-    torch_version = tuple(int(x) for x in torch.__version__.split(".")[:2])
-    compile_available = torch_version >= (2, 1) and device.type != "cpu"
+    #########################################################
+    device = get_device(force_cpu=args.cpu)
 
-    print(f"\n{'='*60}")
+    print("###############################")
     print(f"Device: {device.type.upper()}")
     print(f"PyTorch: {torch.__version__}")
-    print(f"AMP: {'Enabled' if use_amp and not args.no_amp else 'Disabled'}")
-    print(f"torch.compile: {'Enabled' if compile_available and not args.no_compile else 'Disabled'}")
-    print(f"{'='*60}\n")
+    print("###############################")
 
+    #########################################################
     # Create environment
+    #########################################################
     mode = get_mode(args.mode)
     env = h_env.HockeyEnv(mode=mode, keep_mode=True)
     max_timesteps = get_max_timesteps(mode)
 
+    #########################################################
     # Create opponent
     if args.opponent == 'self':
-        opponent = None  # Will create second agent
+        opponent = None  # Will create second agent for self-play
     else:
         opponent = FixedOpponent(weak=(args.opponent == 'weak'))
 
+    #########################################################
     # Dedicated bots for evaluation
+    #########################################################
     weak_eval_bot = FixedOpponent(weak=True)
     strong_eval_bot = FixedOpponent(weak=False)
 
+    #########################################################
     # Create directories
+    #########################################################
     results_dir = Path('./results')
     checkpoints_dir = results_dir / 'checkpoints'
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     selfplay_checkpoints_dir = results_dir / 'selfplay_checkpoints'
     selfplay_checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build run name
+    # Build run name for wandb
     run_name = f"TD3-Hockey-{args.mode}-{args.opponent}-lr{args.lr_actor:.4f}-seed{args.seed}"
 
+    #########################################################
     # Initialize W&B
+    #########################################################
+    # logging all the config stuff so we can track experiments
     if not args.no_wandb:
         wandb.init(
             project="rl-hockey",
@@ -108,8 +107,6 @@ def train(args):
                 "noise_eps_min": args.eps_min,
                 "noise_eps_decay": args.eps_decay,
                 "device": device.type,
-                "use_amp": use_amp and not args.no_amp,
-                "compile": compile_available and not args.no_compile,
                 "random_seed": args.seed,
                 "max_episodes": args.max_episodes,
                 "self_play_start": args.self_play_start,
@@ -133,10 +130,13 @@ def train(args):
                   + (["PFSP"] if args.use_pfsp else [])
         )
 
-    # Track starting episode
+    # Track starting episode (for resuming from checkpoint)
     i_episode_start = 0
 
+    #########################################################
     # Initialize agent
+    #########################################################
+    # create the TD3 agent with all the hyperparams
     agent = TD3Agent(
         env.observation_space,
         env.action_space,
@@ -156,45 +156,46 @@ def train(args):
         hidden_sizes_actor=args.hidden_actor,
         hidden_sizes_critic=args.hidden_critic,
         grad_clip=args.grad_clip,
-        compile=not args.no_compile,
-        use_amp=not args.no_amp,
         force_cpu=args.cpu,
         q_clip=args.q_clip,
         q_clip_mode=args.q_clip_mode,
         use_dual_buffers=args.use_dual_buffers,
     )
 
+    #########################################################
     # Load checkpoint if specified
+    #########################################################
     if args.checkpoint:
         checkpoint_path = Path(args.checkpoint)
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        print(f"\n{'='*60}")
+        print("###############################")
         print(f"Loading checkpoint from: {checkpoint_path}")
-        print(f"{'='*60}")
 
         if isinstance(checkpoint, tuple):
             agent.restore_state(checkpoint)
-            print("✓ Loaded TD3 state (Q1, Q2, policy networks)")
+            print("Loaded TD3 state (Q1, Q2, policy networks)")
         elif isinstance(checkpoint, dict):
             if 'agent_state' in checkpoint:
                 agent.restore_state(checkpoint['agent_state'])
-                print("✓ Loaded agent state from checkpoint")
+                print("Loaded agent state from checkpoint")
                 if 'episode' in checkpoint:
-                    i_episode_start = checkpoint['episode']
-                    print(f"✓ Resuming from episode {i_episode_start}")
+                    i_episode_start = checkpoint['episode']  # resume from this episode
+                    print(f"Resuming from episode {i_episode_start}")
 
-        print(f"✓ Checkpoint loaded successfully")
-        print(f"{'='*60}\n")
+        print("Checkpoint loaded successfully")
+        print("###############################")
 
         checkpoint_name = checkpoint_path.stem
         run_name = f"TD3-TRANSFER-{checkpoint_name}-to-{args.mode}-{args.opponent}"
 
+    #########################################################
     # For self-play, create second agent
+    #########################################################
     agent2 = None
-    if args.opponent == 'self':
+    if args.opponent == 'self':  # self-play mode, need two agents
         agent2 = TD3Agent(
             env.observation_space,
             env.action_space,
@@ -214,23 +215,25 @@ def train(args):
             hidden_sizes_actor=args.hidden_actor,
             hidden_sizes_critic=args.hidden_critic,
             grad_clip=args.grad_clip,
-            compile=not args.no_compile,
-            use_amp=not args.no_amp,
             force_cpu=args.cpu,
             q_clip=args.q_clip,
             q_clip_mode=args.q_clip_mode,
         )
-        torch.manual_seed(args.seed + 1)
+        torch.manual_seed(args.seed + 1)  # different seed for agent2
         np.random.seed(args.seed + 1)
 
+    #########################################################
     # Initialize reward shapers
+    #########################################################
     pbrs_shaper = PBRSReward(gamma=args.gamma, annealing_episodes=5000)
     if args.reward_shaping and args.self_play_start > 0:
-        pbrs_shaper.set_self_play_start(args.self_play_start)
+        pbrs_shaper.set_self_play_start(args.self_play_start)  # anneal during self-play
 
     v10_shaper = V10RewardShaper()
 
+    #########################################################
     # Initialize self-play manager
+    #########################################################
     self_play_manager = SelfPlayManager(
         pool_size=args.self_play_pool_size,
         save_interval=args.self_play_save_interval,
@@ -246,21 +249,23 @@ def train(args):
         regression_threshold=args.regression_threshold,
     )
 
+    #########################################################
     # Initialize metrics tracker
-    tracker = MetricsTracker(rolling_window=100)
+    #########################################################
+    tracker = MetricsTracker(rolling_window=100)  # track wins/losses/rewards etc
 
-    print(f"\n{'='*60}")
+    print("###############################")
     print(f"Training TD3 on Hockey ({args.mode} mode)")
     print(f"Run: {run_name}")
     print(f"Opponent: {args.opponent}")
     print(f"Max timesteps per episode: {max_timesteps}")
     print(f"Warmup episodes: {args.warmup_episodes} (NO training, just exploration)")
     print(f"Epsilon: {args.eps} -> {args.eps_min} (decay: {args.eps_decay})")
-    print(f"{'='*60}\n")
+    print("###############################")
 
     if args.self_play_start > 0:
-        print(f"\n{'='*60}")
-        print(f"SELF-PLAY ENABLED")
+        print("###############################")
+        print("SELF-PLAY ENABLED")
         print(f"Starts at episode: {args.self_play_start}")
         print(f"Pool size: {args.self_play_pool_size}")
         print(f"Save interval: {args.self_play_save_interval}")
@@ -269,14 +274,16 @@ def train(args):
         if args.use_pfsp:
             print(f"PFSP enabled: {args.pfsp_mode} curriculum")
         if args.dynamic_anchor_mixing:
-            print(f"Dynamic anchor mixing enabled (anti-forgetting)")
+            print("Dynamic anchor mixing enabled (anti-forgetting)")
         if args.performance_gated_selfplay:
             print(f"Performance-gated activation: {args.selfplay_gate_winrate:.0%} win-rate, {args.selfplay_gate_variance:.2f} variance")
         if args.regression_rollback:
             print(f"Regression rollback enabled: threshold {args.regression_threshold:.0%}")
-        print(f"{'='*60}\n")
+        print("###############################")
 
+    #########################################################
     # Training loop
+    #########################################################
     global_step = 0
     start_time = time.time()
     last_log_time = start_time
@@ -285,7 +292,9 @@ def train(args):
     pbar = tqdm(range(i_episode_start + 1, args.max_episodes + 1), desc="Training", unit="ep")
 
     for i_episode in pbar:
+        #########################################################
         # Use random seeds for state diversity
+        #########################################################
         if args.seed is not None:
             np.random.seed(args.seed + i_episode)
             reset_seed = np.random.randint(0, 1000000)
@@ -297,31 +306,37 @@ def train(args):
         if agent2:
             agent2.reset()
 
+        #########################################################
         # Reset shapers and trackers for new episode
+        #########################################################
         v10_shaper.reset()
         pbrs_shaper.reset()
         tracker.reset_episode()
 
+        #########################################################
         # Self-play management
+        #########################################################
         if args.self_play_start > 0:
-            # Check if should activate
+            # Check if should activate self-play
             if not self_play_manager.active:
                 rolling_variance = np.std(list(tracker.rolling_outcomes)) if len(tracker.rolling_outcomes) > 0 else 0.0
                 last_eval_vs_weak = tracker.get_last_eval('weak')
                 if self_play_manager.should_activate(i_episode, last_eval_vs_weak, rolling_variance):
                     self_play_manager.activate(i_episode, selfplay_checkpoints_dir, agent)
 
-            # Update pool
+            # Update pool with new checkpoint
             removed_episode = self_play_manager.update_pool(i_episode, agent, selfplay_checkpoints_dir)
             if removed_episode:
-                print(f"   📦 Added ep{i_episode} to pool (removed ep{removed_episode})")
+                print(f"Added ep{i_episode} to pool (removed ep{removed_episode})")
 
-            # Select opponent
+            # Select opponent for this episode
             use_weak_this_episode = self_play_manager.select_opponent(i_episode)
         else:
             use_weak_this_episode = False
 
+        #########################################################
         # Episode loop
+        #########################################################
         episode_reward_p1 = 0
         episode_step_count = 0
 
@@ -329,10 +344,14 @@ def train(args):
             global_step += 1
             obs_curr = obs.copy()
 
+            #########################################################
             # Agent 1 action
+            #########################################################
             action1 = agent.act(obs)
 
+            #########################################################
             # Agent 2 action
+            #########################################################
             if args.opponent == 'self':
                 action2 = agent2.act(obs_agent2)
             elif self_play_manager.active and self_play_manager.opponent is not None and not use_weak_this_episode:
@@ -342,33 +361,44 @@ def train(args):
             else:
                 action2 = opponent.act(obs_agent2)
 
+            #########################################################
             # Action slicing (critical fix)
+            #########################################################
+            # primary agent might have 8 outputs, but we only want its P1 actions
+            # By slicing both to [:4], we ensure proper player separation
             action_combined = np.hstack([action1[:4], action2[:4]])
 
             # Step environment
             obs_next, r1, done, truncated, info = env.step(action_combined)
 
+            #########################################################
             # Apply reward shaping
+            #########################################################
             if args.reward_shaping:
                 pbrs_bonus = pbrs_shaper.compute(obs_curr, obs_next, done=(done or truncated), episode=i_episode)
-                r1_shaped = r1 + pbrs_bonus
+                r1_shaped = r1 + pbrs_bonus  # add PBRS bonus to sparse reward
             else:
                 r1_shaped = r1
                 pbrs_bonus = 0.0
 
+            #########################################################
             # V10 strategic bonuses
-            dist_to_puck = np.sqrt((obs_next[0] - obs_next[12])**2 + (obs_next[1] - obs_next[13])**2)
+            #########################################################
+            dist_to_puck = np.sqrt((obs_next[0] - obs_next[12])**2 + (obs_next[1] - obs_next[13])**2)  # distance to puck
             v10_bonuses = v10_shaper.compute(obs_next, info, dist_to_puck)
 
             # Record opponent position for forcing metric
             if args.reward_shaping:
-                v10_shaper.record_opponent_position([obs_next[6], obs_next[7]])
+                v10_shaper.record_opponent_position([obs_next[6], obs_next[7]])  # track where opponent is
 
             # Apply V10 bonuses
             for bonus_name, bonus_value in v10_bonuses.items():
-                r1_shaped += bonus_value
+                r1_shaped += bonus_value  # add all the v10 bonuses
 
+            #########################################################
             # Store transition
+            #########################################################
+            # dual buffers: separate anchor (weak) and pool (self-play) experiences
             if args.use_dual_buffers and hasattr(agent, 'buffer_anchor') and hasattr(agent, 'buffer_pool'):
                 if use_weak_this_episode or not self_play_manager.active:
                     agent.buffer_anchor.add_transition((obs_curr, action1, r1_shaped, obs_next.copy(), float(done or truncated)))
@@ -379,22 +409,27 @@ def train(args):
 
             # Update tracker
             tracker.add_step_reward(r1_shaped)
-            tracker.add_action_magnitude(np.linalg.norm(action1[:2]))
+            tracker.add_action_magnitude(np.linalg.norm(action1[:2]))  # track action magnitude
 
             episode_reward_p1 += r1_shaped
             episode_step_count += 1
 
+            #########################################################
             # Update observations
+            #########################################################
             obs = obs_next
             obs_agent2 = env.obs_agent_two()
+            # FIX: Mirror angles for P2
             obs_agent2[2] = np.arctan2(-np.sin(obs_agent2[2]), -np.cos(obs_agent2[2]))
             obs_agent2[8] = np.arctan2(-np.sin(obs_agent2[8]), -np.cos(obs_agent2[8]))
 
+            #########################################################
             # Train during episode
-            warmup_complete = i_episode >= args.warmup_episodes
+            #########################################################
+            warmup_complete = i_episode >= args.warmup_episodes  # wait for warmup before training
             if args.train_freq != -1 and len(agent.buffer) >= args.batch_size and warmup_complete:
                 if global_step % args.train_freq == 0:
-                    scaled_iterations = max(1, int(32 / (250 / args.train_freq)))
+                    scaled_iterations = max(1, int(32 / (250 / args.train_freq)))  # scale training iterations based on freq
                     losses = agent.train(iter_fit=scaled_iterations)
                     if losses:
                         tracker.add_losses(losses)
@@ -405,37 +440,51 @@ def train(args):
                     winner = 0
                 break
 
+        #########################################################
         # Train after episode (if train_freq == -1)
+        #########################################################
         if args.train_freq == -1 and warmup_complete:
             if len(agent.buffer) >= args.batch_size:
                 losses = agent.train(iter_fit=32)
                 if losses:
                     tracker.add_losses(losses)
 
+        #########################################################
         # Train agent2 in self-play
+        #########################################################
         if agent2 and len(agent2.buffer) >= args.batch_size:
-            agent2.train(iter_fit=32)
+            agent2.train(iter_fit=32)  # train the second agent too
 
+        #########################################################
         # Decay exploration
+        #########################################################
         agent.decay_epsilon()
         if agent2:
             agent2.decay_epsilon()
 
+        #########################################################
         # V10 episode-end bonuses
-        end_bonuses = v10_shaper.compute_episode_end_bonuses()
+        #########################################################
+        end_bonuses = v10_shaper.compute_episode_end_bonuses()  # diversity and forcing bonuses
         for bonus_name, bonus_value in end_bonuses.items():
             episode_reward_p1 += bonus_value
 
+        #########################################################
         # Update tracker
+        #########################################################
         tracker.add_episode_result(episode_reward_p1, episode_step_count, winner)
         tracker.add_v10_stats(v10_shaper.get_episode_stats())
         tracker.add_pbrs_total(pbrs_bonus)
 
+        #########################################################
         # Self-play result tracking
+        #########################################################
         if args.self_play_start > 0 and self_play_manager.use_pfsp:
             self_play_manager.record_result(winner, use_weak_this_episode)
 
+        #########################################################
         # Update progress bar
+        #########################################################
         win_rate = tracker.get_win_rate()
         postfix = {
             'reward': f'{episode_reward_p1:6.1f}',
@@ -447,14 +496,18 @@ def train(args):
             postfix['mode'] = 'SELF-PLAY'
         pbar.set_postfix(postfix)
 
+        #########################################################
         # Logging
+        #########################################################
         if i_episode % args.log_interval == 0:
             current_time = time.time()
             episodes_since_last_log = i_episode - last_log_episode
             time_since_last_log = current_time - last_log_time
             eps_per_sec = episodes_since_last_log / time_since_last_log if time_since_last_log > 0 else 0
 
+            #########################################################
             # Build log metrics
+            #########################################################
             log_metrics = tracker.get_log_metrics()
             log_metrics["performance/cumulative_win_rate"] = win_rate
             log_metrics["performance/wins"] = tracker.wins
@@ -472,7 +525,9 @@ def train(args):
                 if self_play_manager.active:
                     log_metrics["pbrs/annealing_weight"] = pbrs_shaper.get_annealing_weight(i_episode)
 
+                #########################################################
                 # V10 Strategic Reward Shaping metrics
+                #########################################################
                 if tracker.v10_stats:
                     log_metrics["v10/shots_clear"] = tracker.v10_stats.get('shots_clear', 0)
                     log_metrics["v10/shots_blocked"] = tracker.v10_stats.get('shots_blocked', 0)
@@ -486,9 +541,11 @@ def train(args):
             if args.self_play_start > 0:
                 log_metrics.update(self_play_manager.get_stats())
 
+                #########################################################
                 # Periodic evaluation
+                #########################################################
                 if i_episode % args.eval_interval == 0:
-                    print(f"\n   📊 Evaluating vs WEAK opponent...")
+                    print(f"\nEvaluating vs WEAK opponent...")
                     eval_weak = evaluate_vs_opponent(
                         agent, weak_eval_bot, mode=mode,
                         num_episodes=100, max_timesteps=max_timesteps, eval_seed=args.seed
@@ -500,7 +557,9 @@ def train(args):
                     log_metrics["eval/vs_weak_avg_reward"] = eval_weak['avg_reward']
                     print(f"   [EVAL] vs weak: {eval_weak['win_rate']:.1%} W/L/T")
 
+                    #########################################################
                     # Update self-play manager with eval results
+                    #########################################################
                     if self_play_manager.dynamic_anchor_mixing:
                         last_eval = tracker.get_last_eval('weak')
                         peak_eval = tracker.get_peak_eval('weak')
@@ -510,16 +569,16 @@ def train(args):
                     if self_play_manager.regression_rollback:
                         should_rollback, rollback_path = self_play_manager.check_regression(eval_weak['win_rate_decisive'])
                         if should_rollback:
-                            print(f"\n{'='*60}")
-                            print(f"🔄 REGRESSION ROLLBACK TRIGGERED")
-                            print(f"   Rolling back to: {rollback_path}")
-                            print(f"{'='*60}\n")
+                            print("###############################")
+                            print("REGRESSION ROLLBACK TRIGGERED")
+                            print(f"Rolling back to: {rollback_path}")
+                            print("###############################")
                             if rollback_path and Path(rollback_path).exists():
                                 checkpoint = torch.load(rollback_path, map_location=device)
                                 agent.restore_state(checkpoint['agent_state'])
 
                     # Also evaluate vs strong
-                    print(f"   📊 Evaluating vs STRONG opponent...")
+                    print(f"Evaluating vs STRONG opponent...")
                     eval_strong = evaluate_vs_opponent(
                         agent, strong_eval_bot, mode=mode,
                         num_episodes=100, max_timesteps=max_timesteps, eval_seed=args.seed
@@ -531,14 +590,19 @@ def train(args):
                     log_metrics["eval/vs_strong_avg_reward"] = eval_strong['avg_reward']
                     print(f"   [EVAL] vs strong: {eval_strong['win_rate']:.1%} W/L/T")
 
+                    #########################################################
                     # Track eval results
+                    #########################################################
                     tracker.set_last_eval('weak', eval_weak['win_rate_decisive'])
                     tracker.set_peak_eval('weak', max(tracker.get_peak_eval('weak'), eval_weak['win_rate_decisive']))
                     tracker.set_last_eval('strong', eval_strong['win_rate_decisive'])
 
                 print("")
 
+            #########################################################
             # Q-value monitoring
+            #########################################################
+            # check q-values to see if they're exploding or something
             if i_episode % 100 == 0 and len(agent.buffer) >= args.batch_size:
                 q_values = []
                 with torch.no_grad():
@@ -556,7 +620,9 @@ def train(args):
                     log_metrics["values/Q_min"] = np.min(q_values)
                     log_metrics["values/Q_max"] = np.max(q_values)
 
+            #########################################################
             # Progress update
+            #########################################################
             if args.reward_shaping:
                 tqdm.write(f'Episode {i_episode:4d} | '
                            f'P1 Reward: {episode_reward_p1:7.2f} | '
@@ -575,7 +641,9 @@ def train(args):
             last_log_time = current_time
             last_log_episode = i_episode
 
+        #########################################################
         # GIF Recording
+        #########################################################
         if args.gif_interval > 0 and (i_episode == 1 or i_episode % args.gif_interval == 0) and not args.no_wandb:
             try:
                 if self_play_manager.active and self_play_manager.opponent is not None:
@@ -604,9 +672,11 @@ def train(args):
                     )
                     save_gif_to_wandb(gif_frames, gif_results, i_episode, run_name)
             except Exception as e:
-                print(f"⚠ GIF recording failed at episode {i_episode}: {e}")
+                print(f"GIF recording failed at episode {i_episode}: {e}")
 
+        #########################################################
         # Save checkpoint
+        #########################################################
         if i_episode % args.save_interval == 0:
             checkpoint_path = checkpoints_dir / f'TD3_Hockey_{args.mode}_{args.opponent}_{i_episode}_seed{args.seed}.pth'
             checkpoint_data = {
@@ -618,23 +688,27 @@ def train(args):
                 wandb.save(str(checkpoint_path))
             print(f'--- Checkpoint saved: {checkpoint_path.name} ---')
 
+    #########################################################
     # Final summary
+    #########################################################
     training_time = time.time() - start_time
     final_reward = np.mean(tracker.rewards_p1[-20:]) if len(tracker.rewards_p1) >= 20 else 0
     final_win_rate = tracker.get_win_rate()
     final_eps_per_sec = args.max_episodes / training_time if training_time > 0 else 0
 
-    print(f"\n{'='*60}")
-    print(f"Training Complete!")
+    print("###############################")
+    print("Training Complete!")
     print(f"Total time: {training_time/60:.1f} minutes")
     print(f"Final reward (last 20): {final_reward:.2f}")
     print(f"Final win rate: {final_win_rate:.1%}")
     print(f"Wins: {tracker.wins}, Losses: {tracker.losses}, Ties: {tracker.ties}")
     print(f"Goals scored: {tracker.goals_scored}, Conceded: {tracker.goals_conceded}")
     print(f"Average speed: {final_eps_per_sec:.2f} eps/s ({training_time/args.max_episodes:.2f} s/ep)")
-    print(f"{'='*60}\n")
+    print("###############################")
 
+    #########################################################
     # Save final statistics
+    #########################################################
     stats_path = results_dir / f'TD3_Hockey_{args.mode}_{args.opponent}_stats_seed{args.seed}.pkl'
     with open(stats_path, 'wb') as f:
         pickle.dump({
@@ -651,7 +725,9 @@ def train(args):
     final_model_path = checkpoints_dir / f'TD3_Hockey_{args.mode}_{args.opponent}_final_seed{args.seed}.pth'
     torch.save(agent.state(), final_model_path)
 
+    #########################################################
     # Log final summary to W&B
+    #########################################################
     if not args.no_wandb:
         wandb.summary["final_reward"] = final_reward
         wandb.summary["final_win_rate"] = final_win_rate

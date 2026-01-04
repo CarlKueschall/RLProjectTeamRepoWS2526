@@ -7,10 +7,10 @@ def get_device(force_cpu=False):
         force_cpu: If True, force CPU usage regardless of GPU availability
     """
     if force_cpu:
-        return torch.device("cpu"), False
+        return torch.device("cpu")
     if torch.backends.mps.is_available():
-        return torch.device("mps"), True
+        return torch.device("mps")
     elif torch.cuda.is_available():
-        return torch.device("cuda"), True
+        return torch.device("cuda")
     else:
-        return torch.device("cpu"), False
+        return torch.device("cpu")

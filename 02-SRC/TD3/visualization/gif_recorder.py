@@ -25,7 +25,7 @@ def create_gif_for_wandb(env, agent, opponent, mode, max_timesteps, num_episodes
     try:
         from PIL import Image
     except ImportError:
-        print("⚠ PIL not installed. GIF recording disabled. Install with: pip install Pillow")
+        print("PIL not installed. GIF recording disabled. Install with: pip install Pillow")
         return None, []  # can't make gifs without PIL
 
     all_episode_frames = []
@@ -46,7 +46,11 @@ def create_gif_for_wandb(env, agent, opponent, mode, max_timesteps, num_episodes
 
     #########################################################
     # Find the max number of frames across all episodes
-    max_frames = max(len(frames) for frames in all_episode_frames)
+    max_frames = 0
+    for frames in all_episode_frames:
+        frame_count = len(frames)
+        if frame_count > max_frames:
+            max_frames = frame_count
 
     #########################################################
     # Pad shorter episodes by repeating last frame
@@ -69,11 +73,21 @@ def create_gif_for_wandb(env, agent, opponent, mode, max_timesteps, num_episodes
         if episode_frames_at_idx:
             #########################################################
             # Convert to PIL images and stitch horizontally
-            pil_images = [Image.fromarray(f) for f in episode_frames_at_idx]
+            pil_images = []
+            for f in episode_frames_at_idx:
+                pil_img = Image.fromarray(f)
+                pil_images.append(pil_img)
 
             # Calculate total width and max height
-            total_width = sum(img.width for img in pil_images)  # add up all widths
-            max_height = max(img.height for img in pil_images)  # take tallest one
+            total_width = 0
+            for img in pil_images:
+                total_width += img.width  # add up all widths
+            
+            max_height = 0
+            for img in pil_images:
+                img_height = img.height
+                if img_height > max_height:
+                    max_height = img_height  # take tallest one
 
             #########################################################
             # Create stitched image
@@ -108,7 +122,7 @@ def save_gif_to_wandb(frames, results, episode_num, run_name, metric_name="behav
         import imageio
         import wandb
     except ImportError as e:
-        print(f"⚠ GIF recording failed - missing dependency: {e}")
+        print(f"GIF recording failed - missing dependency: {e}")
         return
 
     try:
@@ -142,8 +156,8 @@ def save_gif_to_wandb(frames, results, episode_num, run_name, metric_name="behav
         # Clean up temp file
         os.unlink(tmp_path)  # delete temp file after uploading
 
-        print(f"✓ GIF recorded at episode {episode_num}: {', '.join(result_strs)}")
+        print(f"GIF recorded at episode {episode_num}: {', '.join(result_strs)}")
 
     except Exception as e:
-        print(f"⚠ GIF recording failed: {e}")
+        print(f"GIF recording failed: {e}")
 #########################################################

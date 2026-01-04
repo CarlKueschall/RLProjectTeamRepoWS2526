@@ -133,7 +133,10 @@ class MetricsTracker:
         if len(self.rolling_outcomes) == 0:
             return 0.0
         rolling_total = len(self.rolling_outcomes)
-        rolling_wins = sum(1 for x in self.rolling_outcomes if x == 1)
+        rolling_wins = 0
+        for x in self.rolling_outcomes:
+            if x == 1:
+                rolling_wins += 1
         return rolling_wins / rolling_total
 
     def get_avg_reward(self, window=None):
