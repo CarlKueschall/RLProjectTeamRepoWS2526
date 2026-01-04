@@ -29,9 +29,13 @@ NTFY_TOPIC=
 # Array to hold timestamps of terminations
 termination_times=()
 
+# Get the directory of this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PARENT_DIR="$(dirname "$SCRIPT_DIR")"
+
 while true; do
-    # Run the command foobar
-    python3 ./run_client.py "$@"
+    # Run in conda environment using conda run with PYTHONPATH set
+    conda run -n py310 env PYTHONPATH="${PARENT_DIR}:${PYTHONPATH}" python ./run_client.py "$@"
 
     # Get the current timestamp
     current_time=$(date +%s)

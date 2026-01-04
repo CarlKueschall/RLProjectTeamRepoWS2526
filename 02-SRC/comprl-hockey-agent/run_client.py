@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import argparse
 import uuid
+import sys
+import os
+import torch
 
 import hockey.hockey_env as h_env
 import numpy as np
 
+# Add parent directory (02-SRC) to path so we can import TD3
+script_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(script_dir)
+sys.path.insert(0, parent_dir)
+from TD3.agents.td3_agent import TD3Agent
 
 from comprl.client import Agent, launch_client
 
@@ -58,6 +66,149 @@ class HockeyAgent(Agent):
         )
 
 
+class TD3HockeyAgent(Agent):
+    """A hockey agent using the TD3 reinforcement learning algorithm."""
+
+    def __init__(self, model_path: str, hidden_actor: list = None, hidden_critic: list = None) -> None:
+        super().__init__()
+
+        # Initialize hockey environment to get spaces
+        env = h_env.HockeyEnv()
+
+        # Load checkpoint first to infer hidden sizes if not provided
+        if model_path:
+            checkpoint = torch.load(model_path)
+            if isinstance(checkpoint, dict) and 'agent_state' in checkpoint:
+                agent_state = checkpoint['agent_state']
+            else:
+                agent_state = checkpoint
+
+            # Infer hidden sizes from checkpoint if not provided
+            if isinstance(agent_state, tuple) and len(agent_state) >= 3:
+                if hidden_actor is None:
+                    # Infer actor hidden sizes from policy state (state[2])
+                    policy_state = agent_state[2]
+                    hidden_actor = self._infer_hidden_sizes_from_state(policy_state)
+
+                if hidden_critic is None:
+                    # Infer critic hidden sizes from Q1 state (state[0])
+                    q1_state = agent_state[0]
+                    hidden_critic = self._infer_hidden_sizes_from_state(q1_state)
+
+        # Use provided or inferred hidden sizes, or defaults
+        if hidden_actor is None:
+            hidden_actor = [256, 256]
+        if hidden_critic is None:
+            hidden_critic = [256, 256, 128]
+
+        # Create the trained TD3 agent with correct hidden sizes
+        self.td3_agent = TD3Agent(
+            observation_space=env.observation_space,
+            action_space=env.action_space,
+            hidden_sizes_actor=hidden_actor,
+            hidden_sizes_critic=hidden_critic
+        )
+
+        # Load trained weights from checkpoint
+        if model_path:
+            # Handle both absolute and relative paths
+            if not os.path.isabs(model_path):
+                model_path = os.path.join(script_dir, model_path)
+
+            model_path = os.path.abspath(model_path)
+            print(f"Loading TD3 model from: {model_path}")
+
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"Model file not found: {model_path}")
+
+            checkpoint = torch.load(model_path)
+            # Handle checkpoint format: if it's a dict with 'agent_state', use that
+            if isinstance(checkpoint, dict) and 'agent_state' in checkpoint:
+                state = checkpoint['agent_state']
+            else:
+                state = checkpoint
+
+            # Fix state dict keys for compatibility with different model versions
+            state = self._fix_state_dict_keys(state)
+
+            self.td3_agent.restore_state(state)
+            print("TD3 model loaded successfully")
+
+        env.close()
+
+    def get_step(self, observation: list[float]) -> list[float]:
+        # Convert list to numpy array
+        obs_array = np.array(observation, dtype=np.float32)
+
+        # Get action from TD3 agent (eps=0.0 disables exploration noise during inference)
+        action = self.td3_agent.act(obs_array, eps=0.0)
+
+        # Hockey environment expects 4 actions, but agent may output more
+        # (e.g., if trained for self-play with dual agents)
+        # Take only the first 4 actions for our player
+        if len(action) > 4:
+            action = action[:4]
+
+        # Ensure action is in valid range [-1, 1] (hockey env expects normalized actions)
+        action = np.clip(action, -1.0, 1.0)
+
+        # Validate action
+        if np.any(np.isnan(action)) or np.any(np.isinf(action)):
+            print(f"Warning: Invalid action (NaN/Inf) detected, replacing with zeros")
+            action = np.zeros(4)
+
+        action_list = action.tolist()
+        return action_list
+
+    def on_start_game(self, game_id) -> None:
+        game_id = uuid.UUID(int=int.from_bytes(game_id, byteorder='big'))
+        print(f"Game started (id: {game_id})")
+
+    def on_end_game(self, result: bool, stats: list[float]) -> None:
+        text_result = "won" if result else "lost"
+        print(
+            f"Game ended: {text_result} with my score: "
+            f"{stats[0]} against the opponent with score: {stats[1]}"
+        )
+
+    @staticmethod
+    def _infer_hidden_sizes_from_state(state_dict):
+        """Infer hidden layer sizes from a state dict by looking at layer shapes."""
+        hidden_sizes = []
+        layer_idx = 0
+        while f'layers.{layer_idx}.weight' in state_dict:
+            weight_shape = state_dict[f'layers.{layer_idx}.weight'].shape
+            hidden_sizes.append(weight_shape[0])
+            layer_idx += 1
+
+        return hidden_sizes if hidden_sizes else [256, 256]
+
+    @staticmethod
+    def _fix_state_dict_keys(state):
+        """Fix state dict keys for compatibility with different model versions.
+
+        Handles renaming of output layer from 'readout' to 'output_layer'.
+        """
+        if isinstance(state, tuple):
+            # State is a tuple of (Q1, Q2, policy)
+            fixed_state = []
+            for state_dict in state:
+                fixed_dict = {}
+                for key, value in state_dict.items():
+                    # Rename readout to output_layer
+                    new_key = key.replace('readout.', 'output_layer.')
+                    fixed_dict[new_key] = value
+                fixed_state.append(fixed_dict)
+            return tuple(fixed_state)
+        else:
+            # Single state dict
+            fixed_dict = {}
+            for key, value in state.items():
+                new_key = key.replace('readout.', 'output_layer.')
+                fixed_dict[new_key] = value
+            return fixed_dict
+
+
 # Function to initialize the agent.  This function is used with `launch_client` below,
 # to lauch the client and connect to the server.
 def initialize_agent(agent_args: list[str]) -> Agent:
@@ -66,9 +217,15 @@ def initialize_agent(agent_args: list[str]) -> Agent:
     parser.add_argument(
         "--agent",
         type=str,
-        choices=["weak", "strong", "random"],
+        choices=["weak", "strong", "random", "td3"],
         default="weak",
         help="Which agent to use.",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="Path to trained TD3 model checkpoint",
     )
     args = parser.parse_args(agent_args)
 
@@ -80,6 +237,8 @@ def initialize_agent(agent_args: list[str]) -> Agent:
         agent = HockeyAgent(weak=False)
     elif args.agent == "random":
         agent = RandomAgent()
+    elif args.agent == "td3":
+        agent = TD3HockeyAgent(model_path=args.model_path)
     else:
         raise ValueError(f"Unknown agent: {args.agent}")
 
