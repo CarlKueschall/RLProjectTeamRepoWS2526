@@ -1,13 +1,13 @@
 # Reinforcement Learning WS 2025/26
 
-**Instructor:** Georg Martius <georg.martius@uni-tuebingen.de>  
-**TAs:** Pavel Kolev, Mikel Zhobro, Sai Ramen  
+**Instructor:** Georg Martius <georg.martius@uni-tuebingen.de>
+**TAs:** Pavel Kolev, Mikel Zhobro, Sai Ramen
 
 ## Final Project
 
-**Competition:** 25.02.2026  
-**In-person (+Zoom) get-together:** 26.02.2025, 14:15-16:00 in N5 (Morgenstelle)  
-**Due Date (Report, Video, and Code):** 27.02.2026, 23:55  
+**Competition:** 25.02.2026
+**In-person (+Zoom) get-together:** 26.02.2025, 14:15-16:00 in N5 (Morgenstelle)
+**Due Date (Report, Video, and Code):** 27.02.2026, 23:55
 **Version:** 1.0 (November 30, 2025)
 
 ---
@@ -23,33 +23,37 @@ All teams will compete against each other in the game at the end. Details on the
 You should have gotten account information for the teaching compute cluster (TCML). This account should be used only for jobs related to this lecture.
 
 ### Final Evaluation Submission
+
 For the final evaluation, you have to prepare and submit:
 
 **(a) A report** using the latex template uploaded to ILIAS next to the project description, with:
-1.  **An introduction**, including a description of the game/problem (1/2 page).
-2.  **A methods section**, including relevant implementation details, modifications and math, e.g. the objective functions of the implemented algorithms (min 1 page per algorithm/person).
-3.  **An experimental evaluation** for all the methods and environments (it needs to include the performance against the basic opponent (weak)). (min 1 page per algorithm/person).
-4.  **A final discussion**, including a comparison of the different algorithms (≈1 page).
+
+1. **An introduction**, including a description of the game/problem (1/2 page).
+2. **A methods section**, including relevant implementation details, modifications and math, e.g. the objective functions of the implemented algorithms (min 1 page per algorithm/person).
+3. **An experimental evaluation** for all the methods and environments (it needs to include the performance against the basic opponent (weak)). (min 1 page per algorithm/person).
+4. **A final discussion**, including a comparison of the different algorithms (≈1 page).
 
 **Report Length constraints:**
-*   Single person: max 5 pages excluding references.
-*   Team of two: max 8 pages excluding references.
-*   Team of three: max 11 pages excluding references.
 
+* Single person: max 5 pages excluding references.
+* Team of two: max 8 pages excluding references.
+* Team of three: max 11 pages excluding references.
 
 **Contribution:** Each team member should have one algorithm implemented and his/her independent contribution should be clearly marked in the report and the source code. Significant modifications of the same base algorithm are possible; for instance, based on DQN, two modifications mentioned in the Rainbow paper [8] would be just significant per person. Just adding some Gaussian noise to the actions would not be significant. For a top grade, self-play or other techniques to account for the “game” aspect are expected.
 
 **Code Usage:**
-*   You implement an algorithm yourself (except the ones we had in the exercises), or
-*   You base your implementation on some existing code (needs to be specified where it comes from) and you make a non-trivial modification. A non-trivial modification is something that is or might be a main contribution in a paper.
-*   AI usage for the coding is to be declared: nothing, use of coding assistants (smart autocompletion), code generation with prompts (specify prompts and which part of the code was generated).
+
+* You implement an algorithm yourself (except the ones we had in the exercises), or
+* You base your implementation on some existing code (needs to be specified where it comes from) and you make a non-trivial modification. A non-trivial modification is something that is or might be a main contribution in a paper.
+* AI usage for the coding is to be declared: nothing, use of coding assistants (smart autocompletion), code generation with prompts (specify prompts and which part of the code was generated).
 
 If in doubt, contact the tutors during the exercise sessions in advance.
 
 **(b) A video-presentation:**
-*   3 min for a single person
-*   4 min for two-person team
-*   6 min for three-person team
+
+* 3 min for a single person
+* 4 min for two-person team
+* 6 min for three-person team
 
 **(c) The source code**
 The submission deadline for the report, video, and code is on **26.02.2025 23:55** via ILIAS.
@@ -57,15 +61,16 @@ The submission deadline for the report, video, and code is on **26.02.2025 23:55
 The code needs to be running in the tournament starting on **24.02 from 10am onward for 12h**. Test runs will happen earlier and will be announced.
 
 ### Requirements
-(a) Teams of two should implement 2 algorithms.  
-(b) Teams of three should implement 3 algorithms.  
-(c) In order to pass the exam report, presentation and code have to be handed in on time.  
+
+(a) Teams of two should implement 2 algorithms.
+(b) Teams of three should implement 3 algorithms.
+(c) In order to pass the exam report, presentation and code have to be handed in on time.
 (d) The code has to run and if the hockey does not work at least a simple environment must be solved.
 
-
 ### Grading
-(a) The mark will be determined based on all parts. You are expected to deliver a nicely written report, a clear presentation, and a good performance.  
-(b) The final mark will be computed from the individual scores with the following weighting: **60% report, 20% presentation, 20% performance.**  
+
+(a) The mark will be determined based on all parts. You are expected to deliver a nicely written report, a clear presentation, and a good performance.
+(b) The final mark will be computed from the individual scores with the following weighting: **60% report, 20% presentation, 20% performance.**
 (c) The minimum performance is measured against the basic opponent (in weak mode). If an agent cannot win against it consistently (more than 55% of times) performance grade is 5.0. If you are not taking part in the tournament, your performance score can only be 3.0. If in the tournament, you consistently win against the strong basic opponent, you get a 2.0. Better marks are given according to the rank in the tournament. The top 3 teams in the competition get an overall bonus of 0.35 marks. For teams until rank 9 the bonus is 0.2 marks.
 
 ---
@@ -73,44 +78,52 @@ The code needs to be running in the tournament starting on **24.02 from 10am onw
 ## Checkpoints
 
 ### 1.1 Checkpoint 1: Get your algorithms up and running
+
 Start with the `Pendulum-v0` from exercise 8 and 9 or with other simple environments. Be aware that some environments (such as the pendulum) contain an exploration problem that is not necessarily quickly solved by all algorithms. You can also try `LunarLander-v2` (exercise 9) or `HalfCheetah`. Important is to see that the reward is optimized and the behavior is reasonable. This should allow you to debug your code.
 
 Implement your algorithms of choice. I recommend to consider off-policy algorithms: Dueling Deep Q-learning (DDQN) [10], Deep deterministic policy gradient (DDPG) [9] or Twin Delayed DDPG (TD3) [4], Soft/Natural Actor Critic (SAC [5]) or model-based algorithms such as Dreamer [6] or TD-MPC [7]. The versions from our exercises can be a good starting point, but need to be modified (as we provided a solution). You can also use existing implementations.
 
 **Inspiration for modifications are:**
-*   Rainbow paper [8] (for DQN)
-*   Pink-noise paper for exploration [3]
-*   CrossQ: batch normalization for DeepRL [1]
-*   RND: enhance exploration by using adding an exploration reward [2]
-*   Two-hot Q: Using the categorical Q-value representation using symexp twohot loss, see page 7 in [6].
+
+* Rainbow paper [8] (for DQN)
+* Pink-noise paper for exploration [3]
+* CrossQ: batch normalization for DeepRL [1]
+* RND: enhance exploration by using adding an exploration reward [2]
+* Two-hot Q: Using the categorical Q-value representation using symexp twohot loss, see page 7 in [6].
 
 Make appropriate analysis and track your performance etc. Don’t forget this procedure during the rest of the project. Remember that you want to create a report with plots giving detail about the training, comparisons etc.
 
 ### 1.2 Checkpoint 2: Hockey – learning to handle the puck
+
 Start working on the Hockey game (see [https://github.com/martius-lab/hockey-env](https://github.com/martius-lab/hockey-env)). The repository provides the environment and a little notebook to see how the environment works. It is actually installable via pip, see the `README.md` file.
 
 The game has some training camp modes that you can test. These are:
-*   `TRAIN_SHOOTING`: hitting a static ball into the goal (other agent is static)
-*   `TRAIN_DEFENSE`: defending your goal against incoming shots (other agent is static)
+
+* `TRAIN_SHOOTING`: hitting a static ball into the goal (other agent is static)
+* `TRAIN_DEFENSE`: defending your goal against incoming shots (other agent is static)
 
 However, it usually does not help much to train the agent in stages, so you finally need to train using `NORMAL` normal gameplay against another agent.
 
 You can enable the game-modes with `HockeyEnv(mode=NORMAL|TRAIN_SHOOTING|TRAIN_DEFENSE)`.
 
 ### 1.3 Checkpoint 3: Play in normal mode against the basic opponent
+
 The basic opponent has a weak and a strong mode. Train your agent against it in normal game mode. Think how to exploit the fact that you are using an off-policy algorithm.
 
 ### 1.4 Checkpoint 4: Self-play
+
 Let your agents play against each other in normal game mode. Make appropriate analysis and track your performance etc. Experiment with different tournament modes.
 
 ### 1.5 Final
+
 For the final tournament, teams have to connect to the tournament server with a special client (see [https://github.com/martius-lab/comprl-hockey-agent](https://github.com/martius-lab/comprl-hockey-agent), check for updates). The host address of the server is `comprl.cs.uni-tuebingen.de` and the port is `65335`. Is not live yet. A message in the forum will be posted. It also has an http interface that you need to register etc.
 
 Please check the provided `run_client.py` file and implement an Agent following the HockeyAgent example. The actions are supposed to be a list of actions.
 
 **Number of algorithms:**
-*   Each member should run their algorithm in the tournament (`teamname_algoname`)
-*   Each team as a whole can have an additional team agent (`teamname`)
+
+* Each member should run their algorithm in the tournament (`teamname_algoname`)
+* Each team as a whole can have an additional team agent (`teamname`)
 
 The best of the agents per team is used for the potential team bonus.
 
@@ -126,17 +139,14 @@ To participate in the final tournament, your agent should primarily be trained b
 
 So you can use your own computer or create an interactive job at the cluster to run your agents during the competition. We suggest you have two instances per agent running at the same time. To run multiple instances of a client, here is an example using a tmux session via ssh:
 
-1.  Connect via ssh from your local machine to the remote machine:  
-    `local> ssh $remote_machine`
-2.  Change to the directory with the client:  
-    `remote_machine> cd $dir_with_client`
-3.  Start a tmux session:  
-    `remote_machine> tmux`
-4.  Start the first instance by running your script.
-5.  Press `<ctrl>-b c` (first control+b together and afterwards c) to open a new window. Start the next instance either with the same name (they will play in parallel) or with a different name.
-6.  If all your instances are up and running you can detach the tmux session with `<ctrl>+b d` and logout.
-7.  If you login again later, you can re-attach your session with:  
-    `remote_machine> tmux a`
+1. Connect via ssh from your local machine to the remote machine:`local> ssh $remote_machine`
+2. Change to the directory with the client:`remote_machine> cd $dir_with_client`
+3. Start a tmux session:`remote_machine> tmux`
+4. Start the first instance by running your script.
+5. Press `<ctrl>-b c` (first control+b together and afterwards c) to open a new window. Start the next instance either with the same name (they will play in parallel) or with a different name.
+6. If all your instances are up and running you can detach the tmux session with `<ctrl>+b d` and logout.
+7. If you login again later, you can re-attach your session with:
+   `remote_machine> tmux a`
 
 ---
 

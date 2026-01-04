@@ -1,18 +1,18 @@
 import numpy as np
 
 
-class V10RewardShaper:
+class StrategicRewardShaper:
     ######################################################
-    # V10 strategic reward shaping with opponent awareness and diversity bonuses.
+    # Strategic reward shaping with opponent awareness and diversity bonuses.
     ######################################################
     def __init__(self):
         #########################################################
-        # Initialize V10 reward shaper.
+        # Initialize strategic reward shaper.
         self.reset()
 
     def compute(self, obs_next, info, dist_to_puck):
         #########################################################
-        # Compute V10 strategic bonuses for a single step.
+        # Compute strategic bonuses for a single step.
         #########################################################
         #Arguments:
         # obs_next: Next observation (18 dims)
@@ -34,12 +34,13 @@ class V10RewardShaper:
 
         #########################################################
         # Extract positions
+        #########################################################
         puck_x, puck_y = obs_next[12], obs_next[13]
         puck_velocity_x = obs_next[14]
         opponent_x, opponent_y = obs_next[6], obs_next[7]
 
         #########################################################
-        # === METHOD 1: Environment's PHYSICS-BASED touch detection ===
+        # Environment's physics-based touch detection
         #########################################################
         env_touch_reward = info.get('reward_touch_puck', 0.0)
         env_closeness_reward = info.get('reward_closeness_to_puck', 0.0)
@@ -50,24 +51,24 @@ class V10RewardShaper:
         #########################################################
         if env_touch_reward > 0:
             self.puck_touches += 1
-            bonuses['puck_touches'] = env_touch_reward * 0.3  # V10: Reduced from 0.8 → 0.3, was too high before
+            bonuses['puck_touches'] = env_touch_reward * 0.3  # Reduced from 0.8 → 0.3, was too high before
 
         # FIX 1: Had to cut closeness reward in half (0.2 -> 0.1), was giving too much
-        bonuses['proximity'] = env_closeness_reward * 0.1  # V10: Reduced from 0.2 → 0.1
+        bonuses['proximity'] = env_closeness_reward * 0.1  # Reduced from 0.2 → 0.1
 
         #########################################################
         # FIX 1: Dropped puck direction reward from 0.6 -> 0.2, this was causing wild shooting
         # This was a major contributor to wild shooting (0.6 * 250 steps = 150 total!)
-        bonuses['direction'] = env_puck_direction * 0.2  # V10: Reduced from 0.6 → 0.2, was causing chaos
+        bonuses['direction'] = env_puck_direction * 0.2  # Reduced from 0.6 → 0.2, was causing chaos
 
         # FIX 1: Lowered goal proximity reward from 0.233 -> 0.1, need less dense rewards
         opponent_goal_x = 2.5  # Opponent's goal position (right side)
         puck_goal_dist = abs(opponent_goal_x - puck_x)
         if puck_goal_dist < 1.5:  # Puck is near opponent's goal
-            bonuses['goal_proximity'] = (1.5 - puck_goal_dist) * 0.1  # V10: Reduced (max +0.15), less dense reward
+            bonuses['goal_proximity'] = (1.5 - puck_goal_dist) * 0.1  # Reduced (max +0.15), less dense reward
 
         #########################################################
-        # === FIX 2: Adding opponent-aware shooting, check if they're blocking ===
+        # FIX 2: Adding opponent-aware shooting, check if they're blocking
         #########################################################
         if dist_to_puck < 0.8 and puck_velocity_x > 0.5:  # Near puck and moving toward goal
             # Check if opponent is blocking the shot path
@@ -109,12 +110,12 @@ class V10RewardShaper:
                         self.attack_sides.append('center')
 
         #########################################################
-        # === METHOD 2: Backup distance-based touch detection ===
+        # Backup distance-based touch detection
         # In case env rewards aren't working, use our own with larger threshold
         # FIX 1: Cutting proximity bonus in half (0.2 -> 0.1) here too
         if dist_to_puck < 0.5 and env_touch_reward == 0:
             # Only give our reward if env didn't detect touch
-            proximity_bonus = (0.5 - dist_to_puck) * 0.1  # V10: Reduced (max +0.05)
+            proximity_bonus = (0.5 - dist_to_puck) * 0.1  # Reduced (max +0.05)
             bonuses['proximity'] += proximity_bonus
             if dist_to_puck < 0.3:  # More generous touch threshold
                 self.puck_touches += 1  # Count our own touches too
@@ -199,3 +200,4 @@ class V10RewardShaper:
         self.avg_opponent_movement = 0.0
         self.diversity_bonus = 0.0
         self.forcing_bonus = 0.0
+

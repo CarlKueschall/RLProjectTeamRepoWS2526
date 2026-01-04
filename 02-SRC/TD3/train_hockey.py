@@ -18,7 +18,7 @@ from evaluation import evaluate_vs_opponent
 from visualization import create_gif_for_wandb, save_gif_to_wandb
 from metrics import MetricsTracker
 from opponents import SelfPlayManager, FixedOpponent
-from rewards import PBRSReward, V10RewardShaper
+from rewards import PBRSReward, StrategicRewardShaper
 
 
 def train(args):
@@ -229,7 +229,7 @@ def train(args):
     if args.reward_shaping and args.self_play_start > 0:
         pbrs_shaper.set_self_play_start(args.self_play_start)  # anneal during self-play
 
-    v10_shaper = V10RewardShaper()
+    strategic_shaper = StrategicRewardShaper()
 
     #########################################################
     # Initialize self-play manager
@@ -309,7 +309,7 @@ def train(args):
         #########################################################
         # Reset shapers and trackers for new episode
         #########################################################
-        v10_shaper.reset()
+        strategic_shaper.reset()
         pbrs_shaper.reset()
         tracker.reset_episode()
 
@@ -382,18 +382,18 @@ def train(args):
                 pbrs_bonus = 0.0
 
             #########################################################
-            # V10 strategic bonuses
+            # Strategic bonuses
             #########################################################
             dist_to_puck = np.sqrt((obs_next[0] - obs_next[12])**2 + (obs_next[1] - obs_next[13])**2)  # distance to puck
-            v10_bonuses = v10_shaper.compute(obs_next, info, dist_to_puck)
+            strategic_bonuses = strategic_shaper.compute(obs_next, info, dist_to_puck)
 
             # Record opponent position for forcing metric
             if args.reward_shaping:
-                v10_shaper.record_opponent_position([obs_next[6], obs_next[7]])  # track where opponent is
+                strategic_shaper.record_opponent_position([obs_next[6], obs_next[7]])  # track where opponent is
 
-            # Apply V10 bonuses
-            for bonus_name, bonus_value in v10_bonuses.items():
-                r1_shaped += bonus_value  # add all the v10 bonuses
+            # Apply strategic bonuses
+            for bonus_name, bonus_value in strategic_bonuses.items():
+                r1_shaped += bonus_value  # add all the strategic bonuses
 
             #########################################################
             # Store transition
@@ -463,9 +463,9 @@ def train(args):
             agent2.decay_epsilon()
 
         #########################################################
-        # V10 episode-end bonuses
+        # Strategic episode-end bonuses
         #########################################################
-        end_bonuses = v10_shaper.compute_episode_end_bonuses()  # diversity and forcing bonuses
+        end_bonuses = strategic_shaper.compute_episode_end_bonuses()  # diversity and forcing bonuses
         for bonus_name, bonus_value in end_bonuses.items():
             episode_reward_p1 += bonus_value
 
@@ -473,7 +473,7 @@ def train(args):
         # Update tracker
         #########################################################
         tracker.add_episode_result(episode_reward_p1, episode_step_count, winner)
-        tracker.add_v10_stats(v10_shaper.get_episode_stats())
+        tracker.add_strategic_stats(strategic_shaper.get_episode_stats())
         tracker.add_pbrs_total(pbrs_bonus)
 
         #########################################################
@@ -526,17 +526,17 @@ def train(args):
                     log_metrics["pbrs/annealing_weight"] = pbrs_shaper.get_annealing_weight(i_episode)
 
                 #########################################################
-                # V10 Strategic Reward Shaping metrics
+                # Strategic reward shaping metrics
                 #########################################################
-                if tracker.v10_stats:
-                    log_metrics["v10/shots_clear"] = tracker.v10_stats.get('shots_clear', 0)
-                    log_metrics["v10/shots_blocked"] = tracker.v10_stats.get('shots_blocked', 0)
-                    log_metrics["v10/shot_quality_ratio"] = tracker.v10_stats.get('shot_quality_ratio', 0.0)
-                    log_metrics["v10/attack_sides_unique"] = tracker.v10_stats.get('attack_sides_unique', 0)
-                    log_metrics["v10/attack_diversity_bonus"] = tracker.v10_stats.get('attack_diversity_bonus', 0.0)
-                    log_metrics["v10/opponent_total_movement"] = tracker.v10_stats.get('total_opponent_movement', 0.0)
-                    log_metrics["v10/opponent_avg_movement"] = tracker.v10_stats.get('avg_opponent_movement', 0.0)
-                    log_metrics["v10/forcing_bonus"] = tracker.v10_stats.get('forcing_bonus', 0.0)
+                if tracker.strategic_stats:
+                    log_metrics["strategic/shots_clear"] = tracker.strategic_stats.get('shots_clear', 0)
+                    log_metrics["strategic/shots_blocked"] = tracker.strategic_stats.get('shots_blocked', 0)
+                    log_metrics["strategic/shot_quality_ratio"] = tracker.strategic_stats.get('shot_quality_ratio', 0.0)
+                    log_metrics["strategic/attack_sides_unique"] = tracker.strategic_stats.get('attack_sides_unique', 0)
+                    log_metrics["strategic/attack_diversity_bonus"] = tracker.strategic_stats.get('attack_diversity_bonus', 0.0)
+                    log_metrics["strategic/opponent_total_movement"] = tracker.strategic_stats.get('total_opponent_movement', 0.0)
+                    log_metrics["strategic/opponent_avg_movement"] = tracker.strategic_stats.get('avg_opponent_movement', 0.0)
+                    log_metrics["strategic/forcing_bonus"] = tracker.strategic_stats.get('forcing_bonus', 0.0)
 
             if args.self_play_start > 0:
                 log_metrics.update(self_play_manager.get_stats())

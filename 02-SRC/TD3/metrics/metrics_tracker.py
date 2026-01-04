@@ -35,8 +35,8 @@ class MetricsTracker:
 
         # PBRS tracking
         self.pbrs_totals = []
-        # V10 stats
-        self.v10_stats = {}
+        # Strategic stats
+        self.strategic_stats = {}
         # Per-episode tracking (reset each episode)
         self._episode_step_rewards = []
         self._episode_action_magnitudes = []
@@ -62,7 +62,7 @@ class MetricsTracker:
         self.goals_scored = 0
         self.goals_conceded = 0
         self.pbrs_totals = []
-        self.v10_stats = {}
+        self.strategic_stats = {}
         self._last_eval = {}
         self._peak_eval = {}
 
@@ -115,9 +115,9 @@ class MetricsTracker:
     #     decisive_games = self.wins + self.losses
     #     return self.wins / decisive_games if decisive_games > 0 else 0
 
-    def add_v10_stats(self, stats):
-        # Add V10 reward shaping stats
-        self.v10_stats.update(stats)
+    def add_strategic_stats(self, stats):
+        # Add strategic reward shaping stats
+        self.strategic_stats.update(stats)
 
     def add_pbrs_total(self, pbrs_total):
         # Add total PBRS reward for an episode
