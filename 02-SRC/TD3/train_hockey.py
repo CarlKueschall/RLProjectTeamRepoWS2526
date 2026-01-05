@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import wandb
 from tqdm import tqdm
+from gymnasium import spaces
 
 import hockey.hockey_env as h_env
 from hockey.hockey_env import BasicOpponent, Mode
@@ -136,10 +137,18 @@ def train(args):
     #########################################################
     # Initialize agent
     #########################################################
+    # Create single-player action space (4 dimensions, not 8)
+    single_player_action_space = spaces.Box(
+        low=-1.0,
+        high=1.0,
+        shape=(4,),
+        dtype=np.float32
+    )
+
     # create the TD3 agent with all the hyperparams
     agent = TD3Agent(
         env.observation_space,
-        env.action_space,
+        single_player_action_space,
         eps=args.eps,
         eps_min=args.eps_min,
         eps_decay=args.eps_decay,
@@ -198,7 +207,7 @@ def train(args):
     if args.opponent == 'self':  # self-play mode, need two agents
         agent2 = TD3Agent(
             env.observation_space,
-            env.action_space,
+            single_player_action_space,
             eps=args.eps,
             eps_min=args.eps_min,
             eps_decay=args.eps_decay,
@@ -339,6 +348,7 @@ def train(args):
         #########################################################
         episode_reward_p1 = 0
         episode_step_count = 0
+        winner = 0  # Initialize winner (default to tie)
 
         for t in range(max_timesteps):
             global_step += 1

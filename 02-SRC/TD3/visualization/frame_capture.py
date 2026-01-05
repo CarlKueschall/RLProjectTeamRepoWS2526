@@ -18,10 +18,7 @@ def record_episode_frames(env, agent, opponent, mode, max_timesteps, eps=0.0,
         # Opponent action: use self-play opponent if provided, otherwise use fixed opponent
         if self_play_opponent is not None:
             # Use self-play opponent (recorded GIFs during self-play)
-            import torch
-            with torch.no_grad():
-                obs_tensor = torch.FloatTensor(obs_agent2).unsqueeze(0).to(agent.device)
-                action2 = self_play_opponent(obs_tensor).cpu().numpy()[0]
+            action2 = self_play_opponent.act(obs_agent2, eps=0.0)
         else:
             # Use fixed opponent (weak/strong)
             action2 = opponent.act(obs_agent2)

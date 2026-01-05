@@ -77,6 +77,13 @@ def get_max_timesteps(mode):
         return 80
 
 
+def prepare_observation(obs):
+    #########################################################
+    # Prepare observation for agent (no truncation needed)
+    #########################################################
+    return obs
+
+
 def load_checkpoint(agent, checkpoint_path: str, device: torch.device):
     #########################################################
     # Load agent state from checkpoint
@@ -172,9 +179,22 @@ def test(args):
     #########################################################
     # Create agent with architecture matching checkpoint
     #########################################################
+    # The checkpoint was trained with obs_dim=18 and agent outputs 4-dim actions
+    # The environment takes 8-dim actions (4 per player), but agent only outputs 4
+    from gymnasium import spaces
+    obs_space = env.observation_space
+    # Agent observes full 18-dim observation (not truncated)
+
+    # Create agent action space - only 4 dims (agent's own actions, not environment's 8)
+    agent_action_space = spaces.Box(
+        low=env.action_space.low[:4],
+        high=env.action_space.high[:4],
+        dtype=env.action_space.dtype
+    )
+
     agent = TD3Agent(
-        env.observation_space,
-        env.action_space,
+        obs_space,
+        agent_action_space,
         force_cpu=(device.type == 'cpu'),
         hidden_sizes_actor=args.hidden_actor,
         hidden_sizes_critic=args.hidden_critic,
@@ -227,7 +247,9 @@ def test(args):
     #########################################################
     for episode in tqdm(range(args.episodes), desc="Testing"):
         obs, info = env.reset()
+        obs = prepare_observation(obs)
         obs_agent2 = env.obs_agent_two()
+        obs_agent2 = prepare_observation(obs_agent2)
         # FIX: Mirror angles for P2
         obs_agent2[2] = np.arctan2(-np.sin(obs_agent2[2]), -np.cos(obs_agent2[2]))
         obs_agent2[8] = np.arctan2(-np.sin(obs_agent2[8]), -np.cos(obs_agent2[8]))
@@ -257,6 +279,7 @@ def test(args):
 
             # Step environment
             obs, r1, done, truncated, info = env.step(action_combined)
+            obs = prepare_observation(obs)
 
             # Get agent 2's reward
             r2 = env.get_reward_agent_two(info)  # opponent's reward
@@ -266,8 +289,9 @@ def test(args):
 
             #########################################################
             # Update observations
-            
+
             obs_agent2 = env.obs_agent_two()
+            obs_agent2 = prepare_observation(obs_agent2)
             # FIX: Mirror angles for P2
             obs_agent2[2] = np.arctan2(-np.sin(obs_agent2[2]), -np.cos(obs_agent2[2]))
             obs_agent2[8] = np.arctan2(-np.sin(obs_agent2[8]), -np.cos(obs_agent2[8]))

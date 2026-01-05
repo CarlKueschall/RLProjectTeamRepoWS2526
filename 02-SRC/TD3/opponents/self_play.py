@@ -249,13 +249,26 @@ class SelfPlayManager:
                 policy_state = opponent_state
 
             #########################################################
-             # Create opponent network if neede
+             # Create opponent network if needed
             if self.opponent is None:
                 #########################################################
                 # Need to infer sizes from policy_state
-                readout_shape = policy_state.get('readout.weight', 'N/A').shape if isinstance(policy_state, dict) else 'N/A'
-                output_size = readout_shape[1] if readout_shape != 'N/A' else 4
-                input_size = policy_state.get('0.weight', 'N/A').shape[1] if isinstance(policy_state, dict) else 18
+                # Handle missing keys properly - check if key exists and is a tensor
+                output_size = 4  # default
+                input_size = 18  # default
+
+                if isinstance(policy_state, dict):
+                    # Try to get output size from readout.weight or output_layer.weight
+                    if 'readout.weight' in policy_state:
+                        output_size = policy_state['readout.weight'].shape[0]
+                    elif 'output_layer.weight' in policy_state:
+                        output_size = policy_state['output_layer.weight'].shape[0]
+
+                    # Try to get input size from layers.0.weight or 0.weight
+                    if 'layers.0.weight' in policy_state:
+                        input_size = policy_state['layers.0.weight'].shape[1]
+                    elif '0.weight' in policy_state:
+                        input_size = policy_state['0.weight'].shape[1]
 
                 self.opponent = TD3Agent(
                     input_size=input_size,
