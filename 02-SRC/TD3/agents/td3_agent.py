@@ -489,9 +489,11 @@ class TD3Agent:
                     # Same penalty: make active better than passive
                     q2_wrong_ordering = torch.relu(q2_passive - q2_active)
                     vf_reg_q2 = vf_reg_lambda * q2_wrong_ordering.mean()
-            q2_loss_value = self.Q2.fit(s, a, target_q, weights=is_weights, regularization=vf_reg_q2) 
-        
-            q2_loss_value = self.Q2.fit(s, a, target_q, weights=is_weights, regularization=vf_reg_q2)
+            
+            # Detach target_q to avoid backward through graph twice
+            # target_q is computed in no_grad() context, but detaching explicitly ensures no graph issues
+            target_q_detached = target_q.detach() if isinstance(target_q, torch.Tensor) else target_q
+            q2_loss_value = self.Q2.fit(s, a, target_q_detached, weights=is_weights, regularization=vf_reg_q2)
             avg_critic_loss = (q1_loss_value + q2_loss_value) / 2
 
             if self.total_steps % self._config["policy_freq"] == 0:

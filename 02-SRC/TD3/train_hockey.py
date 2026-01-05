@@ -541,25 +541,46 @@ def train(args):
             if args.self_play_start > 0:
                 log_metrics.update(self_play_manager.get_stats())
 
-                #########################################################
-                # Periodic evaluation
-                #########################################################
-                if i_episode % args.eval_interval == 0:
-                    print(f"\nEvaluating vs WEAK opponent...")
-                    eval_weak = evaluate_vs_opponent(
-                        agent, weak_eval_bot, mode=mode,
-                        num_episodes=100, max_timesteps=max_timesteps, eval_seed=args.seed
-                    )
-                    log_metrics["eval/vs_weak_win_rate"] = eval_weak['win_rate']
-                    log_metrics["eval/vs_weak_win_rate_decisive"] = eval_weak['win_rate_decisive']
-                    log_metrics["eval/vs_weak_tie_rate"] = eval_weak['tie_rate']
-                    log_metrics["eval/vs_weak_loss_rate"] = eval_weak['loss_rate']
-                    log_metrics["eval/vs_weak_avg_reward"] = eval_weak['avg_reward']
-                    print(f"   [EVAL] vs weak: {eval_weak['win_rate']:.1%} W/L/T")
+            #########################################################
+            # Periodic evaluation (always runs against both weak and strong)
+            #########################################################
+            if i_episode % args.eval_interval == 0:
+                print(f"\nEvaluating vs WEAK opponent...")
+                eval_weak = evaluate_vs_opponent(
+                    agent, weak_eval_bot, mode=mode,
+                    num_episodes=100, max_timesteps=max_timesteps, eval_seed=args.seed
+                )
+                log_metrics["eval/vs_weak_win_rate"] = eval_weak['win_rate']
+                log_metrics["eval/vs_weak_win_rate_decisive"] = eval_weak['win_rate_decisive']
+                log_metrics["eval/vs_weak_tie_rate"] = eval_weak['tie_rate']
+                log_metrics["eval/vs_weak_loss_rate"] = eval_weak['loss_rate']
+                log_metrics["eval/vs_weak_avg_reward"] = eval_weak['avg_reward']
+                print(f"   [EVAL] vs weak: {eval_weak['win_rate']:.1%} W/L/T")
 
-                    #########################################################
-                    # Update self-play manager with eval results
-                    #########################################################
+                # Also evaluate vs strong
+                print(f"Evaluating vs STRONG opponent...")
+                eval_strong = evaluate_vs_opponent(
+                    agent, strong_eval_bot, mode=mode,
+                    num_episodes=100, max_timesteps=max_timesteps, eval_seed=args.seed
+                )
+                log_metrics["eval/vs_strong_win_rate"] = eval_strong['win_rate']
+                log_metrics["eval/vs_strong_win_rate_decisive"] = eval_strong['win_rate_decisive']
+                log_metrics["eval/vs_strong_tie_rate"] = eval_strong['tie_rate']
+                log_metrics["eval/vs_strong_loss_rate"] = eval_strong['loss_rate']
+                log_metrics["eval/vs_strong_avg_reward"] = eval_strong['avg_reward']
+                print(f"   [EVAL] vs strong: {eval_strong['win_rate']:.1%} W/L/T")
+
+                #########################################################
+                # Track eval results
+                #########################################################
+                tracker.set_last_eval('weak', eval_weak['win_rate_decisive'])
+                tracker.set_peak_eval('weak', max(tracker.get_peak_eval('weak'), eval_weak['win_rate_decisive']))
+                tracker.set_last_eval('strong', eval_strong['win_rate_decisive'])
+
+                #########################################################
+                # Update self-play manager with eval results (if self-play enabled)
+                #########################################################
+                if args.self_play_start > 0:
                     if self_play_manager.dynamic_anchor_mixing:
                         last_eval = tracker.get_last_eval('weak')
                         peak_eval = tracker.get_peak_eval('weak')
@@ -576,26 +597,8 @@ def train(args):
                             if rollback_path and Path(rollback_path).exists():
                                 checkpoint = torch.load(rollback_path, map_location=device)
                                 agent.restore_state(checkpoint['agent_state'])
-
-                    # Also evaluate vs strong
-                    print(f"Evaluating vs STRONG opponent...")
-                    eval_strong = evaluate_vs_opponent(
-                        agent, strong_eval_bot, mode=mode,
-                        num_episodes=100, max_timesteps=max_timesteps, eval_seed=args.seed
-                    )
-                    log_metrics["eval/vs_strong_win_rate"] = eval_strong['win_rate']
-                    log_metrics["eval/vs_strong_win_rate_decisive"] = eval_strong['win_rate_decisive']
-                    log_metrics["eval/vs_strong_tie_rate"] = eval_strong['tie_rate']
-                    log_metrics["eval/vs_strong_loss_rate"] = eval_strong['loss_rate']
-                    log_metrics["eval/vs_strong_avg_reward"] = eval_strong['avg_reward']
-                    print(f"   [EVAL] vs strong: {eval_strong['win_rate']:.1%} W/L/T")
-
-                    #########################################################
-                    # Track eval results
-                    #########################################################
-                    tracker.set_last_eval('weak', eval_weak['win_rate_decisive'])
-                    tracker.set_peak_eval('weak', max(tracker.get_peak_eval('weak'), eval_weak['win_rate_decisive']))
-                    tracker.set_last_eval('strong', eval_strong['win_rate_decisive'])
+                            else:
+                                print(f"WARNING: Rollback path not found or invalid: {rollback_path}")
 
                 print("")
 
@@ -687,6 +690,15 @@ def train(args):
             if not args.no_wandb:
                 wandb.save(str(checkpoint_path))
             print(f'--- Checkpoint saved: {checkpoint_path.name} ---')
+            
+            # Update best checkpoint for regression rollback if enabled
+            if args.self_play_start > 0 and self_play_manager.regression_rollback:
+                # Check if this checkpoint corresponds to the best eval we've seen
+                # (check_regression updates best_eval_vs_weak when it finds a new best)
+                last_eval = tracker.get_last_eval('weak')
+                if last_eval is not None and abs(last_eval - self_play_manager.best_eval_vs_weak) < 0.001:
+                    # This checkpoint corresponds to the best eval (within small tolerance for float comparison)
+                    self_play_manager.set_best_checkpoint(str(checkpoint_path))
 
     #########################################################
     # Final summary

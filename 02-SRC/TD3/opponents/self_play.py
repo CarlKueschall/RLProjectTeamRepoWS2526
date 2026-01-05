@@ -355,6 +355,9 @@ class SelfPlayManager:
                 
                 print(f"Regression detected! Dropping {drop_from_best:.1%} from best")
                 return True, self.best_checkpoint_path
+            else:
+                # Regression detected but need more consecutive drops
+                return False, None
         else:
             
             # Minor drop or stable
