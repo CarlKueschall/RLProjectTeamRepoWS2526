@@ -37,8 +37,9 @@ def parse_args():
                         help='Use deterministic policy (no exploration noise)')
     parser.add_argument('--no_deterministic', dest='deterministic', action='store_false',
                         help='Use stochastic policy (with exploration noise)')
-
-
+    # Tournament behavior testing
+    parser.add_argument('--no-alternation', action='store_true', default=False,
+                        help='Disable starting position alternation (simulate tournament behavior)')
 
 
 
@@ -246,13 +247,64 @@ def test(args):
     # Testing loop
     #########################################################
     for episode in tqdm(range(args.episodes), desc="Testing"):
-        obs, info = env.reset()
+        # Reset with or without position alternation based on flag
+        if args.no_alternation:
+            # Simulate tournament behavior: always defensive position (one_starting=False)
+            obs, info = env.reset(one_starting=False)
+        else:
+            # Normal behavior: alternate starting positions
+            obs, info = env.reset()
         obs = prepare_observation(obs)
         obs_agent2 = env.obs_agent_two()
         obs_agent2 = prepare_observation(obs_agent2)
         # FIX: Mirror angles for P2
         obs_agent2[2] = np.arctan2(-np.sin(obs_agent2[2]), -np.cos(obs_agent2[2]))
         obs_agent2[8] = np.arctan2(-np.sin(obs_agent2[8]), -np.cos(obs_agent2[8]))
+
+        # DIAGNOSTIC: Log first episode observations
+        if episode == 0:
+            print(f"\n{'='*70}")
+            print(f"LOCAL TEST DIAGNOSTIC: First Episode Observation Analysis")
+            print(f"MODE: {'Tournament (no alternation)' if args.no_alternation else 'Normal (with alternation)'}")
+            print(f"{'='*70}")
+
+            print(f"\nPLAYER 1 (Agent) Observations:")
+            print(f"  Full obs: {obs}")
+            print(f"  Player 1 pos (0-1):    {obs[0:2]}")
+            print(f"  Player 1 angle (2):    {obs[2]:.4f}")
+            print(f"  Player 1 vel (3-4):    {obs[3:5]}")
+            print(f"  Player 1 ang vel (5):  {obs[5]:.4f}")
+            print(f"  Player 2 pos (6-7):    {obs[6:8]}")
+            print(f"  Player 2 angle (8):    {obs[8]:.4f}")
+            print(f"  Player 2 vel (9-10):   {obs[9:11]}")
+            print(f"  Player 2 ang vel (11): {obs[11]:.4f}")
+            print(f"  Puck pos (12-13):      {obs[12:14]}")
+            print(f"  Puck vel (14-15):      {obs[14:16]}")
+
+            print(f"\nPLAYER 2 (Opponent) Observations (mirrored + angle fix):")
+            print(f"  Full obs: {obs_agent2}")
+            print(f"  Player 2 pos (0-1):    {obs_agent2[0:2]}")
+            print(f"  Player 2 angle (2):    {obs_agent2[2]:.4f}")
+            print(f"  Player 2 vel (3-4):    {obs_agent2[3:5]}")
+            print(f"  Player 2 ang vel (5):  {obs_agent2[5]:.4f}")
+            print(f"  Player 1 pos (6-7):    {obs_agent2[6:8]}")
+            print(f"  Player 1 angle (8):    {obs_agent2[8]:.4f}")
+            print(f"  Player 1 vel (9-10):   {obs_agent2[9:11]}")
+            print(f"  Player 1 ang vel (11): {obs_agent2[11]:.4f}")
+            print(f"  Puck pos (12-13):      {obs_agent2[12:14]}")
+            print(f"  Puck vel (14-15):      {obs_agent2[14:16]}")
+
+            print(f"\nComparison:")
+            print(f"  Player 1 obs X: {obs[0]:.4f} (should be negative/left for defensive)")
+            print(f"  Player 2 obs X: {obs[6]:.4f} (should be positive/right)")
+            print(f"  Puck X: {obs[12]:.4f}")
+            print(f"  Player 1 X mirrored for P2: {obs_agent2[6]:.4f} (negated)")
+
+            print(f"\nObservation Statistics:")
+            print(f"  Player 1 obs - Min: {np.min(obs):.4f}, Max: {np.max(obs):.4f}, Mean: {np.mean(obs):.4f}, Std: {np.std(obs):.4f}")
+            print(f"  Player 2 obs - Min: {np.min(obs_agent2):.4f}, Max: {np.max(obs_agent2):.4f}, Mean: {np.mean(obs_agent2):.4f}, Std: {np.std(obs_agent2):.4f}")
+            print(f"{'='*70}\n")
+
         agent.reset()
         if agent2:
             agent2.reset()  # reset second agent too
@@ -348,6 +400,10 @@ def test(args):
     #########################################################
     print("###############################")
     print(f"Test Results: Hockey ({args.mode} vs {args.opponent})")
+    if args.no_alternation:
+        print("MODE: Tournament (no alternation - always defensive position)")
+    else:
+        print("MODE: Normal (with starting position alternation)")
     print("###############################")
     print(f"Episodes played:    {args.episodes}")
     print()

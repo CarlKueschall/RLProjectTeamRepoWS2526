@@ -154,6 +154,73 @@ class TD3HockeyAgent(Agent):
         # Convert list to numpy array
         obs_array = np.array(observation, dtype=np.float32)
 
+        # DIAGNOSTIC: Comprehensive observation analysis
+        if not hasattr(self, '_obs_diagnostic_done'):
+            print(f"\n{'='*70}")
+            print(f"TOURNAMENT AGENT DIAGNOSTIC: First Observation Analysis")
+            print(f"{'='*70}")
+            print(f"Observation dimensions: {len(obs_array)}")
+            print(f"\nRaw observation values:")
+            print(f"  Full obs: {obs_array}")
+
+            print(f"\nObservation breakdown (assuming hockey env):")
+            print(f"  Player 1 pos (0-1):    {obs_array[0:2]}")
+            print(f"  Player 1 angle (2):    {obs_array[2]:.4f}")
+            print(f"  Player 1 vel (3-4):    {obs_array[3:5]}")
+            print(f"  Player 1 ang vel (5):  {obs_array[5]:.4f}")
+            print(f"  Player 2 pos (6-7):    {obs_array[6:8]}")
+            print(f"  Player 2 angle (8):    {obs_array[8]:.4f}")
+            print(f"  Player 2 vel (9-10):   {obs_array[9:11]}")
+            print(f"  Player 2 ang vel (11): {obs_array[11]:.4f}")
+            print(f"  Puck pos (12-13):      {obs_array[12:14]}")
+            print(f"  Puck vel (14-15):      {obs_array[14:16]}")
+            if len(obs_array) > 16:
+                print(f"  Extra (16-17):         {obs_array[16:18]}")
+
+            print(f"\nPerspective Detection:")
+            # Check if this looks like Player 1 or Player 2 (mirrored) perspective
+            player1_x = obs_array[0]
+            player2_x = obs_array[6]
+            puck_x = obs_array[12]
+
+            print(f"  Player 1 X position: {player1_x:.4f}")
+            print(f"  Player 2 X position: {player2_x:.4f}")
+            print(f"  Puck X position: {puck_x:.4f}")
+
+            # In normal game: Player 1 on left (negative X), Player 2 on right (positive X)
+            # If mirrored: positions would be flipped
+            if player1_x < 0:
+                print(f"  ✓ Looks like NORMAL perspective (Player 1 on left)")
+                self._player_perspective = "NORMAL"
+            elif player1_x > 0:
+                print(f"  ⚠ Looks like MIRRORED perspective (Player 1 on right - unusual!)")
+                self._player_perspective = "MIRRORED"
+            else:
+                print(f"  ? Centered - cannot determine perspective")
+                self._player_perspective = "UNKNOWN"
+
+            print(f"  Inferred: Agent is playing as {'Player 1' if self._player_perspective == 'NORMAL' else 'Player 2 (mirrored)'}")
+
+            print(f"\nObservation Statistics:")
+            print(f"  Min: {np.min(obs_array):.4f}")
+            print(f"  Max: {np.max(obs_array):.4f}")
+            print(f"  Mean: {np.mean(obs_array):.4f}")
+            print(f"  Std: {np.std(obs_array):.4f}")
+            print(f"{'='*70}\n")
+
+            self._obs_diagnostic_done = True
+            self._sample_count = 0
+            self._obs_samples = []
+
+        # Sample observations for later analysis
+        if not hasattr(self, '_sample_count'):
+            self._sample_count = 0
+            self._obs_samples = []
+
+        self._sample_count += 1
+        if self._sample_count <= 100:  # Collect first 100 samples
+            self._obs_samples.append(obs_array.copy())
+
         # Truncate observation to 18 dimensions to match checkpoint's expected input
         if len(obs_array) > 18:
             obs_array = obs_array[:18]
