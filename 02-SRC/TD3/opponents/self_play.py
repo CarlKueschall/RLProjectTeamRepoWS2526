@@ -84,7 +84,7 @@ class SelfPlayManager:
 
     def activate(self, episode, checkpoints_dir, agent):
         ######################################################
-        # Activate self-play and seed the pool.
+        # Activate self-play and seed the pool with historical checkpoints.
         #####################################################
 
         if self.active:
@@ -109,8 +109,25 @@ class SelfPlayManager:
             self.opponent_games_played[str(seed_path)] = 0
             self.opponent_episodes[str(seed_path)] = episode
 
+        # Seed pool with historical checkpoints (for diversity)
+        # Look for recent checkpoints in parent directory
+        parent_dir = pathlib.Path(checkpoints_dir).parent / 'checkpoints'
+        if parent_dir.exists():
+            # Find checkpoints from the last N episodes before activation
+            seed_interval = max(500, (episode - self.start_episode) // (self.pool_size - 1)) if episode > 1000 else 500
+            for ep in range(max(1000, episode - seed_interval * (self.pool_size - 1)), episode, seed_interval):
+                checkpoint_pattern = f'*_ep{ep}_*.pth'
+                matching_files = list(parent_dir.glob(checkpoint_pattern))
+                if matching_files and len(self.pool) < self.pool_size:
+                    checkpoint_path = str(matching_files[0])
+                    self.pool.append(checkpoint_path)
+                    if self.use_pfsp:
+                        self.opponent_winrates[checkpoint_path] = deque(maxlen=100)
+                        self.opponent_games_played[checkpoint_path] = 0
+                        self.opponent_episodes[checkpoint_path] = ep
+
         print(f"Self-play activated at episode {episode}")
-        print(f"Pool seeded with {len(self.pool)} opponent(s)")
+        print(f"Pool seeded with {len(self.pool)} opponent(s) spanning episodes")
 
     def should_activate(self, episode, eval_vs_weak, rolling_variance):
             #########################################################

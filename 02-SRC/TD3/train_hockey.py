@@ -328,7 +328,7 @@ def train(args):
         if args.self_play_start > 0:
             # Check if should activate self-play
             if not self_play_manager.active:
-                rolling_variance = np.std(list(tracker.rolling_outcomes)) if len(tracker.rolling_outcomes) > 0 else 0.0
+                rolling_variance = tracker.get_rolling_win_rate_variance(chunk_size=100)
                 last_eval_vs_weak = tracker.get_last_eval('weak')
                 if self_play_manager.should_activate(i_episode, last_eval_vs_weak, rolling_variance):
                     self_play_manager.activate(i_episode, selfplay_checkpoints_dir, agent)
@@ -588,9 +588,9 @@ def train(args):
                 tracker.set_last_eval('strong', eval_strong['win_rate_decisive'])
 
                 #########################################################
-                # Update self-play manager with eval results (if self-play enabled)
+                # Update self-play manager with eval results (only if self-play is active)
                 #########################################################
-                if args.self_play_start > 0:
+                if args.self_play_start > 0 and self_play_manager.active:
                     if self_play_manager.dynamic_anchor_mixing:
                         last_eval = tracker.get_last_eval('weak')
                         peak_eval = tracker.get_peak_eval('weak')
@@ -703,8 +703,6 @@ def train(args):
             
             # Update best checkpoint for regression rollback if enabled
             if args.self_play_start > 0 and self_play_manager.regression_rollback:
-                # Check if this checkpoint corresponds to the best eval we've seen
-                # (check_regression updates best_eval_vs_weak when it finds a new best)
                 last_eval = tracker.get_last_eval('weak')
                 if last_eval is not None and abs(last_eval - self_play_manager.best_eval_vs_weak) < 0.001:
                     # This checkpoint corresponds to the best eval (within small tolerance for float comparison)

@@ -139,6 +139,27 @@ class MetricsTracker:
                 rolling_wins += 1
         return rolling_wins / rolling_total
 
+    def get_rolling_win_rate_variance(self, chunk_size=100):
+        """
+        Compute variance of win rates over rolling sub-windows.
+        This measures stability of performance, not outcome variance.
+        """
+        outcomes = list(self.rolling_outcomes)
+        if len(outcomes) < chunk_size:
+            return 1.0  # High variance if insufficient data
+
+        # Split outcomes into chunks and compute win rate for each
+        win_rates = []
+        for i in range(0, len(outcomes) - chunk_size + 1, chunk_size // 2):  # 50% overlap
+            chunk = outcomes[i:i + chunk_size]
+            wins = sum(1 for x in chunk if x == 1)
+            win_rates.append(wins / len(chunk))
+
+        if len(win_rates) < 2:
+            return 1.0  # Need at least 2 chunks for variance
+
+        return np.var(win_rates)
+
     def get_avg_reward(self, window=None):
         # Get average reward over specified window (or all)
         data = self.rewards_p1[-window:] if window else self.rewards_p1
