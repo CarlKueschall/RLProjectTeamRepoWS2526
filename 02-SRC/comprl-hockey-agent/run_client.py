@@ -77,7 +77,7 @@ class TD3HockeyAgent(Agent):
 
         # Load checkpoint first to infer hidden sizes if not provided
         if model_path:
-            checkpoint = torch.load(model_path)
+            checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
             if isinstance(checkpoint, dict) and 'agent_state' in checkpoint:
                 agent_state = checkpoint['agent_state']
             else:
@@ -101,10 +101,24 @@ class TD3HockeyAgent(Agent):
         if hidden_critic is None:
             hidden_critic = [256, 256, 128]
 
-        # Create the trained TD3 agent with correct hidden sizes
+        # Fix observation/action space to match checkpoint dimensions
+        # Checkpoint expects: obs_dim=18, action_dim=4 (for QFunction input=22)
+        from gymnasium import spaces
+        obs_space = env.observation_space
+        if obs_space.shape[0] > 18:
+            obs_space = spaces.Box(low=obs_space.low[:18], high=obs_space.high[:18], dtype=obs_space.dtype)
+
+        # Agent outputs 4-dim actions (player's own actions only)
+        action_space = spaces.Box(
+            low=env.action_space.low[:4],
+            high=env.action_space.high[:4],
+            dtype=env.action_space.dtype
+        )
+
+        # Create the trained TD3 agent with correct hidden sizes and action space
         self.td3_agent = TD3Agent(
-            observation_space=env.observation_space,
-            action_space=env.action_space,
+            observation_space=obs_space,
+            action_space=action_space,
             hidden_sizes_actor=hidden_actor,
             hidden_sizes_critic=hidden_critic
         )
@@ -121,7 +135,7 @@ class TD3HockeyAgent(Agent):
             if not os.path.exists(model_path):
                 raise FileNotFoundError(f"Model file not found: {model_path}")
 
-            checkpoint = torch.load(model_path)
+            checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
             # Handle checkpoint format: if it's a dict with 'agent_state', use that
             if isinstance(checkpoint, dict) and 'agent_state' in checkpoint:
                 state = checkpoint['agent_state']
@@ -139,6 +153,10 @@ class TD3HockeyAgent(Agent):
     def get_step(self, observation: list[float]) -> list[float]:
         # Convert list to numpy array
         obs_array = np.array(observation, dtype=np.float32)
+
+        # Truncate observation to 18 dimensions to match checkpoint's expected input
+        if len(obs_array) > 18:
+            obs_array = obs_array[:18]
 
         # Get action from TD3 agent (eps=0.0 disables exploration noise during inference)
         action = self.td3_agent.act(obs_array, eps=0.0)
