@@ -1,4 +1,7 @@
 """
+AI Usage Declaration:
+This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+
 W&B Run Data Downloader and Discretizer
 
 Downloads complete run data from W&B and formats it for analysis.

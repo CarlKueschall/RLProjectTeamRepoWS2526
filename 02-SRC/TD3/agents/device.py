@@ -1,3 +1,8 @@
+"""
+AI Usage Declaration:
+This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+"""
+
 import torch
 
 def get_device(force_cpu=False):

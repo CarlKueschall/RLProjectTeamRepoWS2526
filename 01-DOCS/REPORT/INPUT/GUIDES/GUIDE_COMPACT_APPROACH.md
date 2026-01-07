@@ -90,35 +90,30 @@ TABLE 1: Final Evaluation (100 games each): Shows win rates for weak/strong at 2
 
 #### [TODO #1] "Include training curves and quantitative results"
 
-**Create Figure A1: Training Curves Comparison (2-panel)**
-- **Panel 1:** Network architecture scaling (256 vs 512 vs 1024)
-  - X-axis: Episodes (0-27,500)
-  - Y-axis: Win rate or smoothed reward
-  - 3 lines (small/medium/large networks)
-  - Include legend
+**Figure 1: Architecture Ablation (3 subplots side-by-side)**
+- **Panel A:** Cumulative win rate (256 vs 512 vs 1024)
+  - File: `figures_staging/Hidden_Size_Comparisons/hsc_cumulative_win_rate.png`
+- **Panel B:** vs Strong eval win rate (256 vs 512 vs 1024)
+  - File: `figures_staging/Hidden_Size_Comparisons/hsc_vs_strong_win_rate.png`
+- **Panel C:** vs Weak tie rate (256 vs 512 vs 1024)
+  - File: `figures_staging/Hidden_Size_Comparisons/hsc_vs_weak_tie_rate.png`
+- **Caption:** Note that 1024 hidden units show best performance across all metrics
 
-- **Panel 2:** Learning rate sensitivity (1e-4 vs 3e-4 vs 1e-3)
-  - X-axis: Episodes (0-27,500)
-  - Y-axis: Win rate or smoothed reward
-  - 3 lines (different learning rates)
-  - Include legend
+**Figure 2: RS vs No-RS Ablation (2 subplots side-by-side)**
+- **Panel A:** vs Weak win rate (RS vs No-RS)
+  - File: `figures_staging/RS_vs_no_RS/rsvnrs_dummy_1.png` (replace with actual)
+- **Panel B:** vs Weak tie rate (RS vs No-RS)
+  - File: `figures_staging/RS_vs_no_RS/rsvnrs_dummy_2.png` (replace with actual)
+- **Caption:** Reduced tie rate demonstrates increased agent activity/aggression
 
-**Optional:** Add third panel for exploration decay rates
-
-**Create Table A1: Ablation Results Summary**
-```
-| Hyperparameter | Config | Episodes to 80% | Episodes to 90% | Final Win % | Stability |
-|---|---|---|---|---|---|
-| **Network** | 256 | X | Y | Z% | [metric] |
-| | 512 | X | Y | Z% | [metric] |
-| | 1024 | X | Y | Z% | [metric] |
-| **Learning Rate** | 1e-4 | X | Y | Z% | [metric] |
-| | 3e-4 | X | Y | Z% | [metric] |
-| | 1e-3 | X | Y | Z% | [metric] |
-| **Exploration Decay** | Slow | X | Y | Z% | [metric] |
-| | Baseline | X | Y | Z% | [metric] |
-| | Fast | X | Y | Z% | [metric] |
-```
+**Figure 4: Strong vs Weak Training Comparison (3 subplots side-by-side)**
+- **Panel A:** vs Strong eval (strong-trained vs weak-trained)
+  - File: `figures_staging/strong-vs-weak-opponent/nvs_vs_strong_win_rate.png`
+- **Panel B:** vs Weak eval (strong-trained vs weak-trained)
+  - File: `figures_staging/strong-vs-weak-opponent/nvs_vs_weak_win_rate.png`
+- **Panel C:** Tie rate (strong-trained vs weak-trained)
+  - File: `figures_staging/strong-vs-weak-opponent/nvs_vs_weak_tie_rate.png`
+- **Caption:** Training on strong improves both weak and strong performance (top-down effect)
 
 #### [TODO #2] "Comparative metrics table"
 
@@ -151,19 +146,17 @@ Results: Self-play improved weak robustness 88%→92% over 70k episodes, 100% vs
 
 **What to ADD in [TODO] section:**
 
-#### [TODO] "Pool evolution visualization, PFSP weight analysis"
+#### [TODO] "Self-Play Comparison Figure"
 
-**Create Figure A3: Pool Evolution Timeline**
-- X-axis: Training episodes (27.5k to 97.5k)
-- Y-axis: Checkpoint ID or opponent strength
-- Show: Which agents in pool at each time, pool turnover
-- Could be: Timeline graphic, Gantt chart, or heatmap
+**Figure 3: Self-Play vs Baseline (2 subplots side-by-side)**
+- **Panel A:** Cumulative win rate progression (baseline vs self-play)
+  - File: `figures_staging/normal_vs_Self-Play/spvn_cumulative_win_rate.png`
+- **Panel B:** vs Strong eval win rate (baseline vs self-play)
+  - File: `figures_staging/normal_vs_Self-Play/spvn_vs_strong_win_rate.png`
+- **Caption:** Modest improvements, evaluation limited by available opponents (only weak/strong bots)
 
-**Create Figure A4: PFSP Weighting**
-- X-axis: Win rate (0% to 100%)
-- Y-axis: Selection weight
-- Curve: w = wr × (1 - wr)
-- Show: Peak at 50%, drops at extremes
+**PFSP Explanation (text, not figure):**
+- Replace figure TODO with text: "PFSP weighting function $w_i = \text{wr}_i(1-\text{wr}_i)$ favors opponents with ~50% win rate, creating natural curriculum progression."
 
 **Optional Figure A5: Win Rate vs Pool Over Time**
 - X-axis: Episodes during self-play (27.5k-97.5k)
@@ -205,25 +198,23 @@ transfer learning.
 
 ---
 
-## FIGURE CHECKLIST (TOTAL 6-8 FIGURES RECOMMENDED)
+## FIGURE CHECKLIST (TOTAL 5-6 FIGURES RECOMMENDED)
 
 - [x] **Figure 1 (Methods):** Optional - Network architecture diagram OR equations only
-- [ ] **Figure 2 (Experiments):** Architecture/LR/Exploration curves (2-3 subpanels)
-- [ ] **Figure 3 (Experiments):** Ablation results table visualization (bar charts)
-- [ ] **Figure 4 (Experiments):** TD3 vs DDPG comparison curves
+- [ ] **Figure 2 (Experiments):** Architecture ablation curves (256 vs 512 vs 1024)
+- [ ] **Figure 3 (Experiments):** Reward shaping comparison (RS vs No-RS)
+- [ ] **Figure 4 (Experiments):** Strong vs Weak training opponent comparison
 - [ ] **Figure 5 (Self-Play):** Pool evolution timeline
 - [ ] **Figure 6 (Self-Play):** PFSP weighting curve
-- [ ] **Figure 7 (Results):** Win rate evolution during training
-- [ ] **Figure 8 (Results):** Evaluation bar charts (weak vs strong)
+- [ ] **Figure 7 (Results):** Self-play vs baseline comparison (if needed)
 
 ---
 
-## TABLE CHECKLIST (TOTAL 3-4 TABLES)
+## TABLE CHECKLIST (TOTAL 3 TABLES)
 
-- [ ] **Table 1 (Experiments):** Final evaluation results (already in LaTeX)
-- [ ] **Table 2 (Experiments):** Ablation studies summary
-- [ ] **Table 3 (Experiments):** TD3 vs DDPG comparison
-- [ ] **Table 4 (Discussion):** Algorithm comparison (optional)
+- [x] **Table 1 (Experiments):** Final evaluation results (already in LaTeX)
+- [ ] **Table 2 (Experiments):** Self-play vs baseline comparison (optional, if space allows)
+- [x] **Table 3 (Appendix):** Reward shaping components (PBRS + strategic bonuses)
 
 ---
 

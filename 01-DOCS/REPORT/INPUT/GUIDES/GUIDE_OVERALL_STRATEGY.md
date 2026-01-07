@@ -143,25 +143,22 @@ PAGES 5-8: FIGURES AND TABLES (3-4 pages)
 - Three-phase curriculum
 - Timeline visualization
 
-#### 3b. Ablation Studies (700 words, ~0.7 pages)
-You must present AT LEAST 3 ablations:
-1. **Network architecture** (small/medium/large)
+#### 3b. Ablation Studies (500 words, ~0.5 pages)
+You must present AT LEAST 2 ablations:
+1. **Network architecture** (256/512/1024)
    - Convergence speed, final performance, computational cost
    - 1 figure (training curves), 1 table
 
-2. **Learning rates** (1e-4, 3e-4, 1e-3)
-   - Convergence, stability, final performance
-   - 1 figure (training curves), 1 table
-
-3. **Exploration noise decay** (slow/baseline/fast)
-   - Impact on convergence, final performance
-   - 1 figure (decay schedules + results), 1 table
-
-4. **[Optional] Reward shaping impact** (with/without PBRS, strategic bonuses)
+2. **Reward shaping impact** (RS vs No-RS)
    - Learning acceleration, final performance
    - 1 figure, 1 table
 
-#### 3c. TD3 vs DDPG Comparison (300 words, ~0.3 pages)
+#### 3c. Training Opponent Comparison (200 words, ~0.2 pages)
+- Strong vs Weak training opponent comparison
+- Generalization analysis
+- 1 figure (training curves comparison)
+
+#### 3d. Self-Play vs Baseline Comparison (200 words, ~0.2 pages)
 - DDPG baseline results
 - TD3 improvements (quantified)
 - Which innovation matters most? (optional ablation)
@@ -280,21 +277,17 @@ If you have ~2-3 weeks before the deadline:
    - Medium (512×512): Complete training curves, final metrics
    - Large (1024×1024): Complete training curves, final metrics
 
-2. **Learning rate ablation** (4 configurations):
-   - 1e-4, 3e-4, 1e-3, critic-heavy
+2. **Reward shaping ablation** (2 configurations):
+   - No-RS (sparse only), RS (PBRS + strategic bonuses)
    - Training curves, convergence speed metrics
 
-3. **Exploration ablation** (4 configurations):
-   - Slow/baseline/fast decay + high minimum
-   - Training curves, action entropy evolution
+3. **Training opponent comparison**:
+   - Strong opponent training: training curves, final metrics
+   - Weak opponent training: training curves, final metrics
 
-4. **Reward shaping ablation** (3 configurations):
-   - Sparse only, PBRS only, full shaping
-   - Training curves, reward component breakdown
-
-5. **TD3 vs DDPG**:
-   - DDPG training curves (if available)
-   - TD3 curves for direct comparison
+4. **Self-play vs baseline**:
+   - Baseline (Strong opponent): final evaluation metrics
+   - Self-play: final evaluation metrics, training progression
 
 ### From Checkpoint Evaluations:
 
@@ -383,13 +376,12 @@ Aim for **10-12 figures total in your sections**:
 - Reward shaping visualization (4-subplot)
 - PBRS decay schedule
 
-**Experiments:** 7-8 figures
+**Experiments:** 5-6 figures
 - Network ablation curves (1)
-- Learning rate curves (1)
-- Exploration curves (1)
-- Reward shaping curves (1)
-- TD3 vs DDPG comparison (1)
-- Final evaluation bar/box charts (2)
+- Reward shaping comparison (1)
+- Training opponent comparison (1)
+- Self-play vs baseline comparison (1)
+- Final evaluation bar/box charts (1-2)
 
 **Self-Play:** 3-4 figures
 - Pool evolution/composition (1)

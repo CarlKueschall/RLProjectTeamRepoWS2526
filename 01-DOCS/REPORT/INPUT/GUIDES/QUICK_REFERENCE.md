@@ -6,7 +6,7 @@
 **Location:** Page 2-2.75, after "Ablation Studies" bullet
 
 **What to create:**
-- **Figure:** 2-3 panel plot showing training curves for architecture/LR/exploration ablations
+- **Figure:** 2-panel plot showing training curves for (1) architecture ablation (256/512/1024) and (2) reward shaping (RS vs No-RS)
 - **Table:** Ablation results (convergence speed, final performance, stability)
 
 **Size:** ~half page (2 figures or 1 figure + 1 table)
@@ -14,12 +14,12 @@
 ---
 
 ### [TODO #2] In Experiments - "Comparative metrics table"
-**Location:** Page 2, after "TD3 vs DDPG" bullet
+**Location:** Page 2, after "Self-Play Comparison" bullet
 
 **What to create:**
-- **Table:** TD3 vs DDPG side-by-side comparison
-  - Columns: Algorithm, Win% vs Weak, Win% vs Strong, Episodes to 90%, Final Reward
-  - Rows: DDPG, TD3, Improvement
+- **Table:** Baseline (Strong opponent) vs Self-Play comparison
+  - Columns: Training Method, Win% vs Weak, Win% vs Strong, Episodes, Final Reward
+  - Rows: Baseline (Strong), Self-Play, Improvement
 
 **Size:** ~2 inches wide, ~1 inch tall table
 
@@ -42,18 +42,17 @@
 - [ ] Architecture 256: episodes to 80%, episodes to 90%, final win%
 - [ ] Architecture 512: same metrics
 - [ ] Architecture 1024: same metrics
-- [ ] LR 1e-4: same metrics
-- [ ] LR 3e-4: same metrics
-- [ ] LR 1e-3: same metrics
-- [ ] Exploration slow/baseline/fast: same metrics
+- [ ] Reward Shaping (RS): same metrics
+- [ ] No Reward Shaping (No-RS): same metrics
 
-**TD3 vs DDPG (from your implementations):**
-- [ ] DDPG final win rate vs weak
-- [ ] DDPG final win rate vs strong
-- [ ] TD3 final win rate vs weak
-- [ ] TD3 final win rate vs strong
-- [ ] Episodes for DDPG to reach 90%
-- [ ] Episodes for TD3 to reach 90%
+**Training Opponent Comparison:**
+- [ ] Strong opponent training: final win rate vs weak, vs strong
+- [ ] Weak opponent training: final win rate vs weak, vs strong
+
+**Self-Play vs Baseline:**
+- [ ] Baseline (Strong opponent training): final win rate vs weak, vs strong
+- [ ] Self-Play: final win rate vs weak, vs strong
+- [ ] Improvement metrics
 
 **Self-Play:**
 - [ ] Pool composition over time (which checkpoints in pool at each episode)
@@ -69,10 +68,10 @@
 **Experiments (0.75 page):**
 - [ ] 3 sentences explaining training curriculum (already written)
 - [ ] 1 sentence about ablations (already written)
-- [ ] 1 sentence about TD3 vs DDPG (already written)
-- [ ] Insert Figure 1 (training curves)
+- [ ] 1 sentence about self-play comparison (already written)
+- [ ] Insert Figure 1 (architecture + reward shaping curves)
 - [ ] Insert Table 1 (ablation results)
-- [ ] Insert Table 2 (TD3 vs DDPG)
+- [ ] Insert Table 2 (baseline vs self-play comparison)
 - [ ] Insert Table 3 (final evaluation - already in template)
 
 **Self-Play (0.5 page):**

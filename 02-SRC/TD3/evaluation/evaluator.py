@@ -1,3 +1,8 @@
+"""
+AI Usage Declaration:
+This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+"""
+
 import hockey.hockey_env as h_env
 from hockey.hockey_env import BasicOpponent
 def evaluate_vs_opponent(agent, opponent, mode, num_episodes=100, max_timesteps=250, eval_seed=None):

@@ -1,3 +1,8 @@
+"""
+AI Usage Declaration:
+This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+"""
+
 from hockey.hockey_env import BasicOpponent
 from .base import BaseOpponent
 class FixedOpponent(BaseOpponent):

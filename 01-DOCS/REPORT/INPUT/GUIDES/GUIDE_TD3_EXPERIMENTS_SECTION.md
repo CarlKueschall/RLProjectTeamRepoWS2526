@@ -112,109 +112,7 @@ Test three configurations trained on identical data:
 
 ---
 
-### Ablation Study 2: Learning Rate Sensitivity
-
-**Hypothesis:**
-Learning rates significantly impact convergence speed and stability. Too high → instability; too low → slow learning.
-
-**Experimental Design:**
-
-Test learning rates for actor and critic (paired, initially):
-
-| Configuration | Actor LR | Critic LR | Notes |
-|---|---|---|---|
-| **Low** | 1×10⁻⁴ | 1×10⁻⁴ | Conservative |
-| **Baseline** | 3×10⁻⁴ | 3×10⁻⁴ | Default TD3 |
-| **High** | 1×10⁻³ | 1×10⁻³ | Aggressive |
-| **Critic-Heavy** | 3×10⁻⁴ | 1×10⁻³ | Critic learns faster |
-
-**What to measure:**
-1. **Training curves:** Smoothed reward curves (moving average over 100 episodes)
-   - Plot all on same graph
-   - Highlight: convergence speed, stability (variance), final plateau
-
-2. **Stability metrics:**
-   - Reward variance (standard deviation) in training
-   - Number of training divergences (>10% drop)
-   - Gradient statistics (mean/max gradient norm per step)
-
-3. **Final evaluation (100 games each):**
-
-| LR Config | Episodes to 85% | Win vs Weak (%) | Win vs Strong (%) | Training Stability |
-|---|---|---|---|---|
-| Low | __ | __ | __ | __ |
-| Baseline | __ | __ | __ | __ |
-| High | __ | __ | __ | __ |
-| Critic-Heavy | __ | __ | __ | __ |
-
-**What to Show in Figures:**
-
-Figure 1: Training curves for all LR settings
-- X-axis: Episodes (0-27,500)
-- Y-axis: Smoothed reward
-- Lines: One per configuration, with confidence bands
-
-Figure 2: Convergence comparison
-- Bar chart showing episodes to 85%/90% win rates
-- Error bars showing variance
-
-**Analysis:**
-- Which LR converges fastest?
-- Which is most stable?
-- Trade-off: speed vs stability
-- Is 3×10⁻⁴ actually optimal, or did you find something better?
-
-**Conclusion:**
-"Learning rate experiments revealed [finding]. The [LR config] showed [fastest/most stable] convergence, [reaching 90% win-rate in X episodes]. We selected [final LR] for final experiments because [reasoning]."
-
----
-
-### Ablation Study 3: Exploration Noise Decay
-
-**Hypothesis:**
-Exploration schedule impacts how thoroughly the policy space is explored and when exploitation takes over.
-
-**Experimental Design:**
-
-Test different noise decay rates:
-
-| Configuration | ε₀ | ε_min | Decay Half-Life | Notes |
-|---|---|---|---|---|
-| **Slow Decay** | 1.0 | 0.05 | 100k steps | Extended exploration |
-| **Baseline** | 1.0 | 0.05 | 250k steps | Default |
-| **Fast Decay** | 1.0 | 0.05 | 50k steps | Exploitation-focused |
-| **High Minimum** | 1.0 | 0.15 | 250k steps | Always exploratory |
-
-**What to Measure:**
-1. **Action distribution:**
-   - Entropy of action distribution over time
-   - How long until deterministic policy emerges?
-
-2. **Exploration effectiveness:**
-   - Win rate improvement rate (slope of learning curve)
-   - Variance in policy at different phases
-
-3. **Training results:**
-
-| Decay Config | Convergence Speed | Final Performance | Variance |
-|---|---|---|---|
-| Slow | __ | __ | __ |
-| Baseline | __ | __ | __ |
-| Fast | __ | __ | __ |
-| High ε_min | __ | __ | __ |
-
-**Figure to Create:**
-- Noise magnitude decay schedule (plot σ(t) over time for each configuration)
-- Training curves showing impact on convergence
-
-**Analysis:**
-- Does slower exploration help or hurt?
-- Does maintaining higher noise (high ε_min) improve robustness?
-- What's the right balance for hockey?
-
----
-
-### Ablation Study 4: Reward Shaping Impact (PBRS + Strategic Bonuses)
+### Ablation Study 2: Reward Shaping Impact (RS vs No-RS)
 
 **Hypothesis:**
 Domain knowledge via reward shaping accelerates learning but shouldn't dominate value estimation.
@@ -232,9 +130,9 @@ Three configurations:
 **What to Measure:**
 
 1. **Learning curves (critical):**
-   - Plot reward trajectories for all three
+   - Plot reward trajectories for both configurations
    - Measure: time to 80% win rate, final performance
-   - Expected: Full shaping fastest, sparse slowest
+   - Expected: RS accelerates convergence compared to No-RS
 
 2. **Reward composition breakdown:**
    - For each configuration, show contribution breakdown:
@@ -255,36 +153,31 @@ Three configurations:
 
 | Config | Episodes to 80% | Episodes to 90% | Win vs Weak (%) | Win vs Strong (%) |
 |---|---|---|---|---|
-| Sparse | __ | __ | __ | __ |
-| PBRS Only | __ | __ | __ | __ |
-| Full | __ | __ | __ | __ |
+| No-RS | __ | __ | __ | __ |
+| RS | __ | __ | __ | __ |
 
 **Figures to Create:**
 
 1. **Training curve comparison:**
-   - Smoothed rewards, all three on one plot
+   - Smoothed rewards, both configurations on one plot
    - Highlight convergence milestones
+   - Show clear acceleration with RS
 
-2. **Reward contribution stacking:**
-   - Show magnitude of each reward component over time
-   - PBRS should dominate early, fade as agent learns
-
-3. **Win rate evolution:**
+2. **Win rate evolution:**
    - Line plot showing win rate (moving average) for each config
-   - Clear difference between sparse vs shaped
+   - Clear difference between No-RS vs RS
 
 **Analysis:**
-- How much does PBRS help? Quantify acceleration
-- Does strategic bonuses add value on top of PBRS?
-- Are there diminishing returns?
-- Does reward shaping lead to strange behaviors or is learning natural?
+- How much does reward shaping help? Quantify acceleration
+- Does RS improve final performance or just speed?
+- Are there any negative effects of reward shaping?
 
 **Conclusion:**
-"Reward shaping substantially accelerated convergence, reducing the episodes needed to reach 90% win rate from [X] to [Y]. PBRS contribution [grew/remained stable] during training, confirming [interpretation]. Strategic bonuses provided an additional [Q%] performance boost."
+"Reward shaping substantially accelerated convergence, reducing the episodes needed to reach 90% win rate from [X] to [Y]. RS provided [quantified improvement] in final performance while maintaining stable learning dynamics."
 
 ---
 
-## 3. TD3 vs. DDPG: Baseline Comparison
+## 3. Training Opponent Comparison: Strong vs Weak
 
 **Purpose:** Isolate TD3 contributions by comparing to DDPG baseline.
 
@@ -397,7 +290,7 @@ Include:
 
 ---
 
-## 4. Anti-Lazy Learning Regularization Impact
+## 4. Self-Play vs Baseline Comparison
 
 **Purpose:** Demonstrate value of VF regularization modification.
 
@@ -525,12 +418,10 @@ Create a comprehensive summary discussing:
 
 ### Key Findings
 1. **Network architecture:** [1024 worked best / 256 was sufficient / etc.]
-2. **Learning rates:** [3e-4 was optimal, others showed...]
-3. **Exploration:** [Baseline decay was reasonable...]
-4. **Reward shaping:** [Provided X% acceleration, worth the implementation]
-5. **TD3 vs DDPG:** [TD3 superior by Y%, mainly due to...]
-6. **Anti-lazy learning:** [Improved consistency by Z%...]
-7. **Final performance:** [92% vs weak, 100% vs strong]
+2. **Reward shaping:** [Provided X% acceleration, worth the implementation]
+3. **Training opponent:** [Strong opponent training provided better generalization / etc.]
+4. **Self-play:** [Improved robustness from X% to Y%, demonstrating value]
+5. **Final performance:** [92% vs weak, 100% vs strong]
 
 ### Design Validation
 Argue that your design choices were sound:
@@ -553,14 +444,12 @@ Argue that your design choices were sound:
 
 ## Critical Figures You MUST Have
 
-1. Architecture ablation curves (3 lines)
-2. Learning rate curves (4 lines)
-3. Exploration decay comparison (4 lines)
-4. Reward shaping impact (3 lines)
-5. TD3 vs DDPG curves (2 lines)
-6. Evaluation bar charts (2 charts)
-7. Win rate timeline (2 series: 27.5k vs 97.5k)
-8. Reward distributions (2 box plots)
+1. Architecture ablation curves (256 vs 512 vs 1024)
+2. Reward shaping comparison (RS vs No-RS)
+3. Training opponent comparison (Strong vs Weak)
+4. Self-play vs baseline comparison
+5. Final evaluation bar charts (weak vs strong)
+6. Win rate timeline (27.5k vs 97.5k)
 
 ## Data Organization Tips
 

@@ -1,3 +1,8 @@
+"""
+AI Usage Declaration:
+This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+"""
+
 import numpy as np
 from collections import deque
 class MetricsTracker:
@@ -40,6 +45,22 @@ class MetricsTracker:
         # Per-episode tracking (reset each episode)
         self._episode_step_rewards = []
         self._episode_action_magnitudes = []
+        self._episode_agent_positions = []
+        self._episode_puck_distances = []
+        self._episode_time_near_puck = 0
+
+        # Behavior metrics per episode (accumulated across all episodes)
+        self.behavior_action_magnitude_avg = []
+        self.behavior_action_magnitude_max = []
+        self.behavior_lazy_action_ratio = []
+        self.behavior_dist_to_puck_avg = []
+        self.behavior_dist_to_puck_min = []
+        self.behavior_time_near_puck = []
+        self.behavior_distance_traveled = []
+        self.behavior_velocity_avg = []
+        self.behavior_velocity_max = []
+        self.behavior_puck_touches = []
+
         # Self-play tracking
         self._last_eval = {}  # {opponent_type: win_rate}
         self._peak_eval = {}  # {opponent_type: win_rate}
@@ -63,6 +84,16 @@ class MetricsTracker:
         self.goals_conceded = 0
         self.pbrs_totals = []
         self.strategic_stats = {}
+        self.behavior_action_magnitude_avg = []
+        self.behavior_action_magnitude_max = []
+        self.behavior_lazy_action_ratio = []
+        self.behavior_dist_to_puck_avg = []
+        self.behavior_dist_to_puck_min = []
+        self.behavior_time_near_puck = []
+        self.behavior_distance_traveled = []
+        self.behavior_velocity_avg = []
+        self.behavior_velocity_max = []
+        self.behavior_puck_touches = []
         self._last_eval = {}
         self._peak_eval = {}
 
@@ -70,6 +101,9 @@ class MetricsTracker:
         # Reset per-episode tracking
         self._episode_step_rewards = []
         self._episode_action_magnitudes = []
+        self._episode_agent_positions = []  # Track positions for distance/velocity metrics
+        self._episode_puck_distances = []  # Track distances to puck
+        self._episode_time_near_puck = 0  # Count steps near puck (< 0.5)
 
     def add_step_reward(self, reward):
         # Add reward for a single step
@@ -78,6 +112,17 @@ class MetricsTracker:
     def add_action_magnitude(self, magnitude):
         # Add action magnitude for a single step
         self._episode_action_magnitudes.append(magnitude)
+
+    def add_agent_position(self, pos):
+        # Add agent position [x, y] for a single step
+        self._episode_agent_positions.append(pos)
+
+    def add_puck_distance(self, distance):
+        # Add distance to puck for a single step
+        self._episode_puck_distances.append(distance)
+        # Track time spent near puck
+        if distance < 0.5:
+            self._episode_time_near_puck += 1
 
     def add_episode_result(self, reward, length, winner):
         #########################################################
@@ -168,6 +213,79 @@ class MetricsTracker:
     def get_avg_pbrs(self):
         # Get average PBRS reward
         return np.mean(self.pbrs_totals) if self.pbrs_totals else 0.0
+
+    def finalize_episode_behavior_metrics(self):
+        #########################################################
+        # Compute behavior metrics for the episode and add to accumulated lists
+        # Called at the end of each episode
+        #########################################################
+        # Action magnitude metrics
+        if self._episode_action_magnitudes:
+            self.behavior_action_magnitude_avg.append(float(np.mean(self._episode_action_magnitudes)))
+            self.behavior_action_magnitude_max.append(float(np.max(self._episode_action_magnitudes)))
+            # Lazy action ratio: count actions with magnitude < 0.1
+            lazy_count = sum(1 for mag in self._episode_action_magnitudes if mag < 0.1)
+            self.behavior_lazy_action_ratio.append(float(lazy_count / len(self._episode_action_magnitudes)))
+        else:
+            self.behavior_action_magnitude_avg.append(0.0)
+            self.behavior_action_magnitude_max.append(0.0)
+            self.behavior_lazy_action_ratio.append(0.0)
+
+        # Puck proximity metrics
+        if self._episode_puck_distances:
+            self.behavior_dist_to_puck_avg.append(float(np.mean(self._episode_puck_distances)))
+            self.behavior_dist_to_puck_min.append(float(np.min(self._episode_puck_distances)))
+            self.behavior_time_near_puck.append(float(self._episode_time_near_puck))
+        else:
+            self.behavior_dist_to_puck_avg.append(0.0)
+            self.behavior_dist_to_puck_min.append(0.0)
+            self.behavior_time_near_puck.append(0.0)
+
+        # Movement metrics
+        if len(self._episode_agent_positions) > 1:
+            # Compute distance traveled
+            positions = np.array(self._episode_agent_positions)
+            distances = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+            self.behavior_distance_traveled.append(float(np.sum(distances)))
+
+            # Velocity metrics (distance per step)
+            if len(distances) > 0:
+                self.behavior_velocity_avg.append(float(np.mean(distances)))
+                self.behavior_velocity_max.append(float(np.max(distances)))
+            else:
+                self.behavior_velocity_avg.append(0.0)
+                self.behavior_velocity_max.append(0.0)
+        else:
+            self.behavior_distance_traveled.append(0.0)
+            self.behavior_velocity_avg.append(0.0)
+            self.behavior_velocity_max.append(0.0)
+
+        # Puck touches from strategic stats
+        if 'puck_touches' in self.strategic_stats:
+            self.behavior_puck_touches.append(float(self.strategic_stats['puck_touches']))
+        else:
+            self.behavior_puck_touches.append(0.0)
+
+    def get_behavior_metrics(self):
+        #########################################################
+        # Get averaged behavior metrics for the last log_interval episodes
+        # Should only be called during logging
+        #########################################################
+        metrics = {}
+
+        # Average over last log_interval episodes
+        metrics['behavior/action_magnitude_avg'] = np.mean(self.behavior_action_magnitude_avg[-self.log_interval:]) if self.behavior_action_magnitude_avg else 0.0
+        metrics['behavior/action_magnitude_max'] = np.mean(self.behavior_action_magnitude_max[-self.log_interval:]) if self.behavior_action_magnitude_max else 0.0
+        metrics['behavior/lazy_action_ratio'] = np.mean(self.behavior_lazy_action_ratio[-self.log_interval:]) if self.behavior_lazy_action_ratio else 0.0
+        metrics['behavior/dist_to_puck_avg'] = np.mean(self.behavior_dist_to_puck_avg[-self.log_interval:]) if self.behavior_dist_to_puck_avg else 0.0
+        metrics['behavior/dist_to_puck_min'] = np.mean(self.behavior_dist_to_puck_min[-self.log_interval:]) if self.behavior_dist_to_puck_min else 0.0
+        metrics['behavior/time_near_puck'] = np.mean(self.behavior_time_near_puck[-self.log_interval:]) if self.behavior_time_near_puck else 0.0
+        metrics['behavior/distance_traveled'] = np.mean(self.behavior_distance_traveled[-self.log_interval:]) if self.behavior_distance_traveled else 0.0
+        metrics['behavior/velocity_avg'] = np.mean(self.behavior_velocity_avg[-self.log_interval:]) if self.behavior_velocity_avg else 0.0
+        metrics['behavior/velocity_max'] = np.mean(self.behavior_velocity_max[-self.log_interval:]) if self.behavior_velocity_max else 0.0
+        metrics['behavior/puck_touches'] = np.mean(self.behavior_puck_touches[-self.log_interval:]) if self.behavior_puck_touches else 0.0
+
+        return metrics
 
     def get_log_metrics(self):
         #########################################################

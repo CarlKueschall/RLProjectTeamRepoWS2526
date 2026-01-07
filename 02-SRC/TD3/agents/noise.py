@@ -1,3 +1,8 @@
+"""
+AI Usage Declaration:
+This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+"""
+
 import numpy as np
 class OUNoise:
     # Ornstein-Uhlenbeck noise for exploration in continuous action spaces

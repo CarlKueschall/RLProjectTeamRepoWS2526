@@ -1,3 +1,8 @@
+"""
+AI Usage Declaration:
+This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+"""
+
 import pickle
 import time
 from pathlib import Path
@@ -394,16 +399,18 @@ def train(args):
             #########################################################
             # Strategic bonuses
             #########################################################
-            dist_to_puck = np.sqrt((obs_next[0] - obs_next[12])**2 + (obs_next[1] - obs_next[13])**2)  # distance to puck
-            strategic_bonuses = strategic_shaper.compute(obs_next, info, dist_to_puck)
-
-            # Record opponent position for forcing metric
+            dist_to_puck = np.sqrt((obs_next[0] - obs_next[12])**2 + (obs_next[1] - obs_next[13])**2)  # distance to puck (needed for metrics)
             if args.reward_shaping:
+                strategic_bonuses = strategic_shaper.compute(obs_next, info, dist_to_puck)
+
+                # Record opponent position for forcing metric
                 strategic_shaper.record_opponent_position([obs_next[6], obs_next[7]])  # track where opponent is
 
-            # Apply strategic bonuses
-            for bonus_name, bonus_value in strategic_bonuses.items():
-                r1_shaped += bonus_value  # add all the strategic bonuses
+                # Apply strategic bonuses
+                for bonus_name, bonus_value in strategic_bonuses.items():
+                    r1_shaped += bonus_value  # add all the strategic bonuses
+            else:
+                strategic_bonuses = {}
 
             #########################################################
             # Store transition
@@ -420,6 +427,8 @@ def train(args):
             # Update tracker
             tracker.add_step_reward(r1_shaped)
             tracker.add_action_magnitude(np.linalg.norm(action1[:2]))  # track action magnitude
+            tracker.add_agent_position([obs_next[0], obs_next[1]])  # track agent position
+            tracker.add_puck_distance(dist_to_puck)  # track distance to puck
 
             episode_reward_p1 += r1_shaped
             episode_step_count += 1
@@ -475,9 +484,10 @@ def train(args):
         #########################################################
         # Strategic episode-end bonuses
         #########################################################
-        end_bonuses = strategic_shaper.compute_episode_end_bonuses()  # diversity and forcing bonuses
-        for bonus_name, bonus_value in end_bonuses.items():
-            episode_reward_p1 += bonus_value
+        if args.reward_shaping:
+            end_bonuses = strategic_shaper.compute_episode_end_bonuses()  # diversity and forcing bonuses
+            for bonus_name, bonus_value in end_bonuses.items():
+                episode_reward_p1 += bonus_value
 
         #########################################################
         # Update tracker
@@ -485,6 +495,7 @@ def train(args):
         tracker.add_episode_result(episode_reward_p1, episode_step_count, winner)
         tracker.add_strategic_stats(strategic_shaper.get_episode_stats())
         tracker.add_pbrs_total(pbrs_bonus)
+        tracker.finalize_episode_behavior_metrics()  # Compute and store behavior metrics for this episode
 
         #########################################################
         # Self-play result tracking
@@ -519,6 +530,10 @@ def train(args):
             # Build log metrics
             #########################################################
             log_metrics = tracker.get_log_metrics()
+            # Add behavior metrics
+            behavior_metrics = tracker.get_behavior_metrics()
+            log_metrics.update(behavior_metrics)
+
             log_metrics["performance/cumulative_win_rate"] = win_rate
             log_metrics["performance/wins"] = tracker.wins
             log_metrics["performance/losses"] = tracker.losses

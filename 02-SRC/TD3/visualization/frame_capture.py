@@ -1,3 +1,7 @@
+"""
+AI Usage Declaration:
+This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+"""
 
 import numpy as np
 def record_episode_frames(env, agent, opponent, mode, max_timesteps, eps=0.0,

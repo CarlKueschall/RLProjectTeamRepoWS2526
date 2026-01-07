@@ -1,3 +1,8 @@
+"""
+AI Usage Declaration:
+This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+"""
+
 from .frame_capture import record_episode_frames
 from .gif_recorder import create_gif_for_wandb, save_gif_to_wandb
 

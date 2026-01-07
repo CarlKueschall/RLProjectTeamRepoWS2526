@@ -189,14 +189,28 @@ Frequency of Selection (%)
 
 Shows that opponents with 45-55% win rate are selected most frequently.
 
-**Figure 4: PFSP Weights Over Time**
+**Figure 4: PFSP Weighting Visualization**
 
-Create heatmap or line plot:
-- X-axis: Training episodes
-- Y-axis: Opponent ID (1-12)
-- Color/Height: Selection weight for that opponent
+**Option A (Theoretical):** Plot the PFSP function w = wr(1-wr)
+- X-axis: Win rate (0% to 100%)
+- Y-axis: Selection weight
+- Shows: Bell curve peaking at 50% win-rate
+- Purpose: Conceptual explanation of HOW PFSP works
+- Note: This is NOT logged data - it's the mathematical weighting function
 
-Interpretation: Weights shift as agent learns; which opponents remain challenging?
+**Option B (Empirical - if win rates vs opponents are tracked):**
+- X-axis: Training episodes during self-play
+- Y-axis: Win rate against each opponent (%)
+- Multiple lines: One per opponent in pool
+- Shows: Which opponents stay around 50% win-rate (most challenging)
+
+**Option C (Empirical - if selection frequencies are tracked):**
+- Histogram: Opponent selection frequency by win-rate ranges
+- X-axis: Win rate bins (0-20%, 20-40%, 40-60%, etc.)
+- Y-axis: Selection frequency (%)
+- Shows: 40-60% win-rate opponents selected most often
+
+Interpretation: PFSP creates natural curriculum by favoring opponents where win-rate is ~50%
 
 ### 2.5 Comparison: PFSP vs Uniform vs Random
 
