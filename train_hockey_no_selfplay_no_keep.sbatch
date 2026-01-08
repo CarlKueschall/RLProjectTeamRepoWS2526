@@ -1,10 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=hockey_td3
+#SBATCH --job-name=hockey_td3_noselfplay_nokeep
 #SBATCH --cpus-per-task=4
 #SBATCH --partition=day
 #SBATCH --mem-per-cpu=8G
-#SBATCH --gres=gpu:1080ti:1
-#SBATCH --time=20:00:00
+#SBATCH --gres=gpu:A4000:1
+# Note: Changed from 1080ti to A4000 because 1080ti nodes are all busy
+# Alternative: --gres=gpu:2080ti:1 (nodes 37-40 also have idle 2080ti GPUs)
+#SBATCH --time=24:00:00
 #SBATCH --error=job.%J.err
 #SBATCH --output=job.%J.out
 #SBATCH --mail-type=END
@@ -16,14 +18,21 @@ cp -R ~/02-SRC /scratch/$SLURM_JOB_ID/
 # Run training in container
 cd /scratch/$SLURM_JOB_ID/02-SRC/TD3
 
+# Set wandb API key (replace with your actual API key)
+# You can find your API key at: https://wandb.ai/authorize
+export WANDB_API_KEY="cc059bf17f0dffb378947bc37398b00eea0d1944"
+
+# Training configuration without self-play and with keep_mode disabled:
+# - Trains against strong opponent only (no self-play)
+# - keep_mode disabled: puck bounces immediately on contact
 singularity exec --nv ~/containers/hockey.sif python3 train_hockey.py \
   --mode NORMAL \
-  --opponent weak \
-  --max_episodes 50000 \
+  --opponent strong \
+  --max_episodes 100000 \
   --seed 48 \
   --eps 1.0 \
   --eps_min 0.05 \
-  --eps_decay 0.99985 \
+  --eps_decay 0.999957 \
   --warmup_episodes 500 \
   --batch_size 512 \
   --train_freq 10 \
@@ -41,21 +50,12 @@ singularity exec --nv ~/containers/hockey.sif python3 train_hockey.py \
   --q_clip 25.0 \
   --q_clip_mode hard \
   --q_warning_threshold 10.0 \
-  --hidden_actor 400 400 \
-  --hidden_critic 400 400 200 \
+  --hidden_actor 1024 1024 \
+  --hidden_critic 1024 1024 200 \
   --log_interval 100 \
   --save_interval 250 \
   --gif_episodes 3 \
   --eval_interval 250 \
-  --self_play_start 4000 \
-  --self_play_pool_size 12 \
-  --self_play_save_interval 400 \
-  --self_play_weak_ratio 0.4 \
-  --use_dual_buffers \
-  --use_pfsp \
-  --pfsp_mode variance \
-  --dynamic_anchor_mixing \
-  --performance_gated_selfplay \
-  --selfplay_gate_winrate 0.8 \
-  --regression_rollback \
-  --regression_threshold 0.1 
+  --self_play_start 0 \
+  --no_keep_mode
+

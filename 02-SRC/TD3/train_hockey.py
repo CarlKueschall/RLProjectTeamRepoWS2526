@@ -50,8 +50,31 @@ def train(args):
     # Create environment
     #########################################################
     mode = get_mode(args.mode)
-    env = h_env.HockeyEnv(mode=mode, keep_mode=True)
+    env = h_env.HockeyEnv(mode=mode, keep_mode=args.keep_mode)
     max_timesteps = get_max_timesteps(mode)
+    
+    # Verify actual observation dimension matches observation_space
+    # (keep_mode may affect observation dimensions: OFF=16, ON=18)
+    test_obs, _ = env.reset()
+    actual_obs_dim = len(test_obs)
+    reported_obs_dim = env.observation_space.shape[0]
+    
+    if actual_obs_dim != reported_obs_dim:
+        print(f"WARNING: Observation dimension mismatch!")
+        print(f"  env.observation_space.shape[0] = {reported_obs_dim}")
+        print(f"  Actual observation length = {actual_obs_dim}")
+        print(f"  keep_mode = {args.keep_mode}")
+        print(f"  Using actual observation dimension ({actual_obs_dim}) for agent initialization")
+        # Create corrected observation space based on actual observation
+        obs_space = spaces.Box(
+            low=env.observation_space.low[:actual_obs_dim],
+            high=env.observation_space.high[:actual_obs_dim],
+            dtype=env.observation_space.dtype
+        )
+    else:
+        obs_space = env.observation_space
+    
+    print(f"Observation space: {actual_obs_dim} dimensions (keep_mode={args.keep_mode})")
 
     #########################################################
     # Create opponent
@@ -119,6 +142,7 @@ def train(args):
                 "self_play_pool_size": args.self_play_pool_size,
                 "self_play_save_interval": args.self_play_save_interval,
                 "eval_interval": args.eval_interval,
+                "eval_episodes": args.eval_episodes,
                 "self_play_weak_ratio": args.self_play_weak_ratio,
                 "use_dual_buffers": args.use_dual_buffers,
                 "use_pfsp": args.use_pfsp,
@@ -126,7 +150,6 @@ def train(args):
                 "dynamic_anchor_mixing": args.dynamic_anchor_mixing,
                 "performance_gated_selfplay": args.performance_gated_selfplay,
                 "selfplay_gate_winrate": args.selfplay_gate_winrate if args.performance_gated_selfplay else None,
-                "selfplay_gate_variance": args.selfplay_gate_variance if args.performance_gated_selfplay else None,
                 "regression_rollback": args.regression_rollback,
                 "regression_threshold": args.regression_threshold if args.regression_rollback else None,
             },
@@ -150,9 +173,58 @@ def train(args):
         dtype=np.float32
     )
 
+    #########################################################
+    # Load checkpoint first to infer critic_action_dim if needed
+    #########################################################
+    critic_action_dim = 8  # Default: new version with 8D actions (26D total)
+    checkpoint_to_load = None
+    i_episode_start = 0
+    
+    if args.checkpoint:
+        checkpoint_path = Path(args.checkpoint)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        print("###############################")
+        print(f"Analyzing checkpoint: {checkpoint_path}")
+        
+        checkpoint_to_load = torch.load(checkpoint_path, map_location=device)
+        
+        # Infer critic_action_dim from checkpoint architecture
+        if isinstance(checkpoint_to_load, tuple) and len(checkpoint_to_load) >= 1:
+            agent_state = checkpoint_to_load
+        elif isinstance(checkpoint_to_load, dict) and 'agent_state' in checkpoint_to_load:
+            agent_state = checkpoint_to_load['agent_state']
+        else:
+            agent_state = checkpoint_to_load
+
+        # Check first critic layer to infer action dimension
+        if isinstance(agent_state, tuple) and len(agent_state) >= 1:
+            q1_state = agent_state[0]
+            if isinstance(q1_state, dict) and 'layers.0.weight' in q1_state:
+                critic_input_dim = q1_state['layers.0.weight'].shape[1]
+                # Critic input = obs_dim + action_dim
+                # If critic_input_dim == 22: old version (18 obs + 4 actions)
+                # If critic_input_dim == 26: new version (18 obs + 8 actions)
+                if critic_input_dim == 22:
+                    critic_action_dim = 4
+                    print(f"[CHECKPOINT] Detected OLD format: critic input={critic_input_dim} (18 obs + 4 actions)")
+                elif critic_input_dim == 26:
+                    critic_action_dim = 8
+                    print(f"[CHECKPOINT] Detected NEW format: critic input={critic_input_dim} (18 obs + 8 actions)")
+                else:
+                    # Try to infer: assume obs_dim=18
+                    inferred_action_dim = critic_input_dim - 18
+                    if inferred_action_dim in [4, 8]:
+                        critic_action_dim = inferred_action_dim
+                        print(f"[CHECKPOINT] Inferred action_dim={critic_action_dim} from critic input={critic_input_dim}")
+        
+        print(f"[CHECKPOINT] Will initialize agent with critic_action_dim={critic_action_dim}")
+        print("###############################")
+
     # create the TD3 agent with all the hyperparams
     agent = TD3Agent(
-        env.observation_space,
+        obs_space,  # Use corrected observation space if there was a mismatch
         single_player_action_space,
         eps=args.eps,
         eps_min=args.eps_min,
@@ -174,35 +246,31 @@ def train(args):
         q_clip=args.q_clip,
         q_clip_mode=args.q_clip_mode,
         use_dual_buffers=args.use_dual_buffers,
+        critic_action_dim=critic_action_dim,  # Pass inferred dimension
     )
 
     #########################################################
-    # Load checkpoint if specified
+    # Now load the checkpoint into the agent
     #########################################################
-    if args.checkpoint:
-        checkpoint_path = Path(args.checkpoint)
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+    if checkpoint_to_load is not None:
         print("###############################")
-        print(f"Loading checkpoint from: {checkpoint_path}")
+        print(f"Loading checkpoint into agent...")
 
-        if isinstance(checkpoint, tuple):
-            agent.restore_state(checkpoint)
+        if isinstance(checkpoint_to_load, tuple):
+            agent.restore_state(checkpoint_to_load)
             print("Loaded TD3 state (Q1, Q2, policy networks)")
-        elif isinstance(checkpoint, dict):
-            if 'agent_state' in checkpoint:
-                agent.restore_state(checkpoint['agent_state'])
+        elif isinstance(checkpoint_to_load, dict):
+            if 'agent_state' in checkpoint_to_load:
+                agent.restore_state(checkpoint_to_load['agent_state'])
                 print("Loaded agent state from checkpoint")
-                if 'episode' in checkpoint:
-                    i_episode_start = checkpoint['episode']  # resume from this episode
+                if 'episode' in checkpoint_to_load:
+                    i_episode_start = checkpoint_to_load['episode']  # resume from this episode
                     print(f"Resuming from episode {i_episode_start}")
 
         print("Checkpoint loaded successfully")
         print("###############################")
 
-        checkpoint_name = checkpoint_path.stem
+        checkpoint_name = Path(args.checkpoint).stem
         run_name = f"TD3-TRANSFER-{checkpoint_name}-to-{args.mode}-{args.opponent}"
 
     #########################################################
@@ -258,10 +326,14 @@ def train(args):
         dynamic_anchor_mixing=args.dynamic_anchor_mixing,
         performance_gated=args.performance_gated_selfplay,
         gate_winrate=args.selfplay_gate_winrate,
-        gate_variance=args.selfplay_gate_variance,
         regression_rollback=args.regression_rollback,
         regression_threshold=args.regression_threshold,
+        observation_space=obs_space,
+        action_space=single_player_action_space,
     )
+    
+    # Set the target episode for self-play activation
+    self_play_manager.start_episode = args.self_play_start
 
     #########################################################
     # Initialize metrics tracker
@@ -275,6 +347,7 @@ def train(args):
     print(f"Max timesteps per episode: {max_timesteps}")
     print(f"Warmup episodes: {args.warmup_episodes} (NO training, just exploration)")
     print(f"Epsilon: {args.eps} -> {args.eps_min} (decay: {args.eps_decay})")
+    print(f"Evaluation interval: {args.eval_interval} episodes")
     print("###############################")
 
     if args.self_play_start > 0:
@@ -290,7 +363,7 @@ def train(args):
         if args.dynamic_anchor_mixing:
             print("Dynamic anchor mixing enabled (anti-forgetting)")
         if args.performance_gated_selfplay:
-            print(f"Performance-gated activation: {args.selfplay_gate_winrate:.0%} win-rate, {args.selfplay_gate_variance:.2f} variance")
+            print(f"Performance-gated activation: {args.selfplay_gate_winrate:.0%} win-rate")
         if args.regression_rollback:
             print(f"Regression rollback enabled: threshold {args.regression_threshold:.0%}")
         print("###############################")
@@ -329,13 +402,28 @@ def train(args):
 
         #########################################################
         # Self-play management
+        # Manages opponent selection and activation for self-play
+        # when self-play infrastructure is initialized
         #########################################################
-        if args.self_play_start > 0:
+        opponent_type = None  # 'weak', 'strong', 'self-play', or None (use default)
+        if self_play_manager is not None:
             # Check if should activate self-play
             if not self_play_manager.active:
-                rolling_variance = tracker.get_rolling_win_rate_variance(chunk_size=100)
                 last_eval_vs_weak = tracker.get_last_eval('weak')
-                if self_play_manager.should_activate(i_episode, last_eval_vs_weak, rolling_variance):
+                
+                # Debug logging for activation check (especially around eval episodes)
+                if (i_episode % args.eval_interval == 0 or 
+                    (i_episode > args.self_play_start and i_episode <= args.self_play_start + 5) or
+                    (i_episode % 50 == 0 and i_episode >= args.self_play_start)):
+                    print(f"\n[ACTIVATION CHECK ep={i_episode}]")
+                    print(f"  start_episode={self_play_manager.start_episode}")
+                    print(f"  last_eval_vs_weak={last_eval_vs_weak}")
+                    print(f"  performance_gated={self_play_manager.performance_gated}")
+                    print(f"  gate_winrate={self_play_manager.gate_winrate}")
+                    will_activate = self_play_manager.should_activate(i_episode, last_eval_vs_weak)
+                    print(f"  → should_activate={will_activate}\n")
+                
+                if self_play_manager.should_activate(i_episode, last_eval_vs_weak):
                     self_play_manager.activate(i_episode, selfplay_checkpoints_dir, agent)
 
             # Update pool with new checkpoint
@@ -343,10 +431,12 @@ def train(args):
             if removed_episode:
                 print(f"Added ep{i_episode} to pool (removed ep{removed_episode})")
 
-            # Select opponent for this episode
-            use_weak_this_episode = self_play_manager.select_opponent(i_episode)
+            # Select opponent for this episode (returns 'weak', 'strong', or 'self-play')
+            opponent_type = self_play_manager.select_opponent(i_episode)
         else:
-            use_weak_this_episode = False
+            # Self-play not configured, use the configured opponent
+            # args.opponent is 'weak' or 'strong', so map it directly
+            opponent_type = args.opponent if args.opponent in ['weak', 'strong'] else None
 
         #########################################################
         # Episode loop
@@ -369,11 +459,19 @@ def train(args):
             #########################################################
             if args.opponent == 'self':
                 action2 = agent2.act(obs_agent2)
-            elif self_play_manager.active and self_play_manager.opponent is not None and not use_weak_this_episode:
+            elif opponent_type == 'self-play' and self_play_manager.active and self_play_manager.opponent is not None:
+                # Use self-play opponent
                 action2 = self_play_manager.get_action(obs_agent2)
                 if action2 is None:  # Fallback
-                    action2 = opponent.act(obs_agent2)
+                    action2 = weak_eval_bot.act(obs_agent2)
+            elif opponent_type == 'weak':
+                # Use weak opponent
+                action2 = weak_eval_bot.act(obs_agent2)
+            elif opponent_type == 'strong':
+                # Use strong opponent
+                action2 = strong_eval_bot.act(obs_agent2)
             else:
+                # Default: use configured opponent (before self-play starts)
                 action2 = opponent.act(obs_agent2)
 
             #########################################################
@@ -415,14 +513,21 @@ def train(args):
             #########################################################
             # Store transition
             #########################################################
-            # dual buffers: separate anchor (weak) and pool (self-play) experiences
+            # Store action_combined (8D: 4D agent + 4D opponent) so critic can see full game state
+            # This matches the old version where critic had 26D input (18 obs + 8 actions)
+            # dual buffers: separate anchor (weak/strong) and pool (self-play) experiences
             if args.use_dual_buffers and hasattr(agent, 'buffer_anchor') and hasattr(agent, 'buffer_pool'):
-                if use_weak_this_episode or not self_play_manager.active:
-                    agent.buffer_anchor.add_transition((obs_curr, action1, r1_shaped, obs_next.copy(), float(done or truncated)))
+                # Anchor buffer: weak and strong opponent experiences
+                # Pool buffer: self-play experiences
+                if opponent_type in ['weak', 'strong'] or (not self_play_manager.active and opponent_type is None):
+                    agent.buffer_anchor.add_transition((obs_curr, action_combined.copy(), r1_shaped, obs_next.copy(), float(done or truncated)))
+                elif opponent_type == 'self-play':
+                    agent.buffer_pool.add_transition((obs_curr, action_combined.copy(), r1_shaped, obs_next.copy(), float(done or truncated)))
                 else:
-                    agent.buffer_pool.add_transition((obs_curr, action1, r1_shaped, obs_next.copy(), float(done or truncated)))
+                    # Fallback: use main buffer
+                    agent.buffer.add_transition((obs_curr, action_combined.copy(), r1_shaped, obs_next.copy(), float(done or truncated)))
             else:
-                agent.buffer.add_transition((obs_curr, action1, r1_shaped, obs_next.copy(), float(done or truncated)))
+                agent.buffer.add_transition((obs_curr, action_combined.copy(), r1_shaped, obs_next.copy(), float(done or truncated)))
 
             # Update tracker
             tracker.add_step_reward(r1_shaped)
@@ -500,8 +605,11 @@ def train(args):
         #########################################################
         # Self-play result tracking
         #########################################################
-        if args.self_play_start > 0 and self_play_manager.use_pfsp:
-            self_play_manager.record_result(winner, use_weak_this_episode)
+        if self_play_manager is not None and self_play_manager.use_pfsp:
+            # Record result for PFSP tracking (only for self-play opponents)
+            if opponent_type == 'self-play':
+                self_play_manager.record_result(winner, False)  # False = not weak opponent
+            # Don't record for anchor opponents (weak/strong), only self-play
 
         #########################################################
         # Update progress bar
@@ -513,8 +621,16 @@ def train(args):
             'win_rate': f'{win_rate:.2%}',
             'wins': f'{tracker.wins}/{tracker.total_games}'
         }
-        if self_play_manager.active:
-            postfix['mode'] = 'SELF-PLAY'
+        
+        #########################################################
+        # Self-play status indicator for progress bar
+        #########################################################
+        if self_play_manager is not None:
+            if self_play_manager.active:
+                postfix['SP'] = f'ACTIVE (pool:{len(self_play_manager.pool)})'
+            else:
+                postfix['SP'] = f'WAITING (ep {args.self_play_start})'
+        
         pbar.set_postfix(postfix)
 
         #########################################################
@@ -563,40 +679,135 @@ def train(args):
                     log_metrics["strategic/opponent_avg_movement"] = tracker.strategic_stats.get('avg_opponent_movement', 0.0)
                     log_metrics["strategic/forcing_bonus"] = tracker.strategic_stats.get('forcing_bonus', 0.0)
 
-            if args.self_play_start > 0:
-                log_metrics.update(self_play_manager.get_stats())
+            #########################################################
+            # Self-Play Metrics
+            # Detailed insights into opponent mixing, buffer distribution,
+            # and PFSP curriculum progression
+            # Logged whenever self-play is configured (regardless of activation)
+            #########################################################
+            if self_play_manager is not None:
+                sp_stats = self_play_manager.get_stats()
+                
+                #########################################################
+                # Add stats directly (they already have 'selfplay/' prefix)
+                #########################################################
+                log_metrics.update(sp_stats)
+                
+                #########################################################
+                # Episode Opponent Type Tracking
+                # Logs which opponent type was faced in this episode
+                # Useful for understanding opponent mixing during self-play
+                #########################################################
+                if opponent_type == 'weak':
+                    log_metrics['selfplay/episode_opponent_type_weak'] = 1.0
+                    log_metrics['selfplay/episode_opponent_type_strong'] = 0.0
+                    log_metrics['selfplay/episode_opponent_type_selfplay'] = 0.0
+                elif opponent_type == 'strong':
+                    log_metrics['selfplay/episode_opponent_type_weak'] = 0.0
+                    log_metrics['selfplay/episode_opponent_type_strong'] = 1.0
+                    log_metrics['selfplay/episode_opponent_type_selfplay'] = 0.0
+                elif opponent_type == 'self-play':
+                    log_metrics['selfplay/episode_opponent_type_weak'] = 0.0
+                    log_metrics['selfplay/episode_opponent_type_strong'] = 0.0
+                    log_metrics['selfplay/episode_opponent_type_selfplay'] = 1.0
+                else:
+                    # Pre-self-play: training with configured opponent
+                    log_metrics['selfplay/episode_opponent_type_weak'] = 0.0
+                    log_metrics['selfplay/episode_opponent_type_strong'] = 0.0
+                    log_metrics['selfplay/episode_opponent_type_selfplay'] = 0.0
 
             #########################################################
-            # Periodic evaluation (always runs against both weak and strong)
+            # Periodic evaluation (comprehensive three-way evaluation)
+            # Always evaluate vs weak, strong, and self-play opponents
+            # to track robustness across the full opponent spectrum
             #########################################################
-            if i_episode % args.eval_interval == 0:
-                print(f"\nEvaluating vs WEAK opponent...")
+            # Debug: Always check evaluation condition (for debugging)
+            eval_modulo = i_episode % args.eval_interval
+            should_eval = (eval_modulo == 0)
+            if i_episode <= i_episode_start + 30 or should_eval:  # Print for first 30 episodes OR when eval should run
+                print(f"[EVAL CHECK ep={i_episode}] eval_interval={args.eval_interval}, modulo={eval_modulo}, should_eval={should_eval}", flush=True)
+            
+            if should_eval:
+                # Debug: Always print when evaluation triggers
+                print(f"\n[EVAL TRIGGER] Episode {i_episode}: eval_interval={args.eval_interval}, modulo={i_episode % args.eval_interval}")
+                print(f"\n{'='*60}")
+                print(f"COMPREHENSIVE EVALUATION at Episode {i_episode}")
+                print(f"{'='*60}")
+                
+                #########################################################
+                # Evaluation vs WEAK opponent
+                # Baseline: should maintain high win-rate to prevent forgetting
+                #########################################################
+                print(f"Evaluating vs WEAK opponent (baseline)...")
                 eval_weak = evaluate_vs_opponent(
                     agent, weak_eval_bot, mode=mode,
-                    num_episodes=100, max_timesteps=max_timesteps, eval_seed=args.seed
+                    num_episodes=args.eval_episodes, max_timesteps=max_timesteps, eval_seed=args.seed, keep_mode=args.keep_mode
                 )
-                log_metrics["eval/vs_weak_win_rate"] = eval_weak['win_rate']
-                log_metrics["eval/vs_weak_win_rate_decisive"] = eval_weak['win_rate_decisive']
-                log_metrics["eval/vs_weak_tie_rate"] = eval_weak['tie_rate']
-                log_metrics["eval/vs_weak_loss_rate"] = eval_weak['loss_rate']
-                log_metrics["eval/vs_weak_avg_reward"] = eval_weak['avg_reward']
-                print(f"   [EVAL] vs weak: {eval_weak['win_rate']:.1%} W/L/T")
-
-                # Also evaluate vs strong
-                print(f"Evaluating vs STRONG opponent...")
-                eval_strong = evaluate_vs_opponent(
-                    agent, strong_eval_bot, mode=mode,
-                    num_episodes=100, max_timesteps=max_timesteps, eval_seed=args.seed
-                )
-                log_metrics["eval/vs_strong_win_rate"] = eval_strong['win_rate']
-                log_metrics["eval/vs_strong_win_rate_decisive"] = eval_strong['win_rate_decisive']
-                log_metrics["eval/vs_strong_tie_rate"] = eval_strong['tie_rate']
-                log_metrics["eval/vs_strong_loss_rate"] = eval_strong['loss_rate']
-                log_metrics["eval/vs_strong_avg_reward"] = eval_strong['avg_reward']
-                print(f"   [EVAL] vs strong: {eval_strong['win_rate']:.1%} W/L/T")
+                log_metrics["eval/weak/win_rate"] = eval_weak['win_rate']
+                log_metrics["eval/weak/win_rate_decisive"] = eval_weak['win_rate_decisive']
+                log_metrics["eval/weak/tie_rate"] = eval_weak['tie_rate']
+                log_metrics["eval/weak/loss_rate"] = eval_weak['loss_rate']
+                log_metrics["eval/weak/avg_reward"] = eval_weak['avg_reward']
+                log_metrics["eval/weak/wins"] = eval_weak['wins']
+                log_metrics["eval/weak/losses"] = eval_weak['losses']
+                log_metrics["eval/weak/ties"] = eval_weak['ties']
+                print(f"   ✓ vs WEAK: {eval_weak['win_rate_decisive']:.1%} win (W:{eval_weak['wins']} L:{eval_weak['losses']} T:{eval_weak['ties']}) | Reward: {eval_weak['avg_reward']:.2f}")
 
                 #########################################################
-                # Track eval results
+                # Self-play activation check (if configured and not yet active)
+                #########################################################
+                if self_play_manager is not None and not self_play_manager.active:
+                    activation_check = self_play_manager.should_activate(i_episode, eval_weak['win_rate_decisive'])
+                    
+                    print(f"\n[SELF-PLAY CHECK]")
+                    print(f"  Win rate vs weak: {eval_weak['win_rate_decisive']:.1%} (gate: {args.selfplay_gate_winrate:.1%})")
+                    print(f"  Status: {'✓ ACTIVATION CONDITIONS MET!' if activation_check else '✗ Waiting for gates...'}")
+                    print()
+
+                #########################################################
+                # Evaluation vs STRONG opponent
+                # Challenge: primary training opponent during pre-self-play phase
+                #########################################################
+                print(f"Evaluating vs STRONG opponent (training opponent)...")
+                eval_strong = evaluate_vs_opponent(
+                    agent, strong_eval_bot, mode=mode,
+                    num_episodes=args.eval_episodes, max_timesteps=max_timesteps, eval_seed=args.seed, keep_mode=args.keep_mode
+                )
+                log_metrics["eval/strong/win_rate"] = eval_strong['win_rate']
+                log_metrics["eval/strong/win_rate_decisive"] = eval_strong['win_rate_decisive']
+                log_metrics["eval/strong/tie_rate"] = eval_strong['tie_rate']
+                log_metrics["eval/strong/loss_rate"] = eval_strong['loss_rate']
+                log_metrics["eval/strong/avg_reward"] = eval_strong['avg_reward']
+                log_metrics["eval/strong/wins"] = eval_strong['wins']
+                log_metrics["eval/strong/losses"] = eval_strong['losses']
+                log_metrics["eval/strong/ties"] = eval_strong['ties']
+                print(f"   ✓ vs STRONG: {eval_strong['win_rate_decisive']:.1%} win (W:{eval_strong['wins']} L:{eval_strong['losses']} T:{eval_strong['ties']}) | Reward: {eval_strong['avg_reward']:.2f}")
+
+                #########################################################
+                # Evaluation vs SELF-PLAY opponent (if active)
+                # Mirror-match: tests generalization and robustness
+                #########################################################
+                if self_play_manager.active and self_play_manager.opponent is not None:
+                    print(f"Evaluating vs SELF-PLAY opponent (current pool)...")
+                    eval_selfplay = evaluate_vs_opponent(
+                        agent, self_play_manager.opponent, mode=mode,
+                        num_episodes=args.eval_episodes, max_timesteps=max_timesteps, eval_seed=args.seed, keep_mode=args.keep_mode
+                    )
+                    log_metrics["eval/selfplay/win_rate"] = eval_selfplay['win_rate']
+                    log_metrics["eval/selfplay/win_rate_decisive"] = eval_selfplay['win_rate_decisive']
+                    log_metrics["eval/selfplay/tie_rate"] = eval_selfplay['tie_rate']
+                    log_metrics["eval/selfplay/loss_rate"] = eval_selfplay['loss_rate']
+                    log_metrics["eval/selfplay/avg_reward"] = eval_selfplay['avg_reward']
+                    log_metrics["eval/selfplay/wins"] = eval_selfplay['wins']
+                    log_metrics["eval/selfplay/losses"] = eval_selfplay['losses']
+                    log_metrics["eval/selfplay/ties"] = eval_selfplay['ties']
+                    print(f"   ✓ vs SELF-PLAY: {eval_selfplay['win_rate_decisive']:.1%} win (W:{eval_selfplay['wins']} L:{eval_selfplay['losses']} T:{eval_selfplay['ties']}) | Reward: {eval_selfplay['avg_reward']:.2f}")
+                    log_metrics["eval/selfplay/opponent_age"] = self_play_manager.start_episode - self_play_manager.current_opponent_episode if self_play_manager.active else 0
+
+                print(f"{'='*60}")
+
+                #########################################################
+                # Track eval results for regression detection
                 #########################################################
                 tracker.set_last_eval('weak', eval_weak['win_rate_decisive'])
                 tracker.set_peak_eval('weak', max(tracker.get_peak_eval('weak'), eval_weak['win_rate_decisive']))
@@ -605,7 +816,7 @@ def train(args):
                 #########################################################
                 # Update self-play manager with eval results (only if self-play is active)
                 #########################################################
-                if args.self_play_start > 0 and self_play_manager.active:
+                if self_play_manager is not None and self_play_manager.active:
                     if self_play_manager.dynamic_anchor_mixing:
                         last_eval = tracker.get_last_eval('weak')
                         peak_eval = tracker.get_peak_eval('weak')
@@ -625,6 +836,54 @@ def train(args):
                             else:
                                 print(f"WARNING: Rollback path not found or invalid: {rollback_path}")
 
+                #########################################################
+                # GIF Recording (comprehensive gameplay visualization)
+                # Record behavior during evaluation against all opponent types
+                #########################################################
+                if not args.no_wandb:
+                    try:
+                        print(f"Generating gameplay GIFs for episode {i_episode}...")
+                        
+                        #########################################################
+                        # GIF vs WEAK opponent (baseline behavior)
+                        #########################################################
+                        gif_frames_weak, gif_results_weak = create_gif_for_wandb(
+                            env=env, agent=agent, opponent=weak_eval_bot, mode=mode,
+                            max_timesteps=max_timesteps, num_episodes=args.gif_episodes,
+                            eps=0.0, self_play_opponent=None
+                        )
+                        save_gif_to_wandb(gif_frames_weak, gif_results_weak, i_episode, run_name,
+                                          metric_name="behavior/gameplay_vs_weak")
+                        
+                        #########################################################
+                        # GIF vs STRONG opponent (training opponent)
+                        #########################################################
+                        gif_frames_strong, gif_results_strong = create_gif_for_wandb(
+                            env=env, agent=agent, opponent=strong_eval_bot, mode=mode,
+                            max_timesteps=max_timesteps, num_episodes=args.gif_episodes,
+                            eps=0.0, self_play_opponent=None
+                        )
+                        save_gif_to_wandb(gif_frames_strong, gif_results_strong, i_episode, run_name,
+                                          metric_name="behavior/gameplay_vs_strong")
+
+                        #########################################################
+                        # GIF vs SELF-PLAY opponent (if active and available)
+                        # Shows how agent plays against itself / pool opponents
+                        #########################################################
+                        if self_play_manager.active and self_play_manager.opponent is not None:
+                            gif_frames_selfplay, gif_results_selfplay = create_gif_for_wandb(
+                                env=env, agent=agent, opponent=self_play_manager.opponent, mode=mode,
+                                max_timesteps=max_timesteps, num_episodes=args.gif_episodes,
+                                eps=0.0, self_play_opponent=None
+                            )
+                            save_gif_to_wandb(gif_frames_selfplay, gif_results_selfplay, i_episode, run_name,
+                                              metric_name="behavior/gameplay_vs_selfplay")
+                        
+                        print(f"   ✓ GIFs generated successfully")
+                        
+                    except Exception as e:
+                        print(f"   ✗ GIF recording failed: {e}")
+
                 print("")
 
             #########################################################
@@ -637,8 +896,9 @@ def train(args):
                     for _ in range(min(100, len(agent.buffer))):
                         batch = agent.buffer.sample(1)
                         state = batch[0][0]
+                        action_full = batch[0][1]  # 8D action from buffer
                         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(agent.device)
-                        action_tensor = agent.policy(state_tensor)
+                        action_tensor = torch.FloatTensor(action_full).unsqueeze(0).to(agent.device)  # 8D: [agent, opponent]
                         q_value = agent.Q1.Q_value(state_tensor, action_tensor).item()
                         q_values.append(q_value)
 
@@ -670,39 +930,6 @@ def train(args):
             last_log_episode = i_episode
 
         #########################################################
-        # GIF Recording
-        #########################################################
-        if args.gif_interval > 0 and (i_episode == 1 or i_episode % args.gif_interval == 0) and not args.no_wandb:
-            try:
-                if self_play_manager.active and self_play_manager.opponent is not None:
-                    # Record vs target opponent
-                    gif_frames_target, gif_results_target = create_gif_for_wandb(
-                        env=env, agent=agent, opponent=opponent, mode=mode,
-                        max_timesteps=max_timesteps, num_episodes=args.gif_episodes,
-                        eps=0.0, self_play_opponent=None
-                    )
-                    save_gif_to_wandb(gif_frames_target, gif_results_target, i_episode, run_name,
-                                      metric_name="behavior/gameplay_gif_vs_target")
-
-                    # Record vs self-play opponent
-                    gif_frames_selfplay, gif_results_selfplay = create_gif_for_wandb(
-                        env=env, agent=agent, opponent=opponent, mode=mode,
-                        max_timesteps=max_timesteps, num_episodes=args.gif_episodes,
-                        eps=0.0, self_play_opponent=self_play_manager.opponent
-                    )
-                    save_gif_to_wandb(gif_frames_selfplay, gif_results_selfplay, i_episode, run_name,
-                                      metric_name="behavior/gameplay_gif_vs_selfplay")
-                else:
-                    gif_frames, gif_results = create_gif_for_wandb(
-                        env=env, agent=agent, opponent=opponent, mode=mode,
-                        max_timesteps=max_timesteps, num_episodes=args.gif_episodes,
-                        eps=0.0, self_play_opponent=None
-                    )
-                    save_gif_to_wandb(gif_frames, gif_results, i_episode, run_name)
-            except Exception as e:
-                print(f"GIF recording failed at episode {i_episode}: {e}")
-
-        #########################################################
         # Save checkpoint
         #########################################################
         if i_episode % args.save_interval == 0:
@@ -717,7 +944,7 @@ def train(args):
             print(f'--- Checkpoint saved: {checkpoint_path.name} ---')
             
             # Update best checkpoint for regression rollback if enabled
-            if args.self_play_start > 0 and self_play_manager.regression_rollback:
+            if self_play_manager is not None and self_play_manager.regression_rollback:
                 last_eval = tracker.get_last_eval('weak')
                 if last_eval is not None and abs(last_eval - self_play_manager.best_eval_vs_weak) < 0.001:
                     # This checkpoint corresponds to the best eval (within small tolerance for float comparison)

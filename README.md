@@ -47,7 +47,6 @@ python train_hockey.py \
     --dynamic_anchor_mixing \
     --performance_gated_selfplay \
     --selfplay_gate_winrate 0.80 \
-    --selfplay_gate_variance 0.3 \
     --regression_rollback \
     --regression_threshold 0.15
 ```

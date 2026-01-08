@@ -5,9 +5,9 @@ This file was developed with assistance from AI autocomplete features in Cursor 
 
 import hockey.hockey_env as h_env
 from hockey.hockey_env import BasicOpponent
-def evaluate_vs_opponent(agent, opponent, mode, num_episodes=100, max_timesteps=250, eval_seed=None):
+def evaluate_vs_opponent(agent, opponent, mode, num_episodes=100, max_timesteps=250, eval_seed=None, keep_mode=True):
     import numpy as np
-    eval_env = h_env.HockeyEnv(mode=mode, keep_mode=True)
+    eval_env = h_env.HockeyEnv(mode=mode, keep_mode=keep_mode)
     wins = 0
     losses = 0
     ties = 0
@@ -69,9 +69,9 @@ def evaluate_vs_opponent(agent, opponent, mode, num_episodes=100, max_timesteps=
     total = wins + losses + ties
     decisive_games = wins + losses
     #########################################################
-    # return the metrics for wandb logging
+    # Comprehensive evaluation metrics for W&B logging
+    # Includes win rates, loss rates, tie rates, and rewards
     #########################################################
-
 
     return {
         'win_rate': wins / total if total > 0 else 0,  # All games (includes ties)
@@ -79,7 +79,9 @@ def evaluate_vs_opponent(agent, opponent, mode, num_episodes=100, max_timesteps=
         'loss_rate': losses / total if total > 0 else 0,
         'tie_rate': ties / total if total > 0 else 0,
         'avg_reward': total_reward / num_episodes,
+        'total_reward': total_reward,
         'wins': wins,
         'losses': losses,
         'ties': ties,
+        'total_games': total,
     }

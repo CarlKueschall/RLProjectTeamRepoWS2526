@@ -91,7 +91,12 @@ class TD3Agent:
         self._observation_space = observation_space
         self._obs_dim = self._observation_space.shape[0]
         self._action_space = action_space
-        self._action_n = action_space.shape[0]
+        self._action_n = action_space.shape[0]  # Policy output dimension (4D: agent's own actions)
+        
+        # Critic needs to see full 8D actions (4D agent + 4D opponent) for 26D total input
+        # This matches the old version where critic had 26D input (18 obs + 8 actions)
+        # Allow override for loading old checkpoints that used 4D actions (22D total: 18 obs + 4 actions)
+        self._critic_action_dim = userconfig.get("critic_action_dim", 8)  # Default: 8D (new), can be 4D (old checkpoints)
 
         force_cpu = userconfig.get("force_cpu", False) #added this to test overhead vs parallelization on MPS.
         self.device = get_device(force_cpu=force_cpu)
@@ -231,10 +236,11 @@ class TD3Agent:
         #########################################################
         # for td3 specifically we have to use the twin critics to keep it stable.
         # this way by taking the minimum of the two critics we can ensure that we're not over-estimating the q-value
+        # Critic uses 8D actions (agent + opponent) for 26D total input (18 obs + 8 actions)
         #########################################################
         self.Q1 = QFunction(
             observation_dim=self._obs_dim,
-            action_dim=self._action_n,
+            action_dim=self._critic_action_dim,  # 8D: full action space including opponent
             hidden_sizes=self._config["hidden_sizes_critic"],
             learning_rate=self._config["learning_rate_critic"],
             device=self.device,
@@ -244,7 +250,7 @@ class TD3Agent:
 
         self.Q2 = QFunction(
             observation_dim=self._obs_dim,
-            action_dim=self._action_n,
+            action_dim=self._critic_action_dim,  # 8D: full action space including opponent
             hidden_sizes=self._config["hidden_sizes_critic"],
             learning_rate=self._config["learning_rate_critic"],
             device=self.device,
@@ -254,7 +260,7 @@ class TD3Agent:
         # then replicate the targets equivalently
         self.Q1_target = QFunction(
             observation_dim=self._obs_dim,
-            action_dim=self._action_n,
+            action_dim=self._critic_action_dim,  # 8D: full action space including opponent
             hidden_sizes=self._config["hidden_sizes_critic"],
             learning_rate=0,
             device=self.device,
@@ -264,7 +270,7 @@ class TD3Agent:
 
         self.Q2_target = QFunction(
             observation_dim=self._obs_dim,
-            action_dim=self._action_n,
+            action_dim=self._critic_action_dim,  # 8D: full action space including opponent
             hidden_sizes=self._config["hidden_sizes_critic"],
             learning_rate=0,
             device=self.device,
@@ -427,24 +433,34 @@ class TD3Agent:
 
             # from all the data we sampled, now we need to split it into the states, actions, rewards, next states, and dones.
             # have to ensure to 1. convert to tensors, 2. convert to the device, 3. convert to the correct type.
+            # Note: stored actions are 8D (4D agent + 4D opponent) for critic to see full game state
             s = torch.from_numpy(np.stack(data[:, 0]).astype(np.float32)).to(self.device)
-            a = torch.from_numpy(np.stack(data[:, 1]).astype(np.float32)).to(self.device)
+            a_full = torch.from_numpy(np.stack(data[:, 1]).astype(np.float32)).to(self.device)  # 8D: [agent_action, opponent_action]
+            a_agent = a_full[:, :4]  # Extract agent's 4D action for policy updates
             rew = torch.from_numpy(np.stack(data[:, 2]).astype(np.float32)[:, None]).to(self.device)
             s_prime = torch.from_numpy(np.stack(data[:, 3]).astype(np.float32)).to(self.device)
             done = torch.from_numpy(np.stack(data[:, 4]).astype(np.float32)[:, None]).to(self.device)
 
             # now we need to compute the target Q-values
             with torch.no_grad(): # NO GRAD, just outputting what the Target network currently 'thinks' about the next state.
-                a_next = self.policy_target(s_prime)
-                noise = torch.randn_like(a_next) * self._config["target_noise_std"]
+                # Policy outputs 4D action (agent's own action)
+                a_next_agent = self.policy_target(s_prime)
+                noise = torch.randn_like(a_next_agent) * self._config["target_noise_std"]
                 noise = noise.clamp(-self._config["target_noise_clip"], self._config["target_noise_clip"])
-                a_next_smooth = a_next + noise
-                a_next_smooth = a_next_smooth.clamp(
+                a_next_agent_smooth = a_next_agent + noise
+                a_next_agent_smooth = a_next_agent_smooth.clamp(
                     torch.from_numpy(self._action_space.low).to(self.device),
                     torch.from_numpy(self._action_space.high).to(self.device)
                 )
-                q1_target_next = self.Q1_target.Q_value(s_prime, a_next_smooth)
-                q2_target_next = self.Q2_target.Q_value(s_prime, a_next_smooth)
+                # For target Q-value, we need 8D action (agent + opponent)
+                # Use opponent action from next state (extract from stored action if available, or use zeros)
+                # Since we don't have opponent's next action, we'll use the opponent action from current state
+                # This is an approximation but necessary for the critic architecture
+                a_next_opponent = a_full[:, 4:]  # Use opponent action from current state
+                a_next_full = torch.cat([a_next_agent_smooth, a_next_opponent], dim=1)  # 8D: [agent, opponent]
+                
+                q1_target_next = self.Q1_target.Q_value(s_prime, a_next_full)
+                q2_target_next = self.Q2_target.Q_value(s_prime, a_next_full)
                 q_target_next = torch.min(q1_target_next, q2_target_next)
                 target_q = rew + self._config['discount'] * q_target_next * (1 - done)
 
@@ -467,17 +483,25 @@ class TD3Agent:
             if vf_reg_lambda > 0:  # Only if regularization enabled
                 should_be_active = self._should_be_active(s)  # States where agent should move toward puck
                 if should_be_active.sum() > 0:
-                    a_passive = torch.zeros_like(a)  # Do nothing
-                    a_active = self._generate_active_action(s[should_be_active])  # Move toward puck
+                    # For regularization, we compare agent's passive vs active actions
+                    # Need to construct 8D actions: [agent_action, opponent_action]
+                    a_passive_agent = torch.zeros((should_be_active.sum(), 4), device=self.device)  # Do nothing (4D)
+                    a_active_agent = self._generate_active_action(s[should_be_active])  # Move toward puck (4D)
+                    a_opponent_reg = a_full[should_be_active, 4:]  # Opponent actions (4D)
+                    
+                    a_passive_full = torch.cat([a_passive_agent, a_opponent_reg], dim=1)  # 8D: [passive_agent, opponent]
+                    a_active_full = torch.cat([a_active_agent, a_opponent_reg], dim=1)  # 8D: [active_agent, opponent]
+                    
                     # Compare Q-values: passive vs active
-                    q1_passive = self.Q1.Q_value(s[should_be_active], a_passive[should_be_active])
-                    q1_active = self.Q1.Q_value(s[should_be_active], a_active)
+                    q1_passive = self.Q1.Q_value(s[should_be_active], a_passive_full)
+                    q1_active = self.Q1.Q_value(s[should_be_active], a_active_full)
                     # Penalize if Q(passive) > Q(active) - we want movement to be better!
                     q1_wrong_ordering = torch.relu(q1_passive - q1_active)
                     vf_reg_q1 = vf_reg_lambda * q1_wrong_ordering.mean()
 
             # Pass regularization term to fit - it gets added to the loss
-            q1_loss_value = self.Q1.fit(s, a, target_q, weights=is_weights, regularization=vf_reg_q1)
+            # Use full 8D action for critic update
+            q1_loss_value = self.Q1.fit(s, a_full, target_q, weights=is_weights, regularization=vf_reg_q1)
 
 
             #########################################################
@@ -487,10 +511,17 @@ class TD3Agent:
             if vf_reg_lambda > 0:  # Same logic for second critic
                 should_be_active = self._should_be_active(s)
                 if should_be_active.sum() > 0:
-                    a_passive = torch.zeros_like(a)
-                    a_active = self._generate_active_action(s[should_be_active])
-                    q2_passive = self.Q2.Q_value(s[should_be_active], a_passive[should_be_active])
-                    q2_active = self.Q2.Q_value(s[should_be_active], a_active)
+                    # For regularization, we compare agent's passive vs active actions
+                    # Need to construct 8D actions: [agent_action, opponent_action]
+                    a_passive_agent = torch.zeros((should_be_active.sum(), 4), device=self.device)  # Do nothing (4D)
+                    a_active_agent = self._generate_active_action(s[should_be_active])  # Move toward puck (4D)
+                    a_opponent_reg = a_full[should_be_active, 4:]  # Opponent actions (4D)
+                    
+                    a_passive_full = torch.cat([a_passive_agent, a_opponent_reg], dim=1)  # 8D: [passive_agent, opponent]
+                    a_active_full = torch.cat([a_active_agent, a_opponent_reg], dim=1)  # 8D: [active_agent, opponent]
+                    
+                    q2_passive = self.Q2.Q_value(s[should_be_active], a_passive_full)
+                    q2_active = self.Q2.Q_value(s[should_be_active], a_active_full)
                     # Same penalty: make active better than passive
                     q2_wrong_ordering = torch.relu(q2_passive - q2_active)
                     vf_reg_q2 = vf_reg_lambda * q2_wrong_ordering.mean()
@@ -498,7 +529,8 @@ class TD3Agent:
             # Detach target_q to avoid backward through graph twice
             # target_q is computed in no_grad() context, but detaching explicitly ensures no graph issues
             target_q_detached = target_q.detach() if isinstance(target_q, torch.Tensor) else target_q
-            q2_loss_value = self.Q2.fit(s, a, target_q_detached, weights=is_weights, regularization=vf_reg_q2)
+            # Use full 8D action for critic update
+            q2_loss_value = self.Q2.fit(s, a_full, target_q_detached, weights=is_weights, regularization=vf_reg_q2)
             avg_critic_loss = (q1_loss_value + q2_loss_value) / 2
 
             if self.total_steps % self._config["policy_freq"] == 0:
@@ -508,10 +540,15 @@ class TD3Agent:
                 self.optimizer.zero_grad()
 
                 # Ask the policy right now : "what action should we take here?"
-                a_current = self.policy(s)
+                a_current_agent = self.policy(s)  # Policy outputs 4D (agent's own action)
+                # For critic evaluation, we need 8D action (agent + opponent)
+                # Use opponent actions from stored buffer
+                a_current_opponent = a_full[:, 4:]  # Opponent actions (4D)
+                a_current_full = torch.cat([a_current_agent, a_current_opponent], dim=1)  # 8D: [agent, opponent]
+                
                 # Using twin critics again
-                q1_val = self.Q1.Q_value(s, a_current)
-                q2_val = self.Q2.Q_value(s, a_current)
+                q1_val = self.Q1.Q_value(s, a_current_full)
+                q2_val = self.Q2.Q_value(s, a_current_full)
 
                 # Pick the LOWER estimate (be pessimistic, don't trust overestimated values)
                 q_val = torch.min(q1_val, q2_val)

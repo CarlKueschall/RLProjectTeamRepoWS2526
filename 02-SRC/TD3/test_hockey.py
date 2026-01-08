@@ -23,6 +23,10 @@ def parse_args():
     parser.add_argument('--opponent', type=str, default='weak',
                         choices=['weak', 'strong', 'self'],
                         help='Opponent type (default: weak)')
+    parser.add_argument('--keep_mode', action='store_true', default=True,
+                        help='Enable keep mode (allows puck holding, default: True)')
+    parser.add_argument('--no_keep_mode', dest='keep_mode', action='store_false',
+                        help='Disable keep mode (puck bounces immediately on contact)')
     parser.add_argument('--episodes', type=int, default=100,
                         help='Number of test episodes (default: 100)')
     # Checkpoint
@@ -172,7 +176,7 @@ def test(args):
     # Create environment (hockey doesn't use render_mode in constructor)
     #########################################################
     mode = get_mode(args.mode)
-    env = h_env.HockeyEnv(mode=mode, keep_mode=True)
+    env = h_env.HockeyEnv(mode=mode, keep_mode=args.keep_mode)
 
     #########################################################
     # Create opponent

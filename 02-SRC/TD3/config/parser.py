@@ -17,6 +17,10 @@ def parse_args():
     parser.add_argument('--opponent', type=str, default='weak',
                         choices=['weak', 'strong', 'self'],
                         help='Opponent type (default: weak)')
+    parser.add_argument('--keep_mode', action='store_true', default=True,
+                        help='Enable keep mode (allows puck holding, default: True)')
+    parser.add_argument('--no_keep_mode', dest='keep_mode', action='store_false',
+                        help='Disable keep mode (puck bounces immediately on contact)')
 
     # Training
     parser.add_argument('--max_episodes', type=int, default=5000,
@@ -89,8 +93,10 @@ def parse_args():
                         help='Episodes between checkpoints (default: 500)')
     parser.add_argument('--no_wandb', action='store_true',
                         help='Disable W&B logging')
-    parser.add_argument('--gif_interval', type=int, default=500,
-                        help='Episodes between GIF recordings for W&B (default: 500, 0=disable)')
+    # GIF generation now happens automatically during evaluations (see --eval_interval)
+    # Keeping gif_interval for backward compatibility but it's ignored
+    parser.add_argument('--gif_interval', type=int, default=0,
+                        help='DEPRECATED: GIFs now generate during evaluations (--eval_interval)')
     parser.add_argument('--gif_episodes', type=int, default=3,
                         help='Number of episodes to record per GIF (stitched horizontally, default: 3)')
 
@@ -115,6 +121,8 @@ def parse_args():
                         help='Save current agent to pool every N episodes during self-play (default: 500)')
     parser.add_argument('--eval_interval', type=int, default=1000,
                         help='Evaluate against weak opponent every N episodes (applies to all phases, default: 1000)')
+    parser.add_argument('--eval_episodes', type=int, default=100,
+                        help='Number of episodes to run per evaluation (default: 100)')
     parser.add_argument('--self_play_weak_ratio', type=float, default=0.5,
                         help='Ratio of episodes to train against weak opponent during self-play (default: 0.5 = 50%%)')
 
@@ -131,8 +139,6 @@ def parse_args():
                         help='Gate self-play activation on performance (90%% vs weak + low variance) instead of episode count')
     parser.add_argument('--selfplay_gate_winrate', type=float, default=0.90,
                         help='Min eval win-rate vs weak to activate self-play (default: 0.90)')
-    parser.add_argument('--selfplay_gate_variance', type=float, default=0.10,
-                        help='Max rolling win-rate std to activate self-play (default: 0.10)')
     parser.add_argument('--regression_rollback', action='store_true', default=False,
                         help='Enable automatic rollback on performance regression')
     parser.add_argument('--regression_threshold', type=float, default=0.15,

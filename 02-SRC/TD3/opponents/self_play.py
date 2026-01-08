@@ -8,7 +8,7 @@ import pathlib
 from collections import deque
 import numpy as np
 import torch
-import agents.td3_agent as TD3Agent
+from agents.td3_agent import TD3Agent
 from agents.model import Model
 
 class SelfPlayManager:
@@ -19,8 +19,9 @@ class SelfPlayManager:
                  weak_ratio=0.5, device=None,
                  use_pfsp=False, pfsp_mode="variance",
                  dynamic_anchor_mixing=False,
-                 performance_gated=False, gate_winrate=0.90, gate_variance=0.10,
-                 regression_rollback=False, regression_threshold=0.15):
+                 performance_gated=False, gate_winrate=0.90,
+                 regression_rollback=False, regression_threshold=0.15,
+                 observation_space=None, action_space=None):
         ########################################################
         # Initialize self-play manager.
         #Arguments:
@@ -33,14 +34,17 @@ class SelfPlayManager:
         # dynamic_anchor_mixing: Adjust weak_ratio based on forgetting
         # performance_gated: Gate activation on performance
         # gate_winrate: Min win-rate vs weak to activate
-        # gate_variance: Max rolling variance to activate
         # regression_rollback: Enable automatic rollback
         # regression_threshold: Rollback threshold (e.g., 0.15 = 15%)
+        # observation_space: Gym observation space for creating opponents
+        # action_space: Gym action space for creating opponents
         self.pool_size = pool_size
         self.save_interval = save_interval
         self.weak_ratio = weak_ratio
         self.current_anchor_ratio = weak_ratio  # For dynamic mixing
         self.device = device
+        self.observation_space = observation_space
+        self.action_space = action_space
 
         #########################################################
         # PFSP settings
@@ -56,7 +60,6 @@ class SelfPlayManager:
         #########################################################
         self.performance_gated = performance_gated
         self.gate_winrate = gate_winrate
-        self.gate_variance = gate_variance
 
         #########################################################
         # Regression rollback
@@ -87,6 +90,11 @@ class SelfPlayManager:
         self.best_checkpoint_path = None
         self.consecutive_eval_drops = 0
 
+        #################################################
+        # Anchor buffer balance tracking (for weak/strong balance)
+        self.anchor_weak_count = 0  # Count of weak opponent episodes in anchor
+        self.anchor_strong_count = 0  # Count of strong opponent episodes in anchor
+
     def activate(self, episode, checkpoints_dir, agent):
         ######################################################
         # Activate self-play and seed the pool with historical checkpoints.
@@ -102,6 +110,11 @@ class SelfPlayManager:
 
         self.active = True
         self.start_episode = episode
+        
+        # Reset anchor balance tracking when self-play activates
+        # (experiences before activation are already in anchor buffer)
+        self.anchor_weak_count = 0
+        self.anchor_strong_count = 0
 
         # Seed the pool with current agent
         seed_path = pathlib.Path(checkpoints_dir) / f'selfplay_seed_ep{episode}.pth'
@@ -131,10 +144,16 @@ class SelfPlayManager:
                         self.opponent_games_played[checkpoint_path] = 0
                         self.opponent_episodes[checkpoint_path] = ep
 
-        print(f"Self-play activated at episode {episode}")
-        print(f"Pool seeded with {len(self.pool)} opponent(s) spanning episodes")
+        print("\n" + "="*70)
+        print(f"🎮 SELF-PLAY ACTIVATED AT EPISODE {episode}! 🎮")
+        print("="*70)
+        print(f"Pool seeded with {len(self.pool)} opponent(s)")
+        print(f"Dynamic anchor mixing: {self.dynamic_anchor_mixing}")
+        print(f"PFSP enabled: {self.use_pfsp}")
+        print(f"Regression rollback: {self.regression_rollback}")
+        print("="*70 + "\n")
 
-    def should_activate(self, episode, eval_vs_weak, rolling_variance):
+    def should_activate(self, episode, eval_vs_weak):
             #########################################################
         # Check if self-play should activate (performance gating).
         #########################################################
@@ -142,15 +161,13 @@ class SelfPlayManager:
         if not self.performance_gated:
             return episode >= self.start_episode
 
-        # Performance-gated activation  
-        episodes_needed = 500  # Need at least 500 episodes of eval data
-        if episode < self.start_episode + episodes_needed:
+        # Performance-gated activation
+        # Need at least one evaluation before we can check performance gates
+        if eval_vs_weak is None:
             return False
 
+        # Check win-rate gate
         if eval_vs_weak < self.gate_winrate:
-            return False
-
-        if rolling_variance > self.gate_variance:
             return False
 
         return True
@@ -190,32 +207,65 @@ class SelfPlayManager:
     def select_opponent(self, episode):
         #########################################################
         # Select opponent from pool for this episode.
+        # Returns: 'weak', 'strong', or 'self-play'
         #########################################################
 
         if not self.active or not self.pool:
-            return True  # Use weak if pool empty
+            return 'weak'  # Use weak if pool empty or not active
 
         #########################################################
-        # Decide whether to use weak opponent
+        # Decide whether to use anchor opponent (weak/strong) or self-play
         #########################################################
-        use_weak = np.random.random() < self.current_anchor_ratio
+        use_anchor = np.random.random() < self.current_anchor_ratio
 
-        if not use_weak:
+        if use_anchor:
+            #########################################################
+            # Balance weak vs strong in anchor buffer
+            # Target: approximately equal distribution
+            #########################################################
+            total_anchor = self.anchor_weak_count + self.anchor_strong_count
+            
+            if total_anchor == 0:
+                # Start with weak
+                self.anchor_weak_count += 1
+                self.opponent = None
+                return 'weak'
+            
+            # Calculate current ratio
+            weak_ratio_in_anchor = self.anchor_weak_count / total_anchor if total_anchor > 0 else 0.5
+            
+            # Prefer the one that's underrepresented (target: 50/50)
+            if weak_ratio_in_anchor < 0.5:
+                # Weak is underrepresented, use weak
+                self.anchor_weak_count += 1
+                self.opponent = None
+                return 'weak'
+            elif weak_ratio_in_anchor > 0.5:
+                # Strong is underrepresented, use strong
+                self.anchor_strong_count += 1
+                self.opponent = None
+                return 'strong'
+            else:
+                # Balanced, random choice
+                if np.random.random() < 0.5:
+                    self.anchor_weak_count += 1
+                    self.opponent = None
+                    return 'weak'
+                else:
+                    self.anchor_strong_count += 1
+                    self.opponent = None
+                    return 'strong'
+        else:
             ####################################
-            # Select from pool
+            # Select from self-play pool
             if self.use_pfsp:
                 selected_path = self._pfsp_select()
             else:
                 selected_path = np.random.choice(self.pool)
 
             # Load opponent
-            
             self._load_opponent(selected_path)
-
-        else:
-            self.opponent = None  # Will use fixed opponent
-
-        return use_weak
+            return 'self-play'
 
     def _pfsp_select(self):
         # Select opponent using PFSP weighting.
@@ -254,90 +304,110 @@ class SelfPlayManager:
             return  # Already loaded    
 
         try:
-            opponent_state = torch.load(path, map_location=self.device)
+            checkpoint = torch.load(path, map_location=self.device)
 
             #########################################################
-            # Extract policy state
+            # Extract agent state tuple (Q1_state, Q2_state, policy_state)
             #########################################################
-            if isinstance(opponent_state, tuple):
-                policy_state = opponent_state[2]
-            elif isinstance(opponent_state, dict) and 'agent_state' in opponent_state:
-                agent_state = opponent_state['agent_state']
-                if isinstance(agent_state, tuple):
-                    policy_state = agent_state[2]
-                else:
-                    policy_state = agent_state
+            if isinstance(checkpoint, dict) and 'agent_state' in checkpoint:
+                agent_state = checkpoint['agent_state']
+            elif isinstance(checkpoint, tuple):
+                agent_state = checkpoint
             else:
-                policy_state = opponent_state
+                # Fallback: assume it's the agent_state directly
+                agent_state = checkpoint
+
+            # Ensure agent_state is a tuple of (Q1, Q2, policy)
+            if not isinstance(agent_state, tuple) or len(agent_state) != 3:
+                raise ValueError(f"Expected agent_state to be tuple of (Q1, Q2, policy), got {type(agent_state)}")
+
+            Q1_state, Q2_state, policy_state = agent_state
 
             #########################################################
-             # Create opponent network if needed
-            if self.opponent is None:
-                #########################################################
-                # Need to infer sizes from policy_state
-                # Handle missing keys properly - check if key exists and is a tensor
-                output_size = 4  # default
-                input_size = 18  # default
-
-                if isinstance(policy_state, dict):
-                    # Try to get output size from readout.weight or output_layer.weight
-                    if 'readout.weight' in policy_state:
-                        output_size = policy_state['readout.weight'].shape[0]
-                    elif 'output_layer.weight' in policy_state:
-                        output_size = policy_state['output_layer.weight'].shape[0]
-
-                    # Try to get input size from layers.0.weight or 0.weight
-                    if 'layers.0.weight' in policy_state:
-                        input_size = policy_state['layers.0.weight'].shape[1]
-                    elif '0.weight' in policy_state:
-                        input_size = policy_state['0.weight'].shape[1]
-
-                self.opponent = TD3Agent(
-                    input_size=input_size,
-                    hidden_sizes=[256, 256],
-                    output_size=output_size,
-                    output_activation=torch.nn.Tanh()
-                ).to(self.device)
+            # Infer network architecture from checkpoint
+            #########################################################
+            # Extract critic hidden sizes from Q1 state dict
+            # Model structure: layers.0, layers.1, ..., layers.N, output_layer
+            # hidden_sizes = [output_dim of layers.0, output_dim of layers.1, ..., output_dim of layers.N]
+            critic_hidden_sizes = []
+            if isinstance(Q1_state, dict):
+                layer_idx = 0
+                while f'layers.{layer_idx}.weight' in Q1_state:
+                    # Output dimension of this layer (shape[0] is the output size)
+                    layer_output_size = Q1_state[f'layers.{layer_idx}.weight'].shape[0]
+                    critic_hidden_sizes.append(layer_output_size)
+                    layer_idx += 1
+                # All layers.X are hidden layers, output_layer is separate
+            
+            # Extract actor hidden sizes from policy state dict
+            actor_hidden_sizes = []
+            if isinstance(policy_state, dict):
+                layer_idx = 0
+                while f'layers.{layer_idx}.weight' in policy_state:
+                    # Output dimension of this layer
+                    layer_output_size = policy_state[f'layers.{layer_idx}.weight'].shape[0]
+                    actor_hidden_sizes.append(layer_output_size)
+                    layer_idx += 1
+                # All layers.X are hidden layers, output_layer is separate
 
             #########################################################
-                # Load the matching keys into the opponent
-            current_state = self.opponent.state_dict()
-            filtered_state = {}
-            for key, param in policy_state.items():
-                if key in current_state:
-                    if param.shape == current_state[key].shape:
-                        filtered_state[key] = param
+            # Create opponent network with inferred architecture
+            # Always recreate to ensure architecture matches checkpoint
+            #########################################################
+            if self.observation_space is None or self.action_space is None:
+                raise ValueError("observation_space and action_space must be provided to SelfPlayManager for loading opponents")
+            
+            # Use inferred architecture, or defaults if inference failed
+            if not actor_hidden_sizes:
+                actor_hidden_sizes = [256, 256]
+            if not critic_hidden_sizes:
+                critic_hidden_sizes = [256, 256, 128]
+            
+            # Create TD3Agent with inferred architecture (recreate if needed)
+            self.opponent = TD3Agent(
+                self.observation_space,
+                self.action_space,
+                hidden_sizes_actor=actor_hidden_sizes,
+                hidden_sizes_critic=critic_hidden_sizes
+            )
+            # Set policy to eval mode
+            self.opponent.policy.eval()
 
-            if filtered_state:
-                self.opponent.load_state_dict(filtered_state, strict=False)
-                self.opponent.eval()
-                self.opponent_path = path
-                self.current_opponent_idx = self.pool.index(path)
-                self.current_opponent_episode = self.opponent_episodes.get(path, 0)
+            #########################################################
+            # Restore state using TD3Agent's restore_state method
+            #########################################################
+            self.opponent.restore_state(agent_state)
+            # Ensure policy stays in eval mode
+            self.opponent.policy.eval()
+            
+            self.opponent_path = path
+            self.current_opponent_idx = self.pool.index(path)
+            self.current_opponent_episode = self.opponent_episodes.get(path, 0)
 
         except Exception as e:
-            
             print(f"Failed to load self-play opponent: {e}")
-            
+            import traceback
+            traceback.print_exc()
             self.opponent = None
 
     def get_action(self, obs):
         #########################################################
         # Get action from self-play opponent.
+        #########################################################
         if self.opponent is None:
             return None
 
-        with torch.no_grad():
-            obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
-            action = self.opponent(obs_tensor).cpu().numpy()[0]
-        #########################################################
+        # TD3Agent.act() expects numpy array and handles device conversion internally
+        # Use eps=0.0 for deterministic evaluation (no exploration noise)
+        action = self.opponent.act(obs, eps=0.0)
         return action
 
     def record_result(self, winner, use_weak):
         #########################################################
         # Record game result against opponent.
         # winner: Game result (1=win, -1=loss, 0=tie)
-        # use_weak: Whether opponent was weak (not self-play)
+        # use_weak: Whether opponent was weak (not self-play) - deprecated, kept for compatibility
+        # Note: This is only called for self-play opponents now
         if use_weak or not self.use_pfsp:
             return
 
@@ -405,48 +475,92 @@ class SelfPlayManager:
         self.best_checkpoint_path = path
 
     def get_stats(self):
-        # get log stats, useful for see what's happening
+        #########################################################
+        # Comprehensive self-play metrics for W&B tracking.
+        # Provides detailed insights into opponent mixing, buffer
+        # distribution, PFSP selection, and training dynamics.
+        #########################################################
 
         stats = {
-            'active': 1.0 if self.active else 0.0,  # are we do self play?? 1 if yes
-            'pool_size': len(self.pool),  # how many bots we have
-            'using_weak_opponent': 1.0 if self.opponent is None else 0.0,  # 1 if using weak, 0 if not
-            'weak_ratio_target': self.weak_ratio,  # target percent vs weak
+            #########################################################
+            # Self-Play Status
+            #########################################################
+            'selfplay/active': 1.0 if self.active else 0.0,
+            'selfplay/pool_size': len(self.pool),
+            
+            #########################################################
+            # Buffer and Opponent Mixing
+            #########################################################
+            'selfplay/weak_ratio_target': self.weak_ratio,
         }
 
-        # anchor ratio stuff, if cheating for forgetting or smthg
+        #########################################################
+        # Dynamic Anchor Mixing Metrics
+        # Tracks adjustment of weak/strong ratio to prevent forgetting
+        #########################################################
         if self.dynamic_anchor_mixing:
-            stats['current_anchor_ratio'] = self.current_anchor_ratio  # may be above weak_ratio sometimes
+            stats['selfplay/anchor_ratio_current'] = self.current_anchor_ratio
 
         #########################################################
-        # pfsp winrate, only show if have that
+        # Anchor Buffer Balance (weak vs strong distribution)
+        # Critical for preventing catastrophic forgetting of base skills
+        #########################################################
+        total_anchor = self.anchor_weak_count + self.anchor_strong_count
+        if total_anchor > 0:
+            anchor_weak_ratio = self.anchor_weak_count / total_anchor
+            anchor_strong_ratio = self.anchor_strong_count / total_anchor
+            stats['selfplay/anchor_weak_episodes'] = self.anchor_weak_count
+            stats['selfplay/anchor_strong_episodes'] = self.anchor_strong_count
+            stats['selfplay/anchor_weak_ratio'] = anchor_weak_ratio
+            stats['selfplay/anchor_strong_ratio'] = anchor_strong_ratio
+            stats['selfplay/anchor_balance_score'] = 1.0 - abs(anchor_weak_ratio - 0.5) * 2.0  # 1.0 = perfect balance, 0.0 = all one type
+
+        #########################################################
+        # PFSP (Prioritized Fictitious Self-Play) Metrics
+        # Shows opponent selection curriculum and curriculum diversity
+        #########################################################
         if self.use_pfsp and len(self.opponent_winrates) > 0:
-            all_winrates = []
-            for results in self.opponent_winrates.values():
-                if len(results) >= 10: 
-                    wins = 0
-                    for r in results:
-                        if r == 1:
-                            wins += 1
-                    all_winrates.append(wins / len(results))
+            opponent_winrates_list = []
+            games_played_list = []
+            
+            for opp_path in self.opponent_winrates:
+                results = list(self.opponent_winrates[opp_path])
+                if len(results) >= 10:
+                    wins = sum(1 for r in results if r == 1)
+                    winrate = wins / len(results)
+                    opponent_winrates_list.append(winrate)
+                    games_played_list.append(len(results))
 
-            if all_winrates:
-                stats['pfsp_avg_winrate'] = np.mean(all_winrates)  # average
-                stats['pfsp_min_winrate'] = np.min(all_winrates)  # worst
-                stats['pfsp_max_winrate'] = np.max(all_winrates)  # best
+            if opponent_winrates_list:
+                #########################################################
+                # PFSP Opponent Statistics
+                # Tracks which opponents are being used and their win rates
+                #########################################################
+                stats['selfplay/pfsp_num_opponents_tracked'] = len(opponent_winrates_list)
+                stats['selfplay/pfsp_avg_winrate'] = np.mean(opponent_winrates_list)
+                stats['selfplay/pfsp_std_winrate'] = np.std(opponent_winrates_list)
+                stats['selfplay/pfsp_min_winrate'] = np.min(opponent_winrates_list)
+                stats['selfplay/pfsp_max_winrate'] = np.max(opponent_winrates_list)
+                stats['selfplay/pfsp_median_winrate'] = np.median(opponent_winrates_list)
+                stats['selfplay/pfsp_diversity_metric'] = np.std(opponent_winrates_list)  # Higher = more diverse difficulty
 
-            # which opponent now, show index & episode
-            if self.current_opponent_idx >= 0:
-                stats['opponent_current_index'] = self.current_opponent_idx
-                stats['opponent_current_episode'] = self.current_opponent_episode
-                # not real age, is how long since start
-                stats['opponent_current_age'] = self.start_episode - self.current_opponent_episode if self.active else 0
+            #########################################################
+            # Current Opponent Tracking
+            # Shows which opponent is currently being trained against
+            #########################################################
+            if self.current_opponent_idx >= 0 and self.active:
+                stats['selfplay/opponent_pool_index'] = self.current_opponent_idx
+                stats['selfplay/opponent_checkpoint_episode'] = self.current_opponent_episode
+                opponent_age = self.start_episode - self.current_opponent_episode if self.active else 0
+                stats['selfplay/opponent_age_episodes'] = opponent_age
+
         #########################################################
-
-
-        # regression save, if roll back mode on
+        # Regression Rollback Protection Metrics
+        # Monitors performance drops and rollback triggers
+        #########################################################
         if self.regression_rollback:
-            stats['best_eval_vs_weak'] = self.best_eval_vs_weak  # best seen weak eval
-            stats['consecutive_drops'] = self.consecutive_eval_drops  # how many bad in row
+            stats['selfplay/best_eval_vs_weak'] = self.best_eval_vs_weak
+            stats['selfplay/consecutive_eval_drops'] = self.consecutive_eval_drops
+            stats['selfplay/rollback_enabled'] = 1.0
 
         return stats 
