@@ -35,8 +35,8 @@ def parse_args():
                         help='Minimum exploration noise (default: 0.1, maintain some exploration)')
     parser.add_argument('--eps_decay', type=float, default=0.9997,
                         help='Noise decay per episode (default: 0.9997, SLOW decay for extended exploration)')
-    parser.add_argument('--warmup_episodes', type=int, default=500,
-                        help='Episodes to collect data before training starts (default: 500)')
+    parser.add_argument('--warmup_episodes', type=int, default=2000,
+                        help='Episodes to collect data before training starts (default: 2000, ~2%% of 100k)')
     parser.add_argument('--lr_actor', type=float, default=3e-4,
                         help='Actor learning rate (default: 3e-4)')
     parser.add_argument('--lr_critic', type=float, default=3e-4,
@@ -57,8 +57,8 @@ def parse_args():
                         help='Gradient clipping norm (default: 1.0)')
     parser.add_argument('--batch_size', type=int, default=512,
                         help='Batch size (default: 512)')
-    parser.add_argument('--buffer_size', type=int, default=int(5e5),
-                        help='Replay buffer size (default: 500000)')
+    parser.add_argument('--buffer_size', type=int, default=int(1e6),
+                        help='Replay buffer size (default: 1000000, ~4%% of 25M total transitions)')
 
     parser.add_argument('--train_freq', type=int, default=10,
                         help='Train every N steps (-1=after episode only, 10=every 10 steps, default: 10)')
@@ -68,6 +68,28 @@ def parse_args():
                         help='Enable Potential-Based Reward Shaping (PBRS) - policy-invariant dense rewards (default: True)')
     parser.add_argument('--no_reward_shaping', dest='reward_shaping', action='store_false',
                         help='Disable reward shaping (use only sparse rewards)')
+
+    # Strategic rewards (non-invariant bonuses: shots, diversity, forcing, etc.)
+    parser.add_argument('--use_strategic_rewards', action='store_true', default=True,
+                        help='Enable strategic reward bonuses: shot quality, diversity, forcing (default: True)')
+    parser.add_argument('--no_strategic_rewards', dest='use_strategic_rewards', action='store_false',
+                        help='Disable strategic reward bonuses (keep only PBRS if enabled)')
+    parser.add_argument('--strategic_reward_scale', type=float, default=1.0,
+                        help='Scaling factor for all strategic rewards (default: 1.0). Use 0.1 to reduce reward hacking')
+
+    # Tie penalty (encourages decisive play over stalemates)
+    parser.add_argument('--tie_penalty', type=float, default=-3.0,
+                        help='Terminal penalty for tied games (default: -3.0, encourages decisive wins over stalemates)')
+    parser.add_argument('--no_tie_penalty', action='store_true',
+                        help='Disable tie penalty (ties give 0 reward)')
+
+    # LR decay (cosine annealing for long training runs)
+    parser.add_argument('--lr_decay', action='store_true', default=True,
+                        help='Enable cosine LR decay (default: True)')
+    parser.add_argument('--no_lr_decay', dest='lr_decay', action='store_false',
+                        help='Disable LR decay (constant learning rate)')
+    parser.add_argument('--lr_min_factor', type=float, default=0.1,
+                        help='Minimum LR as fraction of initial (default: 0.1, so 3e-4 -> 3e-5)')
 
     parser.add_argument('--q_clip', type=float, default=25.0,
                         help='Maximum absolute Q-value (clip to [-q_clip, q_clip], default: 25.0, tighter bounds prevent explosion)')
@@ -115,8 +137,8 @@ def parse_args():
     # Self-Play Training (can be appended to any training run)
     parser.add_argument('--self_play_start', type=int, default=0,
                         help='Episode to start self-play (0=disabled, e.g. 5000 = after 5000 eps against weak)')
-    parser.add_argument('--self_play_pool_size', type=int, default=10,
-                        help='Number of past checkpoints to keep in opponent pool (default: 10)')
+    parser.add_argument('--self_play_pool_size', type=int, default=25,
+                        help='Number of past checkpoints to keep in opponent pool (default: 25, more diversity for long training)')
     parser.add_argument('--self_play_save_interval', type=int, default=500,
                         help='Save current agent to pool every N episodes during self-play (default: 500)')
     parser.add_argument('--eval_interval', type=int, default=1000,
@@ -125,12 +147,16 @@ def parse_args():
                         help='Number of episodes to run per evaluation (default: 100)')
     parser.add_argument('--self_play_weak_ratio', type=float, default=0.5,
                         help='Ratio of episodes to train against weak opponent during self-play (default: 0.5 = 50%%)')
+    parser.add_argument('--episode_block_size', type=int, default=20,
+                        help='Number of consecutive episodes per opponent before switching (default: 20, stabilizes Q-learning)')
 
     # Advanced Self-Play Features (anti-forgetting, PFSP, performance-gating)
     parser.add_argument('--use_dual_buffers', action='store_true', default=False,
                         help='Use dual replay buffers (anchor vs pool) to prevent catastrophic forgetting')
-    parser.add_argument('--use_pfsp', action='store_true', default=False,
-                        help='Use PFSP (Prioritized Fictitious Self-Play) opponent selection')
+    parser.add_argument('--use_pfsp', action='store_true', default=True,
+                        help='Use PFSP (Prioritized Fictitious Self-Play) opponent selection (default: True)')
+    parser.add_argument('--no_pfsp', dest='use_pfsp', action='store_false',
+                        help='Disable PFSP opponent selection')
     parser.add_argument('--pfsp_mode', type=str, default='variance', choices=['variance', 'hard'],
                         help='PFSP mode: variance (focus ~50%%) or hard (focus hardest)')
     parser.add_argument('--dynamic_anchor_mixing', action='store_true', default=False,

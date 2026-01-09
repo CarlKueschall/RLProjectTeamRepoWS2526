@@ -158,6 +158,9 @@ def train(args):
                 "lr_decay": args.lr_decay,
                 "lr_min_factor": args.lr_min_factor if args.lr_decay else None,
                 "episode_block_size": args.episode_block_size,
+                # Strategic rewards configuration (for ablation studies)
+                "use_strategic_rewards": args.use_strategic_rewards,
+                "strategic_reward_scale": args.strategic_reward_scale if args.use_strategic_rewards else 0.0,
             },
             tags=["TD3", "Hockey", args.mode, args.opponent]
                   + (["self-play"] if args.self_play_start > 0 else [])
@@ -166,6 +169,8 @@ def train(args):
                   + (["tie-penalty"] if not args.no_tie_penalty else [])
                   + (["lr-decay"] if args.lr_decay else [])
                   + (["episode-blocking"] if args.episode_block_size > 1 else [])
+                  + (["no-strategic-rewards"] if not args.use_strategic_rewards else [])
+                  + (["scaled-strategic"] if args.use_strategic_rewards and args.strategic_reward_scale != 1.0 else [])
         )
 
     # Track starting episode (for resuming from checkpoint)
@@ -388,6 +393,12 @@ def train(args):
         print(f"LR decay: cosine annealing to {args.lr_min_factor*100:.0f}% of initial")
     if args.episode_block_size > 1:
         print(f"Episode blocking: {args.episode_block_size} episodes per opponent")
+    # Strategic rewards configuration (ablation study)
+    if args.reward_shaping:
+        if not args.use_strategic_rewards:
+            print(f"Strategic rewards: DISABLED (PBRS only)")
+        elif args.strategic_reward_scale != 1.0:
+            print(f"Strategic rewards: SCALED by {args.strategic_reward_scale}x (testing reward hacking)")
     print("###############################")
 
     if args.self_play_start > 0:
@@ -553,18 +564,18 @@ def train(args):
                 pbrs_bonus = 0.0
 
             #########################################################
-            # Strategic bonuses
+            # Strategic bonuses (can be disabled to test reward hacking hypothesis)
             #########################################################
             dist_to_puck = np.sqrt((obs_next[0] - obs_next[12])**2 + (obs_next[1] - obs_next[13])**2)  # distance to puck (needed for metrics)
-            if args.reward_shaping:
+            if args.reward_shaping and args.use_strategic_rewards:
                 strategic_bonuses = strategic_shaper.compute(obs_next, info, dist_to_puck)
 
                 # Record opponent position for forcing metric
                 strategic_shaper.record_opponent_position([obs_next[6], obs_next[7]])  # track where opponent is
 
-                # Apply strategic bonuses
+                # Apply strategic bonuses with optional scaling
                 for bonus_name, bonus_value in strategic_bonuses.items():
-                    r1_shaped += bonus_value  # add all the strategic bonuses
+                    r1_shaped += bonus_value * args.strategic_reward_scale  # scaled strategic bonuses
             else:
                 strategic_bonuses = {}
 
@@ -652,12 +663,12 @@ def train(args):
                 scheduler.step()
 
         #########################################################
-        # Strategic episode-end bonuses
+        # Strategic episode-end bonuses (diversity, forcing)
         #########################################################
-        if args.reward_shaping:
+        if args.reward_shaping and args.use_strategic_rewards:
             end_bonuses = strategic_shaper.compute_episode_end_bonuses()  # diversity and forcing bonuses
             for bonus_name, bonus_value in end_bonuses.items():
-                episode_reward_p1 += bonus_value
+                episode_reward_p1 += bonus_value * args.strategic_reward_scale
 
         #########################################################
         # Tie penalty (encourages decisive wins over stalemates)
