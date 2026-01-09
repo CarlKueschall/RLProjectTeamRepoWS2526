@@ -10,6 +10,7 @@ from collections import deque
 
 import numpy as np
 import torch
+import torch.optim.lr_scheduler as lr_scheduler
 import wandb
 from tqdm import tqdm
 from gymnasium import spaces
@@ -152,11 +153,19 @@ def train(args):
                 "selfplay_gate_winrate": args.selfplay_gate_winrate if args.performance_gated_selfplay else None,
                 "regression_rollback": args.regression_rollback,
                 "regression_threshold": args.regression_threshold if args.regression_rollback else None,
+                # New research-based hyperparameters
+                "tie_penalty": args.tie_penalty if not args.no_tie_penalty else 0.0,
+                "lr_decay": args.lr_decay,
+                "lr_min_factor": args.lr_min_factor if args.lr_decay else None,
+                "episode_block_size": args.episode_block_size,
             },
             tags=["TD3", "Hockey", args.mode, args.opponent]
                   + (["self-play"] if args.self_play_start > 0 else [])
                   + (["dual-buffers"] if args.use_dual_buffers else [])
                   + (["PFSP"] if args.use_pfsp else [])
+                  + (["tie-penalty"] if not args.no_tie_penalty else [])
+                  + (["lr-decay"] if args.lr_decay else [])
+                  + (["episode-blocking"] if args.episode_block_size > 1 else [])
         )
 
     # Track starting episode (for resuming from checkpoint)
@@ -305,6 +314,29 @@ def train(args):
         np.random.seed(args.seed + 1)
 
     #########################################################
+    # Initialize LR schedulers (cosine annealing for long training)
+    # Research: LR decay improves stability and final performance in 100k+ runs
+    #########################################################
+    lr_schedulers = None
+    if args.lr_decay:
+        lr_min_actor = args.lr_actor * args.lr_min_factor
+        lr_min_critic = args.lr_critic * args.lr_min_factor
+
+        # Create schedulers for actor and all critic networks
+        lr_schedulers = {
+            'actor': lr_scheduler.CosineAnnealingLR(
+                agent.optimizer, T_max=args.max_episodes, eta_min=lr_min_actor
+            ),
+            'critic_Q1': lr_scheduler.CosineAnnealingLR(
+                agent.Q1.optimizer, T_max=args.max_episodes, eta_min=lr_min_critic
+            ),
+            'critic_Q2': lr_scheduler.CosineAnnealingLR(
+                agent.Q2.optimizer, T_max=args.max_episodes, eta_min=lr_min_critic
+            ),
+        }
+        print(f"LR decay enabled: {args.lr_actor:.0e} -> {lr_min_actor:.0e} over {args.max_episodes} episodes")
+
+    #########################################################
     # Initialize reward shapers
     #########################################################
     pbrs_shaper = PBRSReward(gamma=args.gamma, annealing_episodes=5000)
@@ -348,6 +380,14 @@ def train(args):
     print(f"Warmup episodes: {args.warmup_episodes} (NO training, just exploration)")
     print(f"Epsilon: {args.eps} -> {args.eps_min} (decay: {args.eps_decay})")
     print(f"Evaluation interval: {args.eval_interval} episodes")
+    print(f"Buffer size: {args.buffer_size:,} transitions")
+    # Research-based enhancements
+    if not args.no_tie_penalty:
+        print(f"Tie penalty: {args.tie_penalty} (encourages decisive wins)")
+    if args.lr_decay:
+        print(f"LR decay: cosine annealing to {args.lr_min_factor*100:.0f}% of initial")
+    if args.episode_block_size > 1:
+        print(f"Episode blocking: {args.episode_block_size} episodes per opponent")
     print("###############################")
 
     if args.self_play_start > 0:
@@ -359,7 +399,8 @@ def train(args):
         print(f"Eval interval: {args.eval_interval}")
         print(f"Weak opponent ratio: {args.self_play_weak_ratio:.0%}")
         if args.use_pfsp:
-            print(f"PFSP enabled: {args.pfsp_mode} curriculum")
+            print(f"PFSP enabled: {args.pfsp_mode} mode")
+        print(f"Episode blocking: {args.episode_block_size} episodes per opponent")
         if args.dynamic_anchor_mixing:
             print("Dynamic anchor mixing enabled (anti-forgetting)")
         if args.performance_gated_selfplay:
@@ -375,6 +416,14 @@ def train(args):
     start_time = time.time()
     last_log_time = start_time
     last_log_episode = 0
+
+    #########################################################
+    # Episode blocking for opponent selection
+    # Research: switching every episode creates unstable Q-targets
+    # Play N episodes vs same opponent before switching (AlphaStar-style)
+    #########################################################
+    current_block_opponent = None  # 'weak', 'strong', or 'self-play'
+    block_start_episode = 0
 
     pbar = tqdm(range(i_episode_start + 1, args.max_episodes + 1), desc="Training", unit="ep")
 
@@ -410,9 +459,9 @@ def train(args):
             # Check if should activate self-play
             if not self_play_manager.active:
                 last_eval_vs_weak = tracker.get_last_eval('weak')
-                
+
                 # Debug logging for activation check (especially around eval episodes)
-                if (i_episode % args.eval_interval == 0 or 
+                if (i_episode % args.eval_interval == 0 or
                     (i_episode > args.self_play_start and i_episode <= args.self_play_start + 5) or
                     (i_episode % 50 == 0 and i_episode >= args.self_play_start)):
                     print(f"\n[ACTIVATION CHECK ep={i_episode}]")
@@ -422,7 +471,7 @@ def train(args):
                     print(f"  gate_winrate={self_play_manager.gate_winrate}")
                     will_activate = self_play_manager.should_activate(i_episode, last_eval_vs_weak)
                     print(f"  → should_activate={will_activate}\n")
-                
+
                 if self_play_manager.should_activate(i_episode, last_eval_vs_weak):
                     self_play_manager.activate(i_episode, selfplay_checkpoints_dir, agent)
 
@@ -431,8 +480,17 @@ def train(args):
             if removed_episode:
                 print(f"Added ep{i_episode} to pool (removed ep{removed_episode})")
 
-            # Select opponent for this episode (returns 'weak', 'strong', or 'self-play')
-            opponent_type = self_play_manager.select_opponent(i_episode)
+            #########################################################
+            # Episode blocking: select new opponent only at block boundaries
+            # Research: AlphaStar-style blocking stabilizes Q-learning
+            #########################################################
+            episodes_in_block = i_episode - block_start_episode
+            if current_block_opponent is None or episodes_in_block >= args.episode_block_size:
+                # Start new block: select a new opponent type
+                current_block_opponent = self_play_manager.select_opponent(i_episode)
+                block_start_episode = i_episode
+
+            opponent_type = current_block_opponent
         else:
             # Self-play not configured, use the configured opponent
             # args.opponent is 'weak' or 'strong', so map it directly
@@ -587,12 +645,28 @@ def train(args):
             agent2.decay_epsilon()
 
         #########################################################
+        # Step LR schedulers (cosine annealing)
+        #########################################################
+        if lr_schedulers is not None:
+            for scheduler in lr_schedulers.values():
+                scheduler.step()
+
+        #########################################################
         # Strategic episode-end bonuses
         #########################################################
         if args.reward_shaping:
             end_bonuses = strategic_shaper.compute_episode_end_bonuses()  # diversity and forcing bonuses
             for bonus_name, bonus_value in end_bonuses.items():
                 episode_reward_p1 += bonus_value
+
+        #########################################################
+        # Tie penalty (encourages decisive wins over stalemates)
+        # Research: ties should be worse than continuing but better than loss
+        #########################################################
+        tie_penalty_applied = 0.0
+        if not args.no_tie_penalty and winner == 0:
+            tie_penalty_applied = args.tie_penalty
+            episode_reward_p1 += tie_penalty_applied
 
         #########################################################
         # Update tracker
@@ -660,6 +734,17 @@ def train(args):
             log_metrics["training/eps_per_sec"] = eps_per_sec
             log_metrics["training/episode"] = i_episode
             log_metrics["training/pbrs_enabled"] = args.reward_shaping
+            log_metrics["training/tie_penalty"] = tie_penalty_applied
+
+            # LR decay tracking
+            if lr_schedulers is not None:
+                log_metrics["training/lr_actor"] = lr_schedulers['actor'].get_last_lr()[0]
+                log_metrics["training/lr_critic"] = lr_schedulers['critic_Q1'].get_last_lr()[0]
+
+            # Episode blocking tracking
+            if self_play_manager is not None:
+                log_metrics["training/episode_block_size"] = args.episode_block_size
+                log_metrics["training/episodes_in_current_block"] = i_episode - block_start_episode
 
             if args.reward_shaping:
                 log_metrics["pbrs/avg_per_episode"] = tracker.get_avg_pbrs()
