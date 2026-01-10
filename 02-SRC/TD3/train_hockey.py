@@ -756,8 +756,8 @@ def train(args):
                 log_metrics["training/lr_actor"] = lr_schedulers['actor'].get_last_lr()[0]
                 log_metrics["training/lr_critic"] = lr_schedulers['critic_Q1'].get_last_lr()[0]
 
-            # Episode blocking tracking
-            if self_play_manager is not None:
+            # Episode blocking tracking (only log when self-play is active)
+            if self_play_manager is not None and self_play_manager.active:
                 log_metrics["training/episode_block_size"] = args.episode_block_size
                 log_metrics["training/episodes_in_current_block"] = i_episode - block_start_episode
 
