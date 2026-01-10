@@ -266,9 +266,8 @@ def test(args):
         obs = prepare_observation(obs)
         obs_agent2 = env.obs_agent_two()
         obs_agent2 = prepare_observation(obs_agent2)
-        # FIX: Mirror angles for P2
-        obs_agent2[2] = np.arctan2(-np.sin(obs_agent2[2]), -np.cos(obs_agent2[2]))
-        obs_agent2[8] = np.arctan2(-np.sin(obs_agent2[8]), -np.cos(obs_agent2[8]))
+        # Note: env.obs_agent_two() already returns properly mirrored observations
+        # No angle transformation needed - the environment handles this internally
 
         # DIAGNOSTIC: Log first episode observations
         if episode == 0:
@@ -353,9 +352,8 @@ def test(args):
 
             obs_agent2 = env.obs_agent_two()
             obs_agent2 = prepare_observation(obs_agent2)
-            # FIX: Mirror angles for P2
-            obs_agent2[2] = np.arctan2(-np.sin(obs_agent2[2]), -np.cos(obs_agent2[2]))
-            obs_agent2[8] = np.arctan2(-np.sin(obs_agent2[8]), -np.cos(obs_agent2[8]))
+            # Note: env.obs_agent_two() already returns properly mirrored observations
+            # No angle transformation needed - the environment handles this internally
 
             ######################################################
             # Render

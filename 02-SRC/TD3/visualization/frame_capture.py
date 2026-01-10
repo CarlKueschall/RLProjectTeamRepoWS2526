@@ -33,8 +33,8 @@ def record_episode_frames(env, agent, opponent, mode, max_timesteps, eps=0.0,
         # Step
         obs, r1, done, truncated, info = env.step(action_combined)
         obs_agent2 = env.obs_agent_two()
-        obs_agent2[2] = np.arctan2(-np.sin(obs_agent2[2]), -np.cos(obs_agent2[2]))
-        obs_agent2[8] = np.arctan2(-np.sin(obs_agent2[8]), -np.cos(obs_agent2[8]))
+        # Note: env.obs_agent_two() already returns properly mirrored observations
+        # No angle transformation needed - the environment handles this internally
 
         if done or truncated:
             winner = info.get('winner', 0)

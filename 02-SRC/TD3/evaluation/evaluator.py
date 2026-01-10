@@ -29,9 +29,8 @@ def evaluate_vs_opponent(agent, opponent, mode, num_episodes=100, max_timesteps=
         for t in range(max_timesteps):
             action1 = agent.act(obs, eps=0.0)  # Deterministic evaluation
             obs_agent2 = eval_env.obs_agent_two()
-            # FIX (2026-01-03): Mirror angles for P2
-            obs_agent2[2] = np.arctan2(-np.sin(obs_agent2[2]), -np.cos(obs_agent2[2]))
-            obs_agent2[8] = np.arctan2(-np.sin(obs_agent2[8]), -np.cos(obs_agent2[8]))
+            # Note: env.obs_agent_two() already returns properly mirrored observations
+            # No angle transformation needed - the environment handles this internally
             action2 = opponent.act(obs_agent2)
 
             # CRITICAL FIX (2026-01-03): Action Slicing
