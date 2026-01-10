@@ -448,11 +448,29 @@ def initialize_agent(agent_args: list[str]) -> Agent:
         default=None,
         help="Path to trained TD3 model checkpoint",
     )
+    parser.add_argument(
+        "--hidden-actor",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Hidden layer sizes for actor network (e.g., 1024 1024)",
+    )
+    parser.add_argument(
+        "--hidden-critic",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Hidden layer sizes for critic network (e.g., 1024 1024 200)",
+    )
     args = parser.parse_args(agent_args)
     
     print(f"Agent type: {args.agent}")
     if args.model_path:
         print(f"Model path: {args.model_path}")
+    if args.hidden_actor:
+        print(f"Actor hidden layers: {args.hidden_actor}")
+    if args.hidden_critic:
+        print(f"Critic hidden layers: {args.hidden_critic}")
 
     # Initialize the agent based on the arguments.
     agent: Agent
@@ -467,7 +485,11 @@ def initialize_agent(agent_args: list[str]) -> Agent:
         agent = RandomAgent()
     elif args.agent == "td3":
         print("Creating TD3HockeyAgent...")
-        agent = TD3HockeyAgent(model_path=args.model_path)
+        agent = TD3HockeyAgent(
+            model_path=args.model_path,
+            hidden_actor=args.hidden_actor,
+            hidden_critic=args.hidden_critic
+        )
     else:
         raise ValueError(f"Unknown agent: {args.agent}")
 
