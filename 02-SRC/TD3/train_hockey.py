@@ -492,19 +492,24 @@ def train(args):
                 print(f"Added ep{i_episode} to pool (removed ep{removed_episode})")
 
             #########################################################
-            # Episode blocking: select new opponent only at block boundaries
-            # Research: AlphaStar-style blocking stabilizes Q-learning
+            # Episode blocking: ONLY apply when self-play is active
+            # Research: AlphaStar-style blocking stabilizes Q-learning during self-play
+            # Before self-play: use configured opponent (weak/strong) directly
             #########################################################
-            episodes_in_block = i_episode - block_start_episode
-            if current_block_opponent is None or episodes_in_block >= args.episode_block_size:
-                # Start new block: select a new opponent type
-                current_block_opponent = self_play_manager.select_opponent(i_episode)
-                block_start_episode = i_episode
+            if self_play_manager.active:
+                # Self-play is active: use episode blocking for opponent selection
+                episodes_in_block = i_episode - block_start_episode
+                if current_block_opponent is None or episodes_in_block >= args.episode_block_size:
+                    # Start new block: select a new opponent type from pool
+                    current_block_opponent = self_play_manager.select_opponent(i_episode)
+                    block_start_episode = i_episode
 
-            opponent_type = current_block_opponent
+                opponent_type = current_block_opponent
+            else:
+                # Self-play not active yet: use the configured opponent directly
+                opponent_type = args.opponent if args.opponent in ['weak', 'strong'] else None
         else:
-            # Self-play not configured, use the configured opponent
-            # args.opponent is 'weak' or 'strong', so map it directly
+            # Self-play not configured at all, use the configured opponent
             opponent_type = args.opponent if args.opponent in ['weak', 'strong'] else None
 
         #########################################################
