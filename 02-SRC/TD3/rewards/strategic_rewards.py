@@ -62,15 +62,15 @@ class StrategicRewardShaper:
         bonuses['proximity'] = env_closeness_reward * 0.1  # Reduced from 0.2 → 0.1
 
         #########################################################
-        # FIX 1: Dropped puck direction reward from 0.6 -> 0.2, this was causing wild shooting
-        # This was a major contributor to wild shooting (0.6 * 250 steps = 150 total!)
-        bonuses['direction'] = env_puck_direction * 0.2  # Reduced from 0.6 → 0.2, was causing chaos
+        # Puck direction reward (boosted from 0.2 -> 0.3 to encourage offensive play)
+        # Research: need stronger offensive shaping to reduce tie rate
+        bonuses['direction'] = env_puck_direction * 0.3  # Boosted 1.5x for more aggressive play
 
-        # FIX 1: Lowered goal proximity reward from 0.233 -> 0.1, need less dense rewards
+        # Goal proximity reward (boosted from 0.1 -> 0.2 to encourage attacking)
         opponent_goal_x = 2.5  # Opponent's goal position (right side)
         puck_goal_dist = abs(opponent_goal_x - puck_x)
         if puck_goal_dist < 1.5:  # Puck is near opponent's goal
-            bonuses['goal_proximity'] = (1.5 - puck_goal_dist) * 0.1  # Reduced (max +0.15), less dense reward
+            bonuses['goal_proximity'] = (1.5 - puck_goal_dist) * 0.2  # Boosted 2x (max +0.30), reward aggression
 
         #########################################################
         # FIX 2: Adding opponent-aware shooting, check if they're blocking
@@ -91,15 +91,15 @@ class StrategicRewardShaper:
                     opponent_blocking = perpendicular_dist < 0.5  # Within shot corridor
 
                 #########################################################
-                # FIX 2: Now tracking clear vs blocked shots so we can see shot quality
+                # Shot quality tracking (boosted bonuses to encourage decisive play)
                 if opponent_blocking:
                     self.shots_blocked += 1
-                    # Penalty for shooting when opponent blocks (-0.2)
-                    bonuses['shot_penalty'] = -0.2  # don't shoot into opponent!
+                    # Penalty for shooting when opponent blocks
+                    bonuses['shot_penalty'] = -0.25  # Slightly increased penalty for bad shots
                 else:
                     self.shots_clear += 1
-                    # Reward for shooting with clear path (+0.15, increased from old +0.1)
-                    shooting_bonus = min(0.15, puck_velocity_x * 0.2)
+                    # Reward for shooting with clear path (boosted 2x from 0.15 -> 0.30)
+                    shooting_bonus = min(0.30, puck_velocity_x * 0.4)  # Boosted 2x for more aggressive shooting
                     bonuses['shot_bonus'] = shooting_bonus  # good shot, clear path
                     #########################################################
                     # FIX 3: Tracking shot angles for diversity, only counting clear shots
@@ -139,14 +139,14 @@ class StrategicRewardShaper:
         }
 
         #########################################################
-        # FIX 3: Adding diversity bonus to reward varied attack patterns
+        # Diversity bonus (boosted 2x to encourage varied attack patterns)
         if len(self.attack_sides) >= 3:
             unique_sides = len(set(self.attack_sides))
             if unique_sides >= 2:  # Attacked from at least 2 different sides
-                bonuses['diversity'] = 0.5 * unique_sides  # +0.5 per unique side (max +1.5), mix it up!
+                bonuses['diversity'] = 1.0 * unique_sides  # Boosted 2x: +1.0 per unique side (max +3.0)
 
         #########################################################
-        # FIX 4: New opponent forcing metric, reward when we make them move around
+        # Opponent forcing metric (boosted to reward making opponent react)
         #########################################################
         if len(self.opponent_positions) > 10:
             opponent_distances = []
@@ -158,9 +158,9 @@ class StrategicRewardShaper:
             self.total_opponent_movement = sum(opponent_distances)
             self.avg_opponent_movement = np.mean(opponent_distances) if opponent_distances else 0.0
 
-            # Reward if we forced opponent to move significantly
+            # Reward if we forced opponent to move significantly (boosted 2x)
             if self.total_opponent_movement > 5.0:  # Opponent moved more than 5 units
-                bonuses['forcing'] = min(1.0, self.total_opponent_movement * 0.1)  # make them work for it
+                bonuses['forcing'] = min(2.0, self.total_opponent_movement * 0.2)  # Boosted 2x: max +2.0
 
         #########################################################
         # Store bonuses for logging

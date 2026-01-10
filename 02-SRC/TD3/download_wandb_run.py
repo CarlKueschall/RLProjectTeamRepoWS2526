@@ -70,78 +70,119 @@ def get_run(entity, project, run_name=None, run_id=None):
 def get_critical_metrics():
     """Define critical metrics to always include (matches train_hockey.py logging)"""
     return [
-        # Performance
+        # Performance metrics
         'performance/cumulative_win_rate',
-        'performance/rolling_win_rate',
         'performance/wins',
         'performance/losses',
         'performance/ties',
 
-        # Rewards
+        # Reward metrics (shaped vs sparse)
         'rewards/p1',
         'rewards/p2',
         'rewards/sparse_only',
         'rewards/sparse_ratio',
 
-        # Scoring
+        # Scoring metrics
         'scoring/goals_scored',
         'scoring/goals_conceded',
 
-        # Training
+        # Training dynamics
         'training/epsilon',
         'training/eps_per_sec',
         'training/episode',
         'training/pbrs_enabled',
-        'training/warmup_complete',
         'training/calls_per_episode',
         'training/avg_episode_length',
-        'training/phase',
+        'training/tie_penalty',
+        'training/lr_actor',
+        'training/lr_critic',
+        'training/episode_block_size',
+        'training/episodes_in_current_block',
 
-        # Losses (CRITICAL for diagnosing training stability)
+        # Loss metrics (CRITICAL for diagnosing training stability)
         'losses/critic_loss',
         'losses/actor_loss',
 
         # PBRS (Potential-Based Reward Shaping)
         'pbrs/avg_per_episode',
-        'pbrs/total_per_episode',
         'pbrs/annealing_weight',
 
-        # V10 Strategic Reward Shaping (opponent-aware shooting, attack diversity, forcing)
-        'v10/shots_clear',
-        'v10/shots_blocked',
-        'v10/shot_quality_ratio',
-        'v10/attack_sides_unique',
-        'v10/attack_diversity_bonus',
-        'v10/opponent_total_movement',
-        'v10/opponent_avg_movement',
-        'v10/forcing_bonus',
+        # Strategic Reward Shaping (opponent-aware shooting, attack diversity, forcing)
+        'strategic/shots_clear',
+        'strategic/shots_blocked',
+        'strategic/shot_quality_ratio',
+        'strategic/attack_sides_unique',
+        'strategic/attack_diversity_bonus',
+        'strategic/opponent_total_movement',
+        'strategic/opponent_avg_movement',
+        'strategic/forcing_bonus',
 
-        # PER (Prioritized Experience Replay)
-        'per/avg_priority',
-        'per/max_priority',
-        'per/total_priority',
-        'per/beta',
+        # Self-play configuration and status
+        'selfplay/active',
+        'selfplay/pool_size',
+        'selfplay/weak_ratio_target',
+        'selfplay/anchor_ratio_current',
+        'selfplay/episode_opponent_type_weak',
+        'selfplay/episode_opponent_type_strong',
+        'selfplay/episode_opponent_type_selfplay',
 
-        # Self-play
-        'self_play/active',
-        'self_play/pool_size',
-        'self_play/episodes_until_start',
-        'self_play/using_weak_opponent',
-        'self_play/weak_ratio_target',
+        # Self-play anchor buffer balance (weak vs strong episodes)
+        'selfplay/anchor_weak_episodes',
+        'selfplay/anchor_strong_episodes',
+        'selfplay/anchor_weak_ratio',
+        'selfplay/anchor_strong_ratio',
+        'selfplay/anchor_balance_score',
 
-        # Evaluation (includes new tie/loss rate metrics from eval fix)
-        'eval/vs_weak_win_rate',
-        'eval/vs_weak_win_rate_decisive',
-        'eval/vs_weak_tie_rate',
-        'eval/vs_weak_loss_rate',
-        'eval/vs_weak_avg_reward',
-        'eval/vs_strong_win_rate',
-        'eval/vs_strong_win_rate_decisive',
-        'eval/vs_strong_tie_rate',
-        'eval/vs_strong_loss_rate',
-        'eval/vs_strong_avg_reward',
+        # Self-play opponent selection and PFSP metrics
+        'selfplay/opponent_pool_index',
+        'selfplay/opponent_checkpoint_episode',
+        'selfplay/opponent_age_episodes',
+        'selfplay/pfsp_num_opponents_tracked',
+        'selfplay/pfsp_avg_winrate',
+        'selfplay/pfsp_std_winrate',
+        'selfplay/pfsp_min_winrate',
+        'selfplay/pfsp_max_winrate',
+        'selfplay/pfsp_median_winrate',
+        'selfplay/pfsp_diversity_metric',
 
-        # Behavioral (CRITICAL for lazy learning detection)
+        # Self-play regression tracking and rollback
+        'selfplay/best_eval_vs_weak',
+        'selfplay/consecutive_eval_drops',
+        'selfplay/rollback_enabled',
+
+        # Evaluation metrics (comprehensive three-way evaluation)
+        # Evaluation vs WEAK opponent (baseline)
+        'eval/weak/win_rate',
+        'eval/weak/win_rate_decisive',
+        'eval/weak/tie_rate',
+        'eval/weak/loss_rate',
+        'eval/weak/avg_reward',
+        'eval/weak/wins',
+        'eval/weak/losses',
+        'eval/weak/ties',
+
+        # Evaluation vs STRONG opponent (training opponent)
+        'eval/strong/win_rate',
+        'eval/strong/win_rate_decisive',
+        'eval/strong/tie_rate',
+        'eval/strong/loss_rate',
+        'eval/strong/avg_reward',
+        'eval/strong/wins',
+        'eval/strong/losses',
+        'eval/strong/ties',
+
+        # Evaluation vs SELF-PLAY opponent (if active)
+        'eval/selfplay/win_rate',
+        'eval/selfplay/win_rate_decisive',
+        'eval/selfplay/tie_rate',
+        'eval/selfplay/loss_rate',
+        'eval/selfplay/avg_reward',
+        'eval/selfplay/wins',
+        'eval/selfplay/losses',
+        'eval/selfplay/ties',
+        'eval/selfplay/opponent_age',
+
+        # Behavioral metrics (CRITICAL for lazy learning detection)
         'behavior/action_magnitude_avg',
         'behavior/action_magnitude_max',
         'behavior/lazy_action_ratio',
