@@ -103,6 +103,11 @@ def get_critical_metrics():
         'losses/critic_loss',
         'losses/actor_loss',
 
+        # Gradient norm metrics (CRITICAL for monitoring learning health)
+        # NEW FIX: Added gradient norm logging to detect vanishing/exploding gradients
+        'gradients/critic_grad_norm',
+        'gradients/actor_grad_norm',
+
         # PBRS (Potential-Based Reward Shaping)
         'pbrs/avg_per_episode',
         'pbrs/annealing_weight',

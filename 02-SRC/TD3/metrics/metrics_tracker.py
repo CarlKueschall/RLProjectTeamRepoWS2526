@@ -26,6 +26,10 @@ class MetricsTracker:
         self.critic_losses = []
         self.actor_losses = []
 
+        # CRITICAL FIX: Gradient norm tracking for monitoring learning health
+        self.critic_grad_norms = []
+        self.actor_grad_norms = []
+
         # Win/loss/tie tracking
         self.wins = 0
         self.losses = 0
@@ -76,6 +80,8 @@ class MetricsTracker:
         self.training_calls_per_episode = []
         self.critic_losses = []
         self.actor_losses = []
+        self.critic_grad_norms = []
+        self.actor_grad_norms = []
         self.wins = 0
         self.losses = 0
         self.ties = 0
@@ -124,12 +130,19 @@ class MetricsTracker:
         if distance < 0.5:
             self._episode_time_near_puck += 1
 
-    def add_episode_result(self, reward, length, winner):
+    def add_episode_result(self, reward_p1, length, winner, reward_p2=None, sparse_reward=None):
         #########################################################
         # Record metrics for a single episode
+        # reward_p1: Shaped reward for player 1 (with PBRS + strategic bonuses)
+        # reward_p2: Reward for player 2/opponent (negative of P1 sparse reward)
+        # sparse_reward: Unshapen sparse reward (±1 for wins/losses)
         # winner: 1=win, -1=loss, 0=tie
         #########################################################
-        self.rewards_p1.append(reward)
+        self.rewards_p1.append(reward_p1)
+        if reward_p2 is not None:
+            self.rewards_p2.append(reward_p2)
+        if sparse_reward is not None:
+            self.sparse_rewards.append(sparse_reward)
         self.episode_lengths.append(length)
 
         # Track outcome
@@ -154,6 +167,16 @@ class MetricsTracker:
             self.critic_losses.append(critic_loss if isinstance(critic_loss, float) else critic_loss.item())
             if actor_loss != 0.0:  # Only track non-zero actor losses
                 self.actor_losses.append(actor_loss)
+
+    def add_grad_norms(self, grad_norms):
+        #########################################################
+        # CRITICAL FIX: Add gradient norm metrics for monitoring learning health
+        # grad_norms: List of (critic_grad_norm, actor_grad_norm) tuples
+        #########################################################
+        for critic_grad_norm, actor_grad_norm in grad_norms:
+            self.critic_grad_norms.append(critic_grad_norm if isinstance(critic_grad_norm, float) else critic_grad_norm)
+            if actor_grad_norm != 0.0:  # Only track non-zero actor gradient norms
+                self.actor_grad_norms.append(actor_grad_norm)
 
     # def get_win_rate_decisive_only(self):
     #     #########################################################
@@ -288,6 +311,9 @@ class MetricsTracker:
             "rewards/sparse_ratio": sparse_ratio,
             "losses/critic_loss": np.mean(self.critic_losses[-self.log_interval:]) if self.critic_losses else 0.0,
             "losses/actor_loss": np.mean(self.actor_losses[-self.log_interval:]) if self.actor_losses else 0.0,
+            # CRITICAL FIX: Gradient norm logging for monitoring learning health
+            "gradients/critic_grad_norm": np.mean(self.critic_grad_norms[-self.log_interval:]) if self.critic_grad_norms else 0.0,
+            "gradients/actor_grad_norm": np.mean(self.actor_grad_norms[-self.log_interval:]) if self.actor_grad_norms else 0.0,
             "training/calls_per_episode": np.mean(self.training_calls_per_episode[-self.log_interval:]) if self.training_calls_per_episode else 0,
             "training/avg_episode_length": np.mean(self.episode_lengths[-self.log_interval:]) if self.episode_lengths else 0,
         }

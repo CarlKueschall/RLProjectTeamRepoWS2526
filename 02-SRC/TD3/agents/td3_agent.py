@@ -20,7 +20,8 @@ class QFunction(Model):
     #here we can use Model, to specify the critic network.
     #NOTE: Added clipping to grad and also q-VALUES, noticed in metrics that the q-values were exploding.
     def __init__(self, observation_dim, action_dim, hidden_sizes=[100, 100],
-                 learning_rate=0.0002, device=None, grad_clip=1.0, q_clip=None, q_clip_mode='hard'):
+                 learning_rate=0.0002, device=None, grad_clip=1.0, q_clip=None, q_clip_mode='hard',
+                 init_bias_positive=False):
         super().__init__(input_size=observation_dim + action_dim,
                          hidden_sizes=hidden_sizes,
                          output_size=1)
@@ -30,6 +31,21 @@ class QFunction(Model):
         self._grad_clip = grad_clip
         self._q_clip = q_clip
         self._q_clip_mode = q_clip_mode
+
+        #########################################################
+        # CRITICAL FIX: Initialize output bias to +5.0 to counter negative Q-spiral
+        # Research: Negative spiral occurs when Q-values start negative and
+        # bootstrap keeps them negative. Positive bias breaks the spiral.
+        # UPDATED: Increased from +1.0 to +5.0 because +1.0 was too weak and got
+        # overwhelmed by negative experiences during strong opponent training.
+        #########################################################
+        if init_bias_positive:
+            # Find the output layer (last layer in the network)
+            for name, param in self.named_parameters():
+                if 'bias' in name and param.shape[0] == 1:  # output layer bias
+                    torch.nn.init.constant_(param, 5.0)  # Increased from 1.0 to 5.0
+                    print(f"  Initialized critic output bias to +5.0 (counters negative Q-spiral)")
+                    break
 
         self.optimizer = torch.optim.Adam(self.parameters(),
                                           lr=learning_rate,
@@ -41,29 +57,36 @@ class QFunction(Model):
 
     def fit(self, observations, actions, targets, weights=None, regularization=0.0):
         #########################################################
-        # 
+        #
         self.train()
         self.optimizer.zero_grad()
 
         pred = self.Q_value(observations, actions)
         loss = self.loss(pred, targets)
-        
+
         if weights is not None:
             weights_tensor = torch.from_numpy(weights).to(self.device).unsqueeze(1) #this fixed it now, forgot to unsequeeze
             loss = (weights_tensor * loss).mean()
         else:
             loss = loss.mean()
-        
+
         if isinstance(regularization, torch.Tensor) and regularization.requires_grad:
             loss = loss + regularization
 
         loss.backward()
 
+        # CRITICAL FIX: Compute gradient norm BEFORE clipping for monitoring
+        grad_norm = 0.0
+        for p in self.parameters():
+            if p.grad is not None:
+                grad_norm += p.grad.data.norm(2).item() ** 2
+        grad_norm = grad_norm ** 0.5
+
         if hasattr(self, '_grad_clip') and self._grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(self.parameters(), self._grad_clip)
 
         self.optimizer.step()
-        return loss.item()
+        return loss.item(), grad_norm
 
     def Q_value(self, observations, actions):
         x = torch.cat([observations, actions], dim=1)
@@ -244,8 +267,10 @@ class TD3Agent:
             hidden_sizes=self._config["hidden_sizes_critic"],
             learning_rate=self._config["learning_rate_critic"],
             device=self.device,
+            grad_clip=self._config.get("grad_clip", 1.0),  # CRITICAL FIX: explicit critic gradient clipping
             q_clip=q_clip,
-            q_clip_mode=q_clip_mode
+            q_clip_mode=q_clip_mode,
+            init_bias_positive=self._config.get("init_critic_bias_positive", False)  # CRITICAL FIX: positive bias initialization
         )
 
         self.Q2 = QFunction(
@@ -254,8 +279,10 @@ class TD3Agent:
             hidden_sizes=self._config["hidden_sizes_critic"],
             learning_rate=self._config["learning_rate_critic"],
             device=self.device,
+            grad_clip=self._config.get("grad_clip", 1.0),  # CRITICAL FIX: explicit critic gradient clipping
             q_clip=q_clip,
-            q_clip_mode=q_clip_mode
+            q_clip_mode=q_clip_mode,
+            init_bias_positive=self._config.get("init_critic_bias_positive", False)  # CRITICAL FIX: positive bias initialization
         )
         # then replicate the targets equivalently
         self.Q1_target = QFunction(
@@ -301,6 +328,20 @@ class TD3Agent:
         self.train_iter = 0
         self.total_steps = 0
 
+        #########################################################
+        # CRITICAL FIX: Observation Normalization
+        # Running normalization to handle 50x scale mismatch between positions and velocities
+        # This fixes critic learning failure caused by mixed-scale inputs
+        #########################################################
+        self.normalize_obs = self._config.get("normalize_obs", True)
+        if self.normalize_obs:
+            self.obs_mean = np.zeros(self._obs_dim, dtype=np.float32)
+            self.obs_std = np.ones(self._obs_dim, dtype=np.float32)
+            self.obs_count = 1e-4  # Small epsilon to avoid division by zero
+            print(f"  Observation normalization ENABLED (fixes 50x position/velocity scale mismatch)")
+        else:
+            print(f"  Observation normalization DISABLED")
+
     def _copy_nets(self):
         #########################################################
         # copy the networks to the targets that's all
@@ -329,15 +370,19 @@ class TD3Agent:
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
     def act(self, observation, eps=None):
+        # CRITICAL FIX: Normalize observation before passing to policy
+        # This fixes the 50x scale mismatch between positions and velocities
+        obs_normalized = self._normalize_obs(observation)
+
         # convert to tensor FIRST, THEN TO THE DEVICE.
-        obs_tensor = torch.from_numpy(observation.astype(np.float32)).to(self.device)
+        obs_tensor = torch.from_numpy(obs_normalized.astype(np.float32)).to(self.device)
         #NOTE: NO GRADIENTS HERE!, we're just acting. in train method the policy network gets updated
         with torch.no_grad():
-            
+
             action = self.policy(obs_tensor).cpu().numpy() #forward pass
         current_eps = eps if eps is not None else self._eps
         if current_eps > 0:
-            noise = self.action_noise() # get the noise here for exploration 
+            noise = self.action_noise() # get the noise here for exploration
             action = action + noise * current_eps
         action = np.clip(action, self._action_space.low, self._action_space.high)
         return action
@@ -361,6 +406,66 @@ class TD3Agent:
 
     # END HELPER FUNCTIONS
     #########################################################
+    # OBSERVATION NORMALIZATION METHODS
+    #########################################################
+    def _update_obs_stats(self, obs_batch):
+        """
+        Update running mean and std for observation normalization.
+        Uses Welford's online algorithm for numerical stability.
+
+        Args:
+            obs_batch: numpy array of shape (batch_size, obs_dim) or (obs_dim,)
+        """
+        if not self.normalize_obs:
+            return
+
+        # Handle both single observation and batch
+        if obs_batch.ndim == 1:
+            obs_batch = obs_batch[np.newaxis, :]
+
+        batch_size = obs_batch.shape[0]
+
+        # Welford's online algorithm for running mean/std
+        for obs in obs_batch:
+            self.obs_count += 1
+            delta = obs - self.obs_mean
+            self.obs_mean += delta / self.obs_count
+            delta2 = obs - self.obs_mean
+            self.obs_std = np.sqrt(np.maximum(
+                (self.obs_std ** 2 * (self.obs_count - 1) + delta * delta2) / self.obs_count,
+                1e-8  # Minimum std to avoid division by zero
+            ))
+
+    def _normalize_obs(self, obs):
+        """
+        Normalize observation using running mean and std.
+
+        Args:
+            obs: numpy array or torch tensor of shape (..., obs_dim)
+
+        Returns:
+            normalized observation (same type as input)
+        """
+        if not self.normalize_obs:
+            return obs
+
+        is_tensor = isinstance(obs, torch.Tensor)
+        device = obs.device if is_tensor else None
+
+        if is_tensor:
+            obs_np = obs.cpu().numpy()
+        else:
+            obs_np = obs
+
+        # Normalize: (obs - mean) / (std + eps)
+        obs_normalized = (obs_np - self.obs_mean) / (self.obs_std + 1e-8)
+
+        if is_tensor:
+            return torch.from_numpy(obs_normalized.astype(np.float32)).to(device)
+        else:
+            return obs_normalized.astype(np.float32)
+
+    #########################################################
     #TRAINING LOOP
     def train(self, iter_fit=32):
         #########################################################
@@ -375,6 +480,7 @@ class TD3Agent:
         # 7. Return the losses
         #########################################################
         losses = []
+        grad_norms = []  # Track gradient norms for logging
         self.train_iter += 1
 
         for _ in range(iter_fit):
@@ -434,11 +540,20 @@ class TD3Agent:
             # from all the data we sampled, now we need to split it into the states, actions, rewards, next states, and dones.
             # have to ensure to 1. convert to tensors, 2. convert to the device, 3. convert to the correct type.
             # Note: stored actions are 8D (4D agent + 4D opponent) for critic to see full game state
-            s = torch.from_numpy(np.stack(data[:, 0]).astype(np.float32)).to(self.device)
+            s_raw = np.stack(data[:, 0]).astype(np.float32)
+            s_prime_raw = np.stack(data[:, 3]).astype(np.float32)
+
+            # CRITICAL FIX: Update observation statistics and normalize
+            # This fixes critic learning by handling 50x position/velocity scale mismatch
+            self._update_obs_stats(s_raw)
+            self._update_obs_stats(s_prime_raw)
+
+            s = torch.from_numpy(self._normalize_obs(s_raw)).to(self.device)
+            s_prime = torch.from_numpy(self._normalize_obs(s_prime_raw)).to(self.device)
+
             a_full = torch.from_numpy(np.stack(data[:, 1]).astype(np.float32)).to(self.device)  # 8D: [agent_action, opponent_action]
             a_agent = a_full[:, :4]  # Extract agent's 4D action for policy updates
             rew = torch.from_numpy(np.stack(data[:, 2]).astype(np.float32)[:, None]).to(self.device)
-            s_prime = torch.from_numpy(np.stack(data[:, 3]).astype(np.float32)).to(self.device)
             done = torch.from_numpy(np.stack(data[:, 4]).astype(np.float32)[:, None]).to(self.device)
 
             # now we need to compute the target Q-values
@@ -501,7 +616,7 @@ class TD3Agent:
 
             # Pass regularization term to fit - it gets added to the loss
             # Use full 8D action for critic update
-            q1_loss_value = self.Q1.fit(s, a_full, target_q, weights=is_weights, regularization=vf_reg_q1)
+            q1_loss_value, q1_grad_norm = self.Q1.fit(s, a_full, target_q, weights=is_weights, regularization=vf_reg_q1)
 
 
             #########################################################
@@ -516,22 +631,23 @@ class TD3Agent:
                     a_passive_agent = torch.zeros((should_be_active.sum(), 4), device=self.device)  # Do nothing (4D)
                     a_active_agent = self._generate_active_action(s[should_be_active])  # Move toward puck (4D)
                     a_opponent_reg = a_full[should_be_active, 4:]  # Opponent actions (4D)
-                    
+
                     a_passive_full = torch.cat([a_passive_agent, a_opponent_reg], dim=1)  # 8D: [passive_agent, opponent]
                     a_active_full = torch.cat([a_active_agent, a_opponent_reg], dim=1)  # 8D: [active_agent, opponent]
-                    
+
                     q2_passive = self.Q2.Q_value(s[should_be_active], a_passive_full)
                     q2_active = self.Q2.Q_value(s[should_be_active], a_active_full)
                     # Same penalty: make active better than passive
                     q2_wrong_ordering = torch.relu(q2_passive - q2_active)
                     vf_reg_q2 = vf_reg_lambda * q2_wrong_ordering.mean()
-            
+
             # Detach target_q to avoid backward through graph twice
             # target_q is computed in no_grad() context, but detaching explicitly ensures no graph issues
             target_q_detached = target_q.detach() if isinstance(target_q, torch.Tensor) else target_q
             # Use full 8D action for critic update
-            q2_loss_value = self.Q2.fit(s, a_full, target_q_detached, weights=is_weights, regularization=vf_reg_q2)
+            q2_loss_value, q2_grad_norm = self.Q2.fit(s, a_full, target_q_detached, weights=is_weights, regularization=vf_reg_q2)
             avg_critic_loss = (q1_loss_value + q2_loss_value) / 2
+            avg_critic_grad_norm = (q1_grad_norm + q2_grad_norm) / 2
 
             if self.total_steps % self._config["policy_freq"] == 0:
                 #########################################################
@@ -557,6 +673,14 @@ class TD3Agent:
                 # Have to negate it: minimizing (-Q) = maximizing Q
                 actor_loss = -q_val.mean()
                 actor_loss.backward()
+
+                # CRITICAL FIX: Compute actor gradient norm BEFORE clipping for monitoring
+                actor_grad_norm = 0.0
+                for p in self.policy.parameters():
+                    if p.grad is not None:
+                        actor_grad_norm += p.grad.data.norm(2).item() ** 2
+                actor_grad_norm = actor_grad_norm ** 0.5
+
                 if "grad_clip" in self._config:
                     torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self._config["grad_clip"])
 
@@ -564,18 +688,20 @@ class TD3Agent:
                 self.optimizer.step()
                 # for metrics
                 losses.append((avg_critic_loss, actor_loss.detach().cpu().item()))
+                grad_norms.append((avg_critic_grad_norm, actor_grad_norm))
             else:
                 # in this case just log 0 for actor loss (we didn't update it)
                 losses.append((avg_critic_loss, 0.0))
+                grad_norms.append((avg_critic_grad_norm, 0.0))
 
             # separately, update the target networks (slow-moving copies for stability)
             if self.total_steps % self._config["target_update_freq"] == 0:
                 # Check if we're even using target networks (some configs might disable them)
                 if self._config["use_target_net"]:
                     # a soft update only as discussed above. blend old targets with new network weights
-                    self._soft_update_targets() 
+                    self._soft_update_targets()
 
-        return losses
+        return losses, grad_norms
     
 
 

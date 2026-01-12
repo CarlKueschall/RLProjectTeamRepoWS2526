@@ -158,7 +158,8 @@ def train(args):
                 "lr_decay": args.lr_decay,
                 "lr_min_factor": args.lr_min_factor if args.lr_decay else None,
                 "episode_block_size": args.episode_block_size,
-                # Strategic rewards configuration (for ablation studies)
+                # Reward shaping configuration (for ablation studies)
+                "pbrs_scale": args.pbrs_scale if args.reward_shaping else 0.0,
                 "use_strategic_rewards": args.use_strategic_rewards,
                 "strategic_reward_scale": args.strategic_reward_scale if args.use_strategic_rewards else 0.0,
             },
@@ -171,6 +172,7 @@ def train(args):
                   + (["episode-blocking"] if args.episode_block_size > 1 else [])
                   + (["no-strategic-rewards"] if not args.use_strategic_rewards else [])
                   + (["scaled-strategic"] if args.use_strategic_rewards and args.strategic_reward_scale != 1.0 else [])
+                  + (["scaled-pbrs"] if args.reward_shaping and args.pbrs_scale != 1.0 else [])
         )
 
     # Track starting episode (for resuming from checkpoint)
@@ -259,6 +261,7 @@ def train(args):
         force_cpu=args.cpu,
         q_clip=args.q_clip,
         q_clip_mode=args.q_clip_mode,
+        init_critic_bias_positive=args.init_critic_bias_positive,  # CRITICAL FIX: positive bias to counter negative Q-spiral
         use_dual_buffers=args.use_dual_buffers,
         critic_action_dim=critic_action_dim,  # Pass inferred dimension
     )
@@ -314,39 +317,37 @@ def train(args):
             force_cpu=args.cpu,
             q_clip=args.q_clip,
             q_clip_mode=args.q_clip_mode,
+            init_critic_bias_positive=args.init_critic_bias_positive,  # CRITICAL FIX: positive bias to counter negative Q-spiral
         )
         torch.manual_seed(args.seed + 1)  # different seed for agent2
         np.random.seed(args.seed + 1)
 
     #########################################################
-    # Initialize LR schedulers (cosine annealing for long training)
-    # Research: LR decay improves stability and final performance in 100k+ runs
+    # LR schedulers REMOVED (caused learning freeze at phase transitions)
+    # Keeping constant LR throughout training for stability
     #########################################################
     lr_schedulers = None
-    if args.lr_decay:
-        lr_min_actor = args.lr_actor * args.lr_min_factor
-        lr_min_critic = args.lr_critic * args.lr_min_factor
-
-        # Create schedulers for actor and all critic networks
-        lr_schedulers = {
-            'actor': lr_scheduler.CosineAnnealingLR(
-                agent.optimizer, T_max=args.max_episodes, eta_min=lr_min_actor
-            ),
-            'critic_Q1': lr_scheduler.CosineAnnealingLR(
-                agent.Q1.optimizer, T_max=args.max_episodes, eta_min=lr_min_critic
-            ),
-            'critic_Q2': lr_scheduler.CosineAnnealingLR(
-                agent.Q2.optimizer, T_max=args.max_episodes, eta_min=lr_min_critic
-            ),
-        }
-        print(f"LR decay enabled: {args.lr_actor:.0e} -> {lr_min_actor:.0e} over {args.max_episodes} episodes")
+    # if args.lr_decay:  # DISABLED - LR decay caused 3x learning rate drop at self-play boundary
+    #     lr_min_actor = args.lr_actor * args.lr_min_factor
+    #     lr_min_critic = args.lr_critic * args.lr_min_factor
+    #     lr_schedulers = {
+    #         'actor': lr_scheduler.CosineAnnealingLR(...),
+    #         'critic_Q1': lr_scheduler.CosineAnnealingLR(...),
+    #         'critic_Q2': lr_scheduler.CosineAnnealingLR(...),
+    #     }
+    # LR decay DISABLED by default - caused learning freeze at self-play transition
 
     #########################################################
     # Initialize reward shapers
     #########################################################
-    pbrs_shaper = PBRSReward(gamma=args.gamma, annealing_episodes=5000)
+    pbrs_shaper = PBRSReward(
+        gamma=args.gamma,
+        annealing_episodes=5000,
+        pbrs_scale=args.pbrs_scale,
+        constant_weight=args.pbrs_constant_weight  # CRITICAL FIX: keep PBRS active during self-play
+    )
     if args.reward_shaping and args.self_play_start > 0:
-        pbrs_shaper.set_self_play_start(args.self_play_start)  # anneal during self-play
+        pbrs_shaper.set_self_play_start(args.self_play_start)  # anneal during self-play (unless constant_weight=True)
 
     strategic_shaper = StrategicRewardShaper()
 
@@ -393,10 +394,12 @@ def train(args):
         print(f"LR decay: cosine annealing to {args.lr_min_factor*100:.0f}% of initial")
     if args.episode_block_size > 1:
         print(f"Episode blocking: {args.episode_block_size} episodes per opponent")
-    # Strategic rewards configuration (ablation study)
+    # Reward shaping configuration (ablation study)
     if args.reward_shaping:
+        if args.pbrs_scale != 1.0:
+            print(f"PBRS magnitude: SCALED by {args.pbrs_scale}x (reducing dense reward influence)")
         if not args.use_strategic_rewards:
-            print(f"Strategic rewards: DISABLED (PBRS only)")
+            print(f"Strategic rewards: DISABLED (PBRS only, focusing on winning)")
         elif args.strategic_reward_scale != 1.0:
             print(f"Strategic rewards: SCALED by {args.strategic_reward_scale}x (testing reward hacking)")
     print("###############################")
@@ -486,6 +489,17 @@ def train(args):
                 if self_play_manager.should_activate(i_episode, last_eval_vs_weak):
                     self_play_manager.activate(i_episode, selfplay_checkpoints_dir, agent)
 
+                    #########################################################
+                    # CRITICAL FIX: Reset epsilon when self-play starts
+                    # Epsilon has decayed heavily by this point (~0.05-0.07)
+                    # Self-play opponents are novel → need re-exploration
+                    #########################################################
+                    if args.epsilon_reset_on_selfplay:
+                        old_eps = agent._eps
+                        agent._eps = args.epsilon_reset_value
+                        print(f"\n[EPSILON RESET] Self-play activated! Epsilon reset: {old_eps:.3f} → {args.epsilon_reset_value:.3f}")
+                        print(f"  Re-enabling exploration for novel self-play opponents\n")
+
             # Update pool with new checkpoint
             removed_episode = self_play_manager.update_pool(i_episode, agent, selfplay_checkpoints_dir)
             if removed_episode:
@@ -515,7 +529,9 @@ def train(args):
         #########################################################
         # Episode loop
         #########################################################
-        episode_reward_p1 = 0
+        episode_reward_p1 = 0  # Shaped reward (with PBRS + bonuses)
+        episode_sparse_reward = 0  # Unshapen sparse reward only
+        episode_reward_p2 = 0  # Opponent reward (negative of sparse)
         episode_step_count = 0
         winner = 0  # Initialize winner (default to tie)
 
@@ -559,6 +575,17 @@ def train(args):
             obs_next, r1, done, truncated, info = env.step(action_combined)
 
             #########################################################
+            # CRITICAL FIX: Scale sparse rewards to prevent Q-explosion
+            # Hockey env gives ±10 for goals, which causes TD targets to explode
+            # Scaling by 0.1 maps this to ±1, matching standard RL benchmarks
+            #########################################################
+            r1 = r1 * args.reward_scale
+
+            # Track sparse reward separately for metrics
+            episode_sparse_reward += r1
+            episode_reward_p2 -= r1  # P2 gets negative of P1's reward (zero-sum game)
+
+            #########################################################
             # Apply reward shaping
             #########################################################
             if args.reward_shaping:
@@ -572,6 +599,16 @@ def train(args):
             # Strategic bonuses (can be disabled to test reward hacking hypothesis)
             #########################################################
             dist_to_puck = np.sqrt((obs_next[0] - obs_next[12])**2 + (obs_next[1] - obs_next[13])**2)  # distance to puck (needed for metrics)
+
+            # ALWAYS track puck touches (decoupled from strategic_rewards flag)
+            # This ensures behavior metrics are accurate regardless of reward configuration
+            env_touch_reward = info.get('reward_touch_puck', 0.0)
+            if env_touch_reward > 0:
+                strategic_shaper.puck_touches += 1
+            elif dist_to_puck < 0.3 and env_touch_reward == 0:
+                # Backup: if env didn't detect, use distance threshold
+                strategic_shaper.puck_touches += 1
+
             if args.reward_shaping and args.use_strategic_rewards:
                 strategic_bonuses = strategic_shaper.compute(obs_next, info, dist_to_puck)
 
@@ -627,9 +664,10 @@ def train(args):
             if args.train_freq != -1 and len(agent.buffer) >= args.batch_size and warmup_complete:
                 if global_step % args.train_freq == 0:
                     scaled_iterations = max(1, int(32 / (250 / args.train_freq)))  # scale training iterations based on freq
-                    losses = agent.train(iter_fit=scaled_iterations)
+                    losses, grad_norms = agent.train(iter_fit=scaled_iterations)
                     if losses:
                         tracker.add_losses(losses)
+                        tracker.add_grad_norms(grad_norms)
 
             if done or truncated:
                 winner = info.get('winner', 0)
@@ -642,9 +680,10 @@ def train(args):
         #########################################################
         if args.train_freq == -1 and warmup_complete:
             if len(agent.buffer) >= args.batch_size:
-                losses = agent.train(iter_fit=32)
+                losses, grad_norms = agent.train(iter_fit=32)
                 if losses:
                     tracker.add_losses(losses)
+                    tracker.add_grad_norms(grad_norms)
 
         #########################################################
         # Train agent2 in self-play
@@ -660,11 +699,11 @@ def train(args):
             agent2.decay_epsilon()
 
         #########################################################
-        # Step LR schedulers (cosine annealing)
+        # Step LR schedulers (DISABLED - constant LR for stability)
         #########################################################
-        if lr_schedulers is not None:
-            for scheduler in lr_schedulers.values():
-                scheduler.step()
+        # if lr_schedulers is not None:  # DISABLED - no LR decay
+        #     for scheduler in lr_schedulers.values():
+        #         scheduler.step()
 
         #########################################################
         # Strategic episode-end bonuses (diversity, forcing)
@@ -686,7 +725,14 @@ def train(args):
         #########################################################
         # Update tracker
         #########################################################
-        tracker.add_episode_result(episode_reward_p1, episode_step_count, winner)
+        # Pass shaped reward (P1), sparse reward, opponent reward (P2), and winner
+        tracker.add_episode_result(
+            reward_p1=episode_reward_p1,  # Shaped reward
+            length=episode_step_count,
+            winner=winner,
+            reward_p2=episode_reward_p2,  # Opponent reward (negative of sparse)
+            sparse_reward=episode_sparse_reward  # Unshapen sparse reward only
+        )
         tracker.add_strategic_stats(strategic_shaper.get_episode_stats())
         tracker.add_pbrs_total(pbrs_bonus)
         tracker.finalize_episode_behavior_metrics()  # Compute and store behavior metrics for this episode
@@ -751,10 +797,10 @@ def train(args):
             log_metrics["training/pbrs_enabled"] = args.reward_shaping
             log_metrics["training/tie_penalty"] = tie_penalty_applied
 
-            # LR decay tracking
-            if lr_schedulers is not None:
-                log_metrics["training/lr_actor"] = lr_schedulers['actor'].get_last_lr()[0]
-                log_metrics["training/lr_critic"] = lr_schedulers['critic_Q1'].get_last_lr()[0]
+            # LR decay tracking (DISABLED - constant LR)
+            # if lr_schedulers is not None:  # DISABLED - no LR decay
+            #     log_metrics["training/lr_actor"] = lr_schedulers['actor'].get_last_lr()[0]
+            #     log_metrics["training/lr_critic"] = lr_schedulers['critic_Q1'].get_last_lr()[0]
 
             # Episode blocking tracking (only log when self-play is active)
             if self_play_manager is not None and self_play_manager.active:

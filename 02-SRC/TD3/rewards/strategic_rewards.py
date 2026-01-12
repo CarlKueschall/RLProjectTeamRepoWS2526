@@ -53,9 +53,11 @@ class StrategicRewardShaper:
 
         #########################################################
         # FIX 1: Reducing the touch reward from 0.8 -> 0.3 because it was too high
+        # NOTE: puck_touches counter is now tracked globally in train_hockey.py
+        # to ensure it works regardless of --no_strategic_rewards flag
         #########################################################
         if env_touch_reward > 0:
-            self.puck_touches += 1
+            # Don't increment counter here - it's tracked globally in train_hockey.py
             bonuses['puck_touches'] = env_touch_reward * 0.3  # Reduced from 0.8 → 0.3, was too high before
 
         # FIX 1: Had to cut closeness reward in half (0.2 -> 0.1), was giving too much
@@ -118,12 +120,12 @@ class StrategicRewardShaper:
         # Backup distance-based touch detection
         # In case env rewards aren't working, use our own with larger threshold
         # FIX 1: Cutting proximity bonus in half (0.2 -> 0.1) here too
+        # NOTE: puck_touches counter is now tracked globally in train_hockey.py
         if dist_to_puck < 0.5 and env_touch_reward == 0:
             # Only give our reward if env didn't detect touch
             proximity_bonus = (0.5 - dist_to_puck) * 0.1  # Reduced (max +0.05)
             bonuses['proximity'] += proximity_bonus
-            if dist_to_puck < 0.3:  # More generous touch threshold
-                self.puck_touches += 1  # Count our own touches too
+            # Don't increment counter here - it's tracked globally in train_hockey.py
         #########################################################
 
         return bonuses

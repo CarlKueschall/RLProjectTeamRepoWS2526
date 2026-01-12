@@ -41,8 +41,8 @@ def parse_args():
                         help='Actor learning rate (default: 3e-4)')
     parser.add_argument('--lr_critic', type=float, default=3e-4,
                         help='Critic learning rate (default: 3e-4)')
-    parser.add_argument('--gamma', type=float, default=0.99,
-                        help='Discount factor (default: 0.99)')
+    parser.add_argument('--gamma', type=float, default=0.95,
+                        help='Discount factor (default: 0.95, REDUCED from 0.99 to prevent Q-explosion)')
     parser.add_argument('--tau', type=float, default=0.005,
                         help='Soft update coefficient (default: 0.005, balances speed vs stability)')
     parser.add_argument('--policy_freq', type=int, default=2,
@@ -55,8 +55,8 @@ def parse_args():
                         help='Target policy noise clip (default: 0.5)')
     parser.add_argument('--grad_clip', type=float, default=1.0,
                         help='Gradient clipping norm (default: 1.0)')
-    parser.add_argument('--batch_size', type=int, default=512,
-                        help='Batch size (default: 512)')
+    parser.add_argument('--batch_size', type=int, default=1024,
+                        help='Batch size (default: 1024, INCREASED for stable Q-learning)')
     parser.add_argument('--buffer_size', type=int, default=int(1e6),
                         help='Replay buffer size (default: 1000000, ~4%% of 25M total transitions)')
 
@@ -68,6 +68,8 @@ def parse_args():
                         help='Enable Potential-Based Reward Shaping (PBRS) - policy-invariant dense rewards (default: True)')
     parser.add_argument('--no_reward_shaping', dest='reward_shaping', action='store_false',
                         help='Disable reward shaping (use only sparse rewards)')
+    parser.add_argument('--pbrs_scale', type=float, default=1.0,
+                        help='PBRS magnitude scaling factor (default: 1.0). Use 0.5 to reduce PBRS influence, allowing sparse rewards to dominate')
 
     # Strategic rewards (non-invariant bonuses: shots, diversity, forcing, etc.)
     parser.add_argument('--use_strategic_rewards', action='store_true', default=True,
@@ -83,9 +85,33 @@ def parse_args():
     parser.add_argument('--no_tie_penalty', action='store_true',
                         help='Disable tie penalty (ties give 0 reward)')
 
+    # Reward scaling (fixes Q-explosion from sparse rewards)
+    parser.add_argument('--reward_scale', type=float, default=0.1,
+                        help='Scale factor for game rewards (default: 0.1, maps ±10 to ±1 range)')
+
+    # Epsilon reset on self-play (re-enable exploration when facing new opponents)
+    parser.add_argument('--epsilon_reset_on_selfplay', action='store_true', default=True,
+                        help='Reset epsilon to 0.5 when self-play activates (default: True)')
+    parser.add_argument('--no_epsilon_reset_on_selfplay', dest='epsilon_reset_on_selfplay', action='store_false',
+                        help='Do not reset epsilon on self-play activation')
+    parser.add_argument('--epsilon_reset_value', type=float, default=0.5,
+                        help='Epsilon value to reset to when self-play starts (default: 0.5)')
+
+    # PBRS constant weight (disable annealing during self-play)
+    parser.add_argument('--pbrs_constant_weight', action='store_true', default=True,
+                        help='Keep PBRS weight constant instead of annealing (default: True)')
+    parser.add_argument('--no_pbrs_constant_weight', dest='pbrs_constant_weight', action='store_false',
+                        help='Enable PBRS annealing during self-play')
+
+    # Critic initialization (positive bias to counter negative spiral)
+    parser.add_argument('--init_critic_bias_positive', action='store_true', default=True,
+                        help='Initialize critic output bias to +1.0 (default: True, counters negative Q-spiral)')
+    parser.add_argument('--no_init_critic_bias_positive', dest='init_critic_bias_positive', action='store_false',
+                        help='Use default (zero) critic bias initialization')
+
     # LR decay (cosine annealing for long training runs)
-    parser.add_argument('--lr_decay', action='store_true', default=True,
-                        help='Enable cosine LR decay (default: True)')
+    parser.add_argument('--lr_decay', action='store_true', default=False,
+                        help='Enable cosine LR decay (default: False, DISABLED to prevent learning freeze)')
     parser.add_argument('--no_lr_decay', dest='lr_decay', action='store_false',
                         help='Disable LR decay (constant learning rate)')
     parser.add_argument('--lr_min_factor', type=float, default=0.1,
@@ -93,8 +119,8 @@ def parse_args():
 
     parser.add_argument('--q_clip', type=float, default=25.0,
                         help='Maximum absolute Q-value (clip to [-q_clip, q_clip], default: 25.0, tighter bounds prevent explosion)')
-    parser.add_argument('--q_clip_mode', type=str, default='hard', choices=['hard', 'soft'],
-                        help='Q-value clipping mode: hard=clamp, soft=tanh scaling (default: hard, proven more stable)')
+    parser.add_argument('--q_clip_mode', type=str, default='soft', choices=['hard', 'soft'],
+                        help='Q-value clipping mode: hard=clamp, soft=tanh scaling (default: soft, prevents negative spiral)')
     parser.add_argument('--q_warning_threshold', type=float, default=10.0,
                         help='Warn when Q-values exceed this threshold (default: 10.0, catch explosion earlier)')
 
@@ -147,8 +173,8 @@ def parse_args():
                         help='Number of episodes to run per evaluation (default: 100)')
     parser.add_argument('--self_play_weak_ratio', type=float, default=0.5,
                         help='Ratio of episodes to train against weak opponent during self-play (default: 0.5 = 50%%)')
-    parser.add_argument('--episode_block_size', type=int, default=20,
-                        help='Number of consecutive episodes per opponent before switching (default: 20, stabilizes Q-learning)')
+    parser.add_argument('--episode_block_size', type=int, default=50,
+                        help='Number of consecutive episodes per opponent before switching (default: 50, INCREASED for stable Q-learning)')
 
     # Advanced Self-Play Features (anti-forgetting, PFSP, performance-gating)
     parser.add_argument('--use_dual_buffers', action='store_true', default=False,
@@ -163,8 +189,8 @@ def parse_args():
                         help='Dynamically adjust anchor opponent ratio based on forgetting detection')
     parser.add_argument('--performance_gated_selfplay', action='store_true', default=False,
                         help='Gate self-play activation on performance (90%% vs weak + low variance) instead of episode count')
-    parser.add_argument('--selfplay_gate_winrate', type=float, default=0.90,
-                        help='Min eval win-rate vs weak to activate self-play (default: 0.90)')
+    parser.add_argument('--selfplay_gate_winrate', type=float, default=0.75,
+                        help='Min eval win-rate vs strong to activate self-play (default: 0.75, LOWERED to be reachable)')
     parser.add_argument('--regression_rollback', action='store_true', default=False,
                         help='Enable automatic rollback on performance regression')
     parser.add_argument('--regression_threshold', type=float, default=0.15,
