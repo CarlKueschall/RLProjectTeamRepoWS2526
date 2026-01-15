@@ -65,6 +65,13 @@ class MetricsTracker:
         self.behavior_velocity_max = []
         self.behavior_puck_touches = []
 
+        # Shoot/Keep action tracking (action[3])
+        self._episode_shoot_actions = []  # Track action[3] values each step
+        self._episode_possession_steps = 0  # Count steps with possession
+        self.behavior_shoot_action_avg = []  # Average action[3] value per episode
+        self.behavior_shoot_action_when_possess = []  # Average action[3] when having possession
+        self.behavior_possession_ratio = []  # Fraction of episode with possession
+
         # Self-play tracking
         self._last_eval = {}  # {opponent_type: win_rate}
         self._peak_eval = {}  # {opponent_type: win_rate}
@@ -110,6 +117,9 @@ class MetricsTracker:
         self._episode_agent_positions = []  # Track positions for distance/velocity metrics
         self._episode_puck_distances = []  # Track distances to puck
         self._episode_time_near_puck = 0  # Count steps near puck (< 0.5)
+        self._episode_shoot_actions = []  # Track action[3] values
+        self._episode_shoot_actions_when_possess = []  # Track action[3] when having possession
+        self._episode_possession_steps = 0  # Count steps with possession
 
     def add_step_reward(self, reward):
         # Add reward for a single step
@@ -129,6 +139,15 @@ class MetricsTracker:
         # Track time spent near puck
         if distance < 0.5:
             self._episode_time_near_puck += 1
+
+    def add_shoot_action(self, shoot_action, has_possession):
+        # Track action[3] (shoot/keep) and possession status
+        # shoot_action: value of action[3], negative=keep, positive=shoot
+        # has_possession: True if obs[16] > 0 (agent has puck)
+        self._episode_shoot_actions.append(shoot_action)
+        if has_possession:
+            self._episode_possession_steps += 1
+            self._episode_shoot_actions_when_possess.append(shoot_action)
 
     def add_episode_result(self, reward_p1, length, winner, reward_p2=None, sparse_reward=None):
         #########################################################
@@ -268,6 +287,21 @@ class MetricsTracker:
         else:
             self.behavior_puck_touches.append(0.0)
 
+        # Shoot/Keep action metrics (action[3])
+        episode_length = len(self._episode_shoot_actions) if self._episode_shoot_actions else 1
+        if self._episode_shoot_actions:
+            self.behavior_shoot_action_avg.append(float(np.mean(self._episode_shoot_actions)))
+        else:
+            self.behavior_shoot_action_avg.append(0.0)
+
+        if self._episode_shoot_actions_when_possess:
+            self.behavior_shoot_action_when_possess.append(float(np.mean(self._episode_shoot_actions_when_possess)))
+        else:
+            self.behavior_shoot_action_when_possess.append(0.0)
+
+        # Possession ratio: fraction of episode with puck possession
+        self.behavior_possession_ratio.append(float(self._episode_possession_steps / episode_length))
+
     def get_behavior_metrics(self):
         #########################################################
         # Get averaged behavior metrics for the last log_interval episodes
@@ -286,6 +320,11 @@ class MetricsTracker:
         metrics['behavior/velocity_avg'] = np.mean(self.behavior_velocity_avg[-self.log_interval:]) if self.behavior_velocity_avg else 0.0
         metrics['behavior/velocity_max'] = np.mean(self.behavior_velocity_max[-self.log_interval:]) if self.behavior_velocity_max else 0.0
         metrics['behavior/puck_touches'] = np.mean(self.behavior_puck_touches[-self.log_interval:]) if self.behavior_puck_touches else 0.0
+
+        # Shoot/Keep action metrics
+        metrics['behavior/shoot_action_avg'] = np.mean(self.behavior_shoot_action_avg[-self.log_interval:]) if self.behavior_shoot_action_avg else 0.0
+        metrics['behavior/shoot_action_when_possess'] = np.mean(self.behavior_shoot_action_when_possess[-self.log_interval:]) if self.behavior_shoot_action_when_possess else 0.0
+        metrics['behavior/possession_ratio'] = np.mean(self.behavior_possession_ratio[-self.log_interval:]) if self.behavior_possession_ratio else 0.0
 
         return metrics
 

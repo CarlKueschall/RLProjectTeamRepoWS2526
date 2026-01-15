@@ -26,14 +26,38 @@ def compute_potential(obs, gamma=0.99):
     p1_pos = np.array([obs[0], obs[1]])  # our position
     puck_pos = np.array([obs[12], obs[13]])  # puck position
     our_goal_pos = np.array([-4.5, 0.0])  # Constant anchor, our goal
+    opp_goal_pos = np.array([4.5, 0.0])  # Opponent goal position
     has_puck = obs[16] > 0  # do we have puck?
+    puck_timer = obs[16]  # possession timer (15 down to 0)
     puck_x = obs[12]  # puck x coord
 
     #########################################################
     # Offensive progress potential - reward for puck near opponent goal
-
+    #########################################################
     dist_puck_to_opp_goal = max(0, 5.0 - puck_x)  # how far from their goal
     phi_offense = 1.5 * (1.0 - (dist_puck_to_opp_goal / 10.0))  # closer = better
+
+    #########################################################
+    # POSSESSION POTENTIAL - Reward having the puck in attacking position
+    # This encourages KEEPING the puck (action[3] <= 0) while positioning
+    # Higher potential when: (1) we have puck, (2) in offensive zone, (3) facing goal
+    #########################################################
+    phi_possession = 0.0
+    if has_puck:
+        # Reward possession more when in offensive position (puck_x > 0 = opponent half)
+        offensive_position_bonus = np.tanh(puck_x / 2.0)  # Range [-1, 1], positive in opponent half
+
+        # Reward possession more when aligned with goal (low |y| means centered)
+        goal_alignment = 1.0 - np.tanh(abs(puck_pos[1]) / 1.5)  # 1 when centered, 0 at edges
+
+        # Combine: high value when in good shooting position with possession
+        # This creates incentive to KEEP the puck while positioning
+        phi_possession = 2.0 * (0.5 + 0.3 * offensive_position_bonus + 0.2 * goal_alignment)
+
+        # Timer bonus: reward maintaining possession (higher timer = just got it)
+        # This gives instant reward for gaining possession
+        timer_bonus = 0.5 * (puck_timer / 15.0)  # 0.5 at timer=15, 0 at timer=0
+        phi_possession += timer_bonus
 
     #########################################################
     # CRITICAL FIX: Add puck velocity component - reward shooting toward goal
@@ -76,8 +100,9 @@ def compute_potential(obs, gamma=0.99):
     # Previous 0.05 * pbrs_scale=0.5 = 0.025 total multiplier = only 0.25% of sparse rewards
     # New 1.0 * pbrs_scale=2.0 = 2.0 total multiplier = ~10-20% of sparse rewards (±10)
     # This provides meaningful dense guidance while preserving policy invariance
+    # Added phi_possession to encourage keeping the puck while positioning for shots
     SCALE = 1.0  # Was 0.05, increased 20x to make PBRS contribute 10-20% of total reward
-    phi = SCALE * (phi_offense + phi_prox + phi_lane + phi_cushion + phi_velocity)
+    phi = SCALE * (phi_offense + phi_prox + phi_lane + phi_cushion + phi_velocity + phi_possession)
 
     return phi
 

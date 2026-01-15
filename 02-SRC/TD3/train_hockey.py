@@ -162,6 +162,11 @@ def train(args):
                 "pbrs_scale": args.pbrs_scale if args.reward_shaping else 0.0,
                 "use_strategic_rewards": args.use_strategic_rewards,
                 "strategic_reward_scale": args.strategic_reward_scale if args.use_strategic_rewards else 0.0,
+                # Prioritized Experience Replay (PER)
+                "use_per": args.use_per,
+                "per_alpha": args.per_alpha if args.use_per else None,
+                "per_beta_start": args.per_beta_start if args.use_per else None,
+                "per_beta_frames": args.per_beta_frames if args.use_per else None,
             },
             tags=["TD3", "Hockey", args.mode, args.opponent]
                   + (["self-play"] if args.self_play_start > 0 else [])
@@ -173,6 +178,7 @@ def train(args):
                   + (["no-strategic-rewards"] if not args.use_strategic_rewards else [])
                   + (["scaled-strategic"] if args.use_strategic_rewards and args.strategic_reward_scale != 1.0 else [])
                   + (["scaled-pbrs"] if args.reward_shaping and args.pbrs_scale != 1.0 else [])
+                  + (["PER"] if args.use_per else [])
         )
 
     # Track starting episode (for resuming from checkpoint)
@@ -264,6 +270,11 @@ def train(args):
         init_critic_bias_positive=args.init_critic_bias_positive,  # CRITICAL FIX: positive bias to counter negative Q-spiral
         use_dual_buffers=args.use_dual_buffers,
         critic_action_dim=critic_action_dim,  # Pass inferred dimension
+        # Prioritized Experience Replay (PER) configuration
+        use_per=args.use_per,
+        per_alpha=args.per_alpha,
+        per_beta_start=args.per_beta_start,
+        per_beta_frames=args.per_beta_frames,
     )
 
     #########################################################
@@ -368,6 +379,7 @@ def train(args):
         regression_threshold=args.regression_threshold,
         observation_space=obs_space,
         action_space=single_player_action_space,
+        enabled=not args.disable_selfplay,
     )
     
     # Set the target episode for self-play activation
@@ -402,6 +414,12 @@ def train(args):
             print(f"Strategic rewards: DISABLED (PBRS only, focusing on winning)")
         elif args.strategic_reward_scale != 1.0:
             print(f"Strategic rewards: SCALED by {args.strategic_reward_scale}x (testing reward hacking)")
+    # Prioritized Experience Replay (PER)
+    if args.use_per:
+        print(f"Prioritized Experience Replay (PER): ENABLED")
+        print(f"  alpha={args.per_alpha} (priority exponent)")
+        print(f"  beta_start={args.per_beta_start} (IS correction, anneals to 1.0)")
+        print(f"  beta_frames={args.per_beta_frames} (annealing schedule)")
     print("###############################")
 
     if args.self_play_start > 0:
@@ -645,6 +663,7 @@ def train(args):
             tracker.add_action_magnitude(np.linalg.norm(action1[:2]))  # track action magnitude
             tracker.add_agent_position([obs_next[0], obs_next[1]])  # track agent position
             tracker.add_puck_distance(dist_to_puck)  # track distance to puck
+            tracker.add_shoot_action(action1[3], obs_next[16] > 0)  # track shoot/keep action and possession
 
             episode_reward_p1 += r1_shaped
             episode_step_count += 1
@@ -661,10 +680,11 @@ def train(args):
             # Train during episode
             #########################################################
             warmup_complete = i_episode >= args.warmup_episodes  # wait for warmup before training
+            per_stats = None  # PER statistics from training (if PER enabled)
             if args.train_freq != -1 and len(agent.buffer) >= args.batch_size and warmup_complete:
                 if global_step % args.train_freq == 0:
                     scaled_iterations = max(1, int(32 / (250 / args.train_freq)))  # scale training iterations based on freq
-                    losses, grad_norms = agent.train(iter_fit=scaled_iterations)
+                    losses, grad_norms, per_stats = agent.train(iter_fit=scaled_iterations)
                     if losses:
                         tracker.add_losses(losses)
                         tracker.add_grad_norms(grad_norms)
@@ -680,7 +700,7 @@ def train(args):
         #########################################################
         if args.train_freq == -1 and warmup_complete:
             if len(agent.buffer) >= args.batch_size:
-                losses, grad_norms = agent.train(iter_fit=32)
+                losses, grad_norms, per_stats = agent.train(iter_fit=32)
                 if losses:
                     tracker.add_losses(losses)
                     tracker.add_grad_norms(grad_norms)
@@ -812,18 +832,40 @@ def train(args):
                 if self_play_manager.active:
                     log_metrics["pbrs/annealing_weight"] = pbrs_shaper.get_annealing_weight(i_episode)
 
-                #########################################################
-                # Strategic reward shaping metrics
-                #########################################################
-                if tracker.strategic_stats:
-                    log_metrics["strategic/shots_clear"] = tracker.strategic_stats.get('shots_clear', 0)
-                    log_metrics["strategic/shots_blocked"] = tracker.strategic_stats.get('shots_blocked', 0)
-                    log_metrics["strategic/shot_quality_ratio"] = tracker.strategic_stats.get('shot_quality_ratio', 0.0)
-                    log_metrics["strategic/attack_sides_unique"] = tracker.strategic_stats.get('attack_sides_unique', 0)
-                    log_metrics["strategic/attack_diversity_bonus"] = tracker.strategic_stats.get('attack_diversity_bonus', 0.0)
-                    log_metrics["strategic/opponent_total_movement"] = tracker.strategic_stats.get('total_opponent_movement', 0.0)
-                    log_metrics["strategic/opponent_avg_movement"] = tracker.strategic_stats.get('avg_opponent_movement', 0.0)
-                    log_metrics["strategic/forcing_bonus"] = tracker.strategic_stats.get('forcing_bonus', 0.0)
+            #########################################################
+            # Prioritized Experience Replay (PER) metrics
+            # Tracks buffer state, IS weight distribution, and TD error statistics
+            # Useful for monitoring PER effectiveness and debugging issues
+            #########################################################
+            if args.use_per and per_stats is not None:
+                # Buffer state
+                log_metrics["per/beta"] = per_stats['per_beta']
+                log_metrics["per/max_priority"] = per_stats['per_max_priority']
+                log_metrics["per/total_priority"] = per_stats['per_total_priority']
+                log_metrics["per/n_entries"] = per_stats['per_n_entries']
+                # IS weight distribution (shows correction strength)
+                log_metrics["per/is_weight_mean"] = per_stats['per_is_weight_mean']
+                log_metrics["per/is_weight_std"] = per_stats['per_is_weight_std']
+                log_metrics["per/is_weight_min"] = per_stats['per_is_weight_min']
+                log_metrics["per/is_weight_max"] = per_stats['per_is_weight_max']
+                # TD error distribution (shows priority spread)
+                log_metrics["per/td_error_mean"] = per_stats['per_td_error_mean']
+                log_metrics["per/td_error_std"] = per_stats['per_td_error_std']
+                log_metrics["per/td_error_min"] = per_stats['per_td_error_min']
+                log_metrics["per/td_error_max"] = per_stats['per_td_error_max']
+
+            #########################################################
+            # Strategic reward shaping metrics
+            #########################################################
+            if args.reward_shaping and tracker.strategic_stats:
+                log_metrics["strategic/shots_clear"] = tracker.strategic_stats.get('shots_clear', 0)
+                log_metrics["strategic/shots_blocked"] = tracker.strategic_stats.get('shots_blocked', 0)
+                log_metrics["strategic/shot_quality_ratio"] = tracker.strategic_stats.get('shot_quality_ratio', 0.0)
+                log_metrics["strategic/attack_sides_unique"] = tracker.strategic_stats.get('attack_sides_unique', 0)
+                log_metrics["strategic/attack_diversity_bonus"] = tracker.strategic_stats.get('attack_diversity_bonus', 0.0)
+                log_metrics["strategic/opponent_total_movement"] = tracker.strategic_stats.get('total_opponent_movement', 0.0)
+                log_metrics["strategic/opponent_avg_movement"] = tracker.strategic_stats.get('avg_opponent_movement', 0.0)
+                log_metrics["strategic/forcing_bonus"] = tracker.strategic_stats.get('forcing_bonus', 0.0)
 
             #########################################################
             # Self-Play Metrics
@@ -1041,8 +1083,13 @@ def train(args):
                 with torch.no_grad():
                     for _ in range(min(100, len(agent.buffer))):
                         batch = agent.buffer.sample(1)
-                        state = batch[0][0]
-                        action_full = batch[0][1]  # 8D action from buffer
+                        # Handle PER vs regular buffer: PER returns (transitions, indices, weights)
+                        if isinstance(batch, tuple):
+                            transitions = batch[0]
+                        else:
+                            transitions = batch
+                        state = transitions[0][0]
+                        action_full = transitions[0][1]  # 8D action from buffer
                         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(agent.device)
                         action_tensor = torch.FloatTensor(action_full).unsqueeze(0).to(agent.device)  # 8D: [agent, opponent]
                         q_value = agent.Q1.Q_value(state_tensor, action_tensor).item()

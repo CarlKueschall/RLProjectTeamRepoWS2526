@@ -10,6 +10,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from . import memory as mem
+from .memory import PrioritizedMemory
 from .model import Model
 from .device import get_device # put device in separate file for clarity
 from .noise import OUNoise # put this as well into separate file for clarity
@@ -33,19 +34,13 @@ class QFunction(Model):
         self._q_clip_mode = q_clip_mode
 
         #########################################################
-        # CRITICAL FIX: Initialize output bias to +5.0 to counter negative Q-spiral
-        # Research: Negative spiral occurs when Q-values start negative and
-        # bootstrap keeps them negative. Positive bias breaks the spiral.
-        # UPDATED: Increased from +1.0 to +5.0 because +1.0 was too weak and got
-        # overwhelmed by negative experiences during strong opponent training.
+        # NOTE: Positive bias initialization was DISABLED
+        # It set output bias to +5.0, causing Q-values to start artificially high
+        # This broke learning: network thought everything was good before training
+        # With gamma=0.99 and sparse rewards, agent became passive (learned nothing)
+        # Fix: Use normal initialization (bias defaults to 0)
         #########################################################
-        if init_bias_positive:
-            # Find the output layer (last layer in the network)
-            for name, param in self.named_parameters():
-                if 'bias' in name and param.shape[0] == 1:  # output layer bias
-                    torch.nn.init.constant_(param, 5.0)  # Increased from 1.0 to 5.0
-                    print(f"  Initialized critic output bias to +5.0 (counters negative Q-spiral)")
-                    break
+        # Bias initialization removed - use default PyTorch initialization
 
         self.optimizer = torch.optim.Adam(self.parameters(),
                                           lr=learning_rate,
@@ -179,15 +174,45 @@ class TD3Agent:
             use_dual_buffers = self._config["use_dual_buffers"]
 
         #########################################################
+        # Prioritized Experience Replay (PER) configuration
+        # PER oversamples high-TD-error transitions to focus learning on surprising experiences
+        #########################################################
+        self.use_per = self._config.get("use_per", False)
+        self.per_alpha = self._config.get("per_alpha", 0.6)
+        self.per_beta_start = self._config.get("per_beta_start", 0.4)
+        self.per_beta_frames = self._config.get("per_beta_frames", 100000)
+
+        #########################################################
         # all for self play
         if use_dual_buffers:
             buffer_size_each = self._config["buffer_size"] // 2
-            self.buffer_anchor = mem.Memory(max_size=buffer_size_each)
-            self.buffer_pool = mem.Memory(max_size=buffer_size_each)
+            if self.use_per:
+                self.buffer_anchor = PrioritizedMemory(
+                    max_size=buffer_size_each, alpha=self.per_alpha,
+                    beta_start=self.per_beta_start, beta_frames=self.per_beta_frames
+                )
+                self.buffer_pool = PrioritizedMemory(
+                    max_size=buffer_size_each, alpha=self.per_alpha,
+                    beta_start=self.per_beta_start, beta_frames=self.per_beta_frames
+                )
+                print(f"Dual PER buffers enabled: {buffer_size_each} each (anchor + pool)")
+                print(f"  PER config: alpha={self.per_alpha}, beta_start={self.per_beta_start}, beta_frames={self.per_beta_frames}")
+            else:
+                self.buffer_anchor = mem.Memory(max_size=buffer_size_each)
+                self.buffer_pool = mem.Memory(max_size=buffer_size_each)
+                print("Dual replay buffers enabled: {} each (anchor + pool)".format(buffer_size_each))
             self.buffer = self.buffer_anchor
-            print("Dual replay buffers enabled: {} each (anchor + pool)".format(buffer_size_each))
         else:
-            self.buffer = mem.Memory(max_size=self._config["buffer_size"])
+            if self.use_per:
+                self.buffer = PrioritizedMemory(
+                    max_size=self._config["buffer_size"], alpha=self.per_alpha,
+                    beta_start=self.per_beta_start, beta_frames=self.per_beta_frames
+                )
+                print(f"Prioritized Experience Replay (PER) enabled")
+                print(f"  Buffer size: {self._config['buffer_size']}")
+                print(f"  PER config: alpha={self.per_alpha}, beta_start={self.per_beta_start}, beta_frames={self.per_beta_frames}")
+            else:
+                self.buffer = mem.Memory(max_size=self._config["buffer_size"])
         # getting the aciton space bounds
         high = torch.from_numpy(self._action_space.high).to(self.device)
         low = torch.from_numpy(self._action_space.low).to(self.device)
@@ -391,12 +416,38 @@ class TD3Agent:
     def store_transition(self, transition):
         self.buffer.add_transition(transition)
     def state(self):
-        return (self.Q1.state_dict(), self.Q2.state_dict(), self.policy.state_dict())
+        #########################################################
+        # Save full agent state including normalization statistics
+        # CRITICAL: Must save obs_mean/obs_std for correct inference
+        #########################################################
+        return (
+            self.Q1.state_dict(),
+            self.Q2.state_dict(),
+            self.policy.state_dict(),
+            self.obs_mean.copy() if self.normalize_obs else None,
+            self.obs_std.copy() if self.normalize_obs else None,
+            self.obs_count if self.normalize_obs else None
+        )
     def restore_state(self, state):
         self.Q1.load_state_dict(state[0])
         self.Q2.load_state_dict(state[1])
         self.policy.load_state_dict(state[2])
         self._copy_nets()
+        #########################################################
+        # Restore normalization statistics if available (new format)
+        # Old checkpoints (3-tuple) won't have these - handled gracefully
+        #########################################################
+        if len(state) > 3 and state[3] is not None:
+            self.obs_mean = state[3].copy() if hasattr(state[3], 'copy') else state[3]
+            self.obs_std = state[4].copy() if hasattr(state[4], 'copy') else state[4]
+            self.obs_count = state[5]
+            print(f"  Restored normalization stats: obs_count={self.obs_count:.0f}")
+        elif self.normalize_obs:
+            # Old checkpoint without normalization stats
+            # Keep defaults but warn user
+            print(f"  WARNING: Checkpoint missing normalization stats (old format)")
+            print(f"  Using default obs_mean=0, obs_std=1 - may cause performance issues")
+            print(f"  Consider re-training or disabling normalization for testing")
     def reset(self):
         self.action_noise.reset()
     def decay_epsilon(self):
@@ -483,6 +534,11 @@ class TD3Agent:
         grad_norms = []  # Track gradient norms for logging
         self.train_iter += 1
 
+        # PER statistics collection
+        per_stats = None
+        all_is_weights = []
+        all_td_errors = []
+
         for _ in range(iter_fit):
             self.total_steps += 1
             #########################################################
@@ -532,10 +588,14 @@ class TD3Agent:
                         continue
             else:
                 # if not using dual buffers, then we just sample from the main buffer
-                data = self.buffer.sample(batch=self._config['batch_size'])
-
-            indices = None
-            is_weights = None
+                if self.use_per:
+                    data, indices, is_weights = self.buffer.sample(batch=self._config['batch_size'])
+                    # Collect IS weights for PER monitoring
+                    all_is_weights.extend(is_weights.tolist())
+                else:
+                    data = self.buffer.sample(batch=self._config['batch_size'])
+                    indices = None
+                    is_weights = None
 
             # from all the data we sampled, now we need to split it into the states, actions, rewards, next states, and dones.
             # have to ensure to 1. convert to tensors, 2. convert to the device, 3. convert to the correct type.
@@ -649,6 +709,23 @@ class TD3Agent:
             avg_critic_loss = (q1_loss_value + q2_loss_value) / 2
             avg_critic_grad_norm = (q1_grad_norm + q2_grad_norm) / 2
 
+            #########################################################
+            # PER Priority Update
+            # Update priorities based on TD errors for prioritized sampling
+            #########################################################
+            if self.use_per and indices is not None:
+                with torch.no_grad():
+                    # Compute current Q-values for the sampled transitions
+                    q1_current = self.Q1.Q_value(s, a_full)
+                    q2_current = self.Q2.Q_value(s, a_full)
+                    q_current = torch.min(q1_current, q2_current)
+                    # TD error = |Q(s,a) - target_q|
+                    td_errors = torch.abs(q_current - target_q).cpu().numpy().flatten()
+                # Collect TD errors for PER monitoring
+                all_td_errors.extend(td_errors.tolist())
+                # Update priorities in the buffer
+                self.buffer.update_priorities(indices, td_errors)
+
             if self.total_steps % self._config["policy_freq"] == 0:
                 #########################################################
                 # update the policy network at the given frequency
@@ -701,7 +778,33 @@ class TD3Agent:
                     # a soft update only as discussed above. blend old targets with new network weights
                     self._soft_update_targets()
 
-        return losses, grad_norms
+        #########################################################
+        # Compute PER statistics for logging
+        #########################################################
+        if self.use_per and len(all_is_weights) > 0:
+            is_weights_arr = np.array(all_is_weights)
+            td_errors_arr = np.array(all_td_errors) if len(all_td_errors) > 0 else np.array([0.0])
+            buffer_stats = self.buffer.get_stats()
+            per_stats = {
+                # Buffer state
+                'per_beta': buffer_stats['beta'],
+                'per_max_priority': buffer_stats['max_priority'],
+                'per_total_priority': buffer_stats['total_priority'],
+                'per_n_entries': buffer_stats['n_entries'],
+                'per_alpha': buffer_stats['alpha'],
+                # IS weight statistics (shows correction strength)
+                'per_is_weight_mean': float(np.mean(is_weights_arr)),
+                'per_is_weight_std': float(np.std(is_weights_arr)),
+                'per_is_weight_min': float(np.min(is_weights_arr)),
+                'per_is_weight_max': float(np.max(is_weights_arr)),
+                # TD error statistics (shows priority distribution)
+                'per_td_error_mean': float(np.mean(td_errors_arr)),
+                'per_td_error_std': float(np.std(td_errors_arr)),
+                'per_td_error_min': float(np.min(td_errors_arr)),
+                'per_td_error_max': float(np.max(td_errors_arr)),
+            }
+
+        return losses, grad_norms, per_stats
     
 
 

@@ -103,11 +103,11 @@ def parse_args():
     parser.add_argument('--no_pbrs_constant_weight', dest='pbrs_constant_weight', action='store_false',
                         help='Enable PBRS annealing during self-play')
 
-    # Critic initialization (positive bias to counter negative spiral)
-    parser.add_argument('--init_critic_bias_positive', action='store_true', default=True,
-                        help='Initialize critic output bias to +1.0 (default: True, counters negative Q-spiral)')
+    # Critic initialization (DISABLED: broke training with artificial 5.0 bias)
+    parser.add_argument('--init_critic_bias_positive', action='store_true', default=False,
+                        help='Initialize critic output bias to +5.0 (default: False, DISABLED - breaks learning)')
     parser.add_argument('--no_init_critic_bias_positive', dest='init_critic_bias_positive', action='store_false',
-                        help='Use default (zero) critic bias initialization')
+                        help='Use default (zero) critic bias initialization (default)')
 
     # LR decay (cosine annealing for long training runs)
     parser.add_argument('--lr_decay', action='store_true', default=False,
@@ -163,6 +163,8 @@ def parse_args():
     # Self-Play Training (can be appended to any training run)
     parser.add_argument('--self_play_start', type=int, default=0,
                         help='Episode to start self-play (0=disabled, e.g. 5000 = after 5000 eps against weak)')
+    parser.add_argument('--disable_selfplay', action='store_true', default=False,
+                        help='Completely disable self-play even if self_play_start > 0 (forces weak opponent only)')
     parser.add_argument('--self_play_pool_size', type=int, default=25,
                         help='Number of past checkpoints to keep in opponent pool (default: 25, more diversity for long training)')
     parser.add_argument('--self_play_save_interval', type=int, default=500,
@@ -195,6 +197,18 @@ def parse_args():
                         help='Enable automatic rollback on performance regression')
     parser.add_argument('--regression_threshold', type=float, default=0.15,
                         help='Rollback if eval vs weak drops >this from best (default: 0.15 = 15%%)')
+
+    # Prioritized Experience Replay (PER) - oversample high-TD-error transitions
+    parser.add_argument('--use_per', action='store_true', default=False,
+                        help='Enable Prioritized Experience Replay to oversample rare winning experiences (default: False)')
+    parser.add_argument('--no_per', dest='use_per', action='store_false',
+                        help='Disable PER (use uniform sampling)')
+    parser.add_argument('--per_alpha', type=float, default=0.6,
+                        help='PER priority exponent: 0=uniform, 1=full prioritization (default: 0.6)')
+    parser.add_argument('--per_beta_start', type=float, default=0.4,
+                        help='PER initial beta for importance sampling correction (default: 0.4, anneals to 1.0)')
+    parser.add_argument('--per_beta_frames', type=int, default=100000,
+                        help='PER frames to anneal beta from start to 1.0 (default: 100000)')
 
     return parser.parse_args()
 

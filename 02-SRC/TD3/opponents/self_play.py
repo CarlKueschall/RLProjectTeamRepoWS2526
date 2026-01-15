@@ -21,7 +21,7 @@ class SelfPlayManager:
                  dynamic_anchor_mixing=False,
                  performance_gated=False, gate_winrate=0.90,
                  regression_rollback=False, regression_threshold=0.15,
-                 observation_space=None, action_space=None):
+                 observation_space=None, action_space=None, enabled=True):
         ########################################################
         # Initialize self-play manager.
         #Arguments:
@@ -63,9 +63,13 @@ class SelfPlayManager:
 
         #########################################################
         # Regression rollback
-        
+
         self.regression_rollback = regression_rollback
         self.regression_threshold = regression_threshold
+
+        #########################################################
+        # Enable/disable flag for self-play
+        self.enabled = enabled
 
         #########################################################
         # Self-play state
@@ -157,7 +161,11 @@ class SelfPlayManager:
             #########################################################
         # Check if self-play should activate (performance gating).
         #########################################################
- 
+
+        # Master disable switch - if self-play is disabled, never activate
+        if not self.enabled:
+            return False
+
         if not self.performance_gated:
             return episode >= self.start_episode
 

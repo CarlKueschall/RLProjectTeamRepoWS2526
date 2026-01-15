@@ -204,6 +204,28 @@ def get_critical_metrics():
         'values/Q_std',
         'values/Q_min',
         'values/Q_max',
+
+        # Prioritized Experience Replay (PER) metrics
+        # Buffer state
+        'per/beta',
+        'per/max_priority',
+        'per/total_priority',
+        'per/n_entries',
+        # IS weight distribution (shows correction strength)
+        'per/is_weight_mean',
+        'per/is_weight_std',
+        'per/is_weight_min',
+        'per/is_weight_max',
+        # TD error distribution (shows priority spread)
+        'per/td_error_mean',
+        'per/td_error_std',
+        'per/td_error_min',
+        'per/td_error_max',
+
+        # Shoot/Keep behavior metrics (possession strategy)
+        'behavior/shoot_action_avg',
+        'behavior/shoot_action_when_possess',
+        'behavior/possession_ratio',
     ]
 
 
