@@ -25,7 +25,71 @@ from evaluation import evaluate_vs_opponent
 from visualization import create_gif_for_wandb, save_gif_to_wandb
 from metrics import MetricsTracker
 from opponents import SelfPlayManager, FixedOpponent
-from rewards import PBRSReward, StrategicRewardShaper
+from rewards import PBRSReward
+from parallel_env import ParallelHockeyEnv, create_parallel_env, EpisodeData
+
+
+def process_parallel_episode(
+    episode_data: EpisodeData,
+    agent,
+    tracker,
+    args,
+    opponent_type: str,
+    tie_penalty: float,
+):
+    """
+    Process a single episode collected from parallel workers.
+
+    Adds transitions to buffer and updates metrics tracker.
+
+    Args:
+        episode_data: Episode data from parallel worker
+        agent: TD3 agent (for buffer access)
+        tracker: Metrics tracker
+        args: Command-line arguments
+        opponent_type: Type of opponent faced
+        tie_penalty: Tie penalty value (0 if disabled)
+
+    Returns:
+        Tuple of (episode_reward, sparse_reward, winner)
+    """
+    # Add all transitions to buffer
+    for transition in episode_data.transitions:
+        obs, action, reward, obs_next, done = transition
+        agent.buffer.add_transition((obs, action, reward, obs_next, done))
+
+    # Apply tie penalty if applicable
+    episode_reward = episode_data.episode_reward
+    winner = episode_data.winner
+    if tie_penalty != 0 and winner == 0:
+        episode_reward += tie_penalty
+
+    # Update tracker with episode result
+    tracker.add_episode_result(
+        reward_p1=episode_reward,
+        length=episode_data.episode_length,
+        winner=winner,
+        reward_p2=-episode_data.sparse_reward,  # Opponent gets negative
+        sparse_reward=episode_data.sparse_reward
+    )
+
+    # Add behavior metrics
+    if episode_data.action_magnitudes:
+        for mag in episode_data.action_magnitudes:
+            tracker.add_action_magnitude(mag)
+    if episode_data.puck_distances:
+        for dist in episode_data.puck_distances:
+            tracker.add_puck_distance(dist)
+    if episode_data.shoot_actions:
+        for shoot_val, has_possession in episode_data.shoot_actions:
+            tracker.add_shoot_action(shoot_val, has_possession)
+    if episode_data.agent_positions:
+        for pos in episode_data.agent_positions:
+            tracker.add_agent_position(pos)
+
+    tracker.finalize_episode_behavior_metrics()
+
+    return episode_reward, episode_data.sparse_reward, winner
 
 
 def train(args):
@@ -158,15 +222,15 @@ def train(args):
                 "lr_decay": args.lr_decay,
                 "lr_min_factor": args.lr_min_factor if args.lr_decay else None,
                 "episode_block_size": args.episode_block_size,
-                # Reward shaping configuration (for ablation studies)
+                # Reward shaping configuration
                 "pbrs_scale": args.pbrs_scale if args.reward_shaping else 0.0,
-                "use_strategic_rewards": args.use_strategic_rewards,
-                "strategic_reward_scale": args.strategic_reward_scale if args.use_strategic_rewards else 0.0,
                 # Prioritized Experience Replay (PER)
                 "use_per": args.use_per,
                 "per_alpha": args.per_alpha if args.use_per else None,
                 "per_beta_start": args.per_beta_start if args.use_per else None,
                 "per_beta_frames": args.per_beta_frames if args.use_per else None,
+                # Parallel data collection
+                "parallel_envs": args.parallel_envs,
             },
             tags=["TD3", "Hockey", args.mode, args.opponent]
                   + (["self-play"] if args.self_play_start > 0 else [])
@@ -175,10 +239,9 @@ def train(args):
                   + (["tie-penalty"] if not args.no_tie_penalty else [])
                   + (["lr-decay"] if args.lr_decay else [])
                   + (["episode-blocking"] if args.episode_block_size > 1 else [])
-                  + (["no-strategic-rewards"] if not args.use_strategic_rewards else [])
-                  + (["scaled-strategic"] if args.use_strategic_rewards and args.strategic_reward_scale != 1.0 else [])
                   + (["scaled-pbrs"] if args.reward_shaping and args.pbrs_scale != 1.0 else [])
                   + (["PER"] if args.use_per else [])
+                  + (["parallel"] if args.parallel_envs > 1 else [])
         )
 
     # Track starting episode (for resuming from checkpoint)
@@ -360,8 +423,6 @@ def train(args):
     if args.reward_shaping and args.self_play_start > 0:
         pbrs_shaper.set_self_play_start(args.self_play_start)  # anneal during self-play (unless constant_weight=True)
 
-    strategic_shaper = StrategicRewardShaper()
-
     #########################################################
     # Initialize self-play manager
     #########################################################
@@ -406,14 +467,9 @@ def train(args):
         print(f"LR decay: cosine annealing to {args.lr_min_factor*100:.0f}% of initial")
     if args.episode_block_size > 1:
         print(f"Episode blocking: {args.episode_block_size} episodes per opponent")
-    # Reward shaping configuration (ablation study)
-    if args.reward_shaping:
-        if args.pbrs_scale != 1.0:
-            print(f"PBRS magnitude: SCALED by {args.pbrs_scale}x (reducing dense reward influence)")
-        if not args.use_strategic_rewards:
-            print(f"Strategic rewards: DISABLED (PBRS only, focusing on winning)")
-        elif args.strategic_reward_scale != 1.0:
-            print(f"Strategic rewards: SCALED by {args.strategic_reward_scale}x (testing reward hacking)")
+    # Reward shaping configuration
+    if args.reward_shaping and args.pbrs_scale != 1.0:
+        print(f"PBRS magnitude: SCALED by {args.pbrs_scale}x")
     # Prioritized Experience Replay (PER)
     if args.use_per:
         print(f"Prioritized Experience Replay (PER): ENABLED")
@@ -442,6 +498,41 @@ def train(args):
         print("###############################")
 
     #########################################################
+    # Initialize parallel environment (if enabled)
+    #########################################################
+    parallel_env = None
+    if args.parallel_envs > 1:
+        print("###############################")
+        print(f"PARALLEL DATA COLLECTION ENABLED")
+        print(f"Number of parallel workers: {args.parallel_envs}")
+
+        # Create parallel environment
+        pbrs_config = {
+            'enabled': args.reward_shaping,
+            'scale': args.pbrs_scale,
+            'gamma': args.gamma,
+            'components': ['distance', 'velocity', 'possession'],
+            'constant_weight': args.pbrs_constant_weight,
+        }
+
+        parallel_env = ParallelHockeyEnv(
+            num_workers=args.parallel_envs,
+            mode=mode,
+            keep_mode=args.keep_mode,
+            max_timesteps=max_timesteps,
+            obs_dim=actual_obs_dim,
+            action_dim=4,
+            hidden_actor=args.hidden_actor,
+            reward_scale=args.reward_scale,
+            pbrs_config=pbrs_config,
+        )
+
+        # Batch size for parallel collection
+        parallel_batch_size = args.parallel_batch_size if args.parallel_batch_size > 0 else args.parallel_envs
+        print(f"Episodes per batch: {parallel_batch_size}")
+        print("###############################")
+
+    #########################################################
     # Training loop
     #########################################################
     global_step = 0
@@ -459,8 +550,163 @@ def train(args):
 
     pbar = tqdm(range(i_episode_start + 1, args.max_episodes + 1), desc="Training", unit="ep")
 
+    # Track episodes to skip when using parallel collection
+    parallel_episodes_processed = set()
+
     for i_episode in pbar:
         #########################################################
+        # PARALLEL DATA COLLECTION BRANCH
+        # When parallel mode is enabled, collect batches of episodes
+        # using worker processes for significant speedup
+        #########################################################
+        if parallel_env is not None and i_episode not in parallel_episodes_processed:
+            # Determine batch size and opponent type
+            batch_size = parallel_batch_size
+            remaining_episodes = args.max_episodes - i_episode + 1
+            batch_size = min(batch_size, remaining_episodes)
+
+            # Select opponent type for this batch
+            opponent_type = args.opponent if args.opponent in ['weak', 'strong'] else 'weak'
+
+            # Sync weights to workers before collection
+            parallel_env.sync_weights(agent.policy.state_dict(), agent._eps)
+
+            # Collect episodes in parallel
+            collected_episodes = parallel_env.collect_episodes(
+                num_episodes=batch_size,
+                opponent_type=opponent_type,
+                episode_start=i_episode,
+                seed=args.seed
+            )
+
+            # Process each collected episode
+            tie_penalty = args.tie_penalty if not args.no_tie_penalty else 0.0
+            batch_rewards = []
+            batch_winners = []
+
+            for ep_num, episode_data in collected_episodes:
+                # Mark this episode as processed
+                parallel_episodes_processed.add(ep_num)
+
+                # Add transitions to buffer and update tracker
+                ep_reward, _, winner = process_parallel_episode(
+                    episode_data=episode_data,
+                    agent=agent,
+                    tracker=tracker,
+                    args=args,
+                    opponent_type=opponent_type,
+                    tie_penalty=tie_penalty,
+                )
+                batch_rewards.append(ep_reward)
+                batch_winners.append(winner)
+
+                # Update global step count
+                global_step += episode_data.episode_length
+
+                # Decay epsilon for each episode
+                agent.decay_epsilon()
+
+            # Do batch training after collecting episodes
+            warmup_complete = i_episode >= args.warmup_episodes
+            per_stats = None
+            if len(agent.buffer) >= args.batch_size and warmup_complete:
+                # Train more iterations for larger batches
+                train_iterations = max(32, batch_size * 8)
+                losses, grad_norms, per_stats = agent.train(iter_fit=train_iterations)
+                if losses:
+                    tracker.add_losses(losses)
+                    tracker.add_grad_norms(grad_norms)
+
+            # Update progress bar with batch stats
+            batch_avg_reward = np.mean(batch_rewards) if batch_rewards else 0
+            batch_wins = sum(1 for w in batch_winners if w == 1)
+            win_rate = tracker.get_win_rate()
+            pbar.set_postfix({
+                'batch_reward': f'{batch_avg_reward:.1f}',
+                'batch_wins': f'{batch_wins}/{len(batch_winners)}',
+                'win_rate': f'{win_rate:.2%}',
+                'mode': 'PARALLEL'
+            })
+
+            # Handle logging for parallel batch
+            # Log at the last episode of the batch if it falls on a log interval
+            last_episode_in_batch = max(parallel_episodes_processed) if parallel_episodes_processed else i_episode
+            if last_episode_in_batch % args.log_interval == 0 and not args.no_wandb:
+                current_time = time.time()
+                time_since_start = current_time - start_time
+                eps_per_sec = last_episode_in_batch / time_since_start if time_since_start > 0 else 0
+
+                log_metrics = tracker.get_log_metrics()
+                behavior_metrics = tracker.get_behavior_metrics()
+                log_metrics.update(behavior_metrics)
+
+                log_metrics["performance/cumulative_win_rate"] = win_rate
+                log_metrics["performance/wins"] = tracker.wins
+                log_metrics["performance/losses"] = tracker.losses
+                log_metrics["performance/ties"] = tracker.ties
+                log_metrics["training/epsilon"] = agent.get_epsilon()
+                log_metrics["training/eps_per_sec"] = eps_per_sec
+                log_metrics["training/episode"] = last_episode_in_batch
+                log_metrics["training/parallel_mode"] = 1.0
+                log_metrics["training/batch_size"] = len(collected_episodes)
+
+                # PER metrics if available
+                if args.use_per and per_stats is not None:
+                    log_metrics["per/beta"] = per_stats['per_beta']
+                    log_metrics["per/max_priority"] = per_stats['per_max_priority']
+                    log_metrics["per/n_entries"] = per_stats['per_n_entries']
+
+                wandb.log(log_metrics, step=last_episode_in_batch)
+
+            # Handle evaluation if needed
+            if last_episode_in_batch % args.eval_interval == 0:
+                print(f"\n[PARALLEL EVAL] Episode {last_episode_in_batch}")
+
+                # Evaluate vs weak opponent
+                eval_weak = evaluate_vs_opponent(
+                    agent, weak_eval_bot, mode=mode,
+                    num_episodes=args.eval_episodes, max_timesteps=max_timesteps,
+                    eval_seed=args.seed, keep_mode=args.keep_mode
+                )
+                tracker.set_last_eval('weak', eval_weak['win_rate'])
+
+                # Evaluate vs strong opponent
+                eval_strong = evaluate_vs_opponent(
+                    agent, strong_eval_bot, mode=mode,
+                    num_episodes=args.eval_episodes, max_timesteps=max_timesteps,
+                    eval_seed=args.seed, keep_mode=args.keep_mode
+                )
+                tracker.set_last_eval('strong', eval_strong['win_rate'])
+
+                print(f"  vs Weak:   {eval_weak['win_rate']:.1%} ({eval_weak['wins']}W/{eval_weak['ties']}T/{eval_weak['losses']}L)")
+                print(f"  vs Strong: {eval_strong['win_rate']:.1%} ({eval_strong['wins']}W/{eval_strong['ties']}T/{eval_strong['losses']}L)")
+
+                if not args.no_wandb:
+                    wandb.log({
+                        "eval/win_rate_vs_weak": eval_weak['win_rate'],
+                        "eval/win_rate_vs_strong": eval_strong['win_rate'],
+                    }, step=last_episode_in_batch)
+
+            # Handle checkpointing
+            if last_episode_in_batch % args.save_interval == 0:
+                checkpoint_path = checkpoints_dir / f'TD3_Hockey_{args.mode}_{args.opponent}_{last_episode_in_batch}_seed{args.seed}.pth'
+                torch.save({
+                    'agent_state': agent.state(),
+                    'episode': last_episode_in_batch,
+                    'win_rate': win_rate,
+                }, checkpoint_path)
+                print(f"[CHECKPOINT] Saved: {checkpoint_path}")
+
+            # Skip to end of batch (continue will go to next iteration)
+            # The episodes in the batch are marked as processed, so they'll be skipped
+            continue
+
+        # Skip episodes that were processed in parallel batch
+        if i_episode in parallel_episodes_processed:
+            continue
+
+        #########################################################
+        # SERIAL DATA COLLECTION (original code)
         # Use random seeds for state diversity
         #########################################################
         if args.seed is not None:
@@ -477,7 +723,6 @@ def train(args):
         #########################################################
         # Reset shapers and trackers for new episode
         #########################################################
-        strategic_shaper.reset()
         pbrs_shaper.reset()
         tracker.reset_episode()
 
@@ -614,30 +859,9 @@ def train(args):
                 pbrs_bonus = 0.0
 
             #########################################################
-            # Strategic bonuses (can be disabled to test reward hacking hypothesis)
+            # Compute distance to puck (needed for metrics)
             #########################################################
-            dist_to_puck = np.sqrt((obs_next[0] - obs_next[12])**2 + (obs_next[1] - obs_next[13])**2)  # distance to puck (needed for metrics)
-
-            # ALWAYS track puck touches (decoupled from strategic_rewards flag)
-            # This ensures behavior metrics are accurate regardless of reward configuration
-            env_touch_reward = info.get('reward_touch_puck', 0.0)
-            if env_touch_reward > 0:
-                strategic_shaper.puck_touches += 1
-            elif dist_to_puck < 0.3 and env_touch_reward == 0:
-                # Backup: if env didn't detect, use distance threshold
-                strategic_shaper.puck_touches += 1
-
-            if args.reward_shaping and args.use_strategic_rewards:
-                strategic_bonuses = strategic_shaper.compute(obs_next, info, dist_to_puck)
-
-                # Record opponent position for forcing metric
-                strategic_shaper.record_opponent_position([obs_next[6], obs_next[7]])  # track where opponent is
-
-                # Apply strategic bonuses with optional scaling
-                for bonus_name, bonus_value in strategic_bonuses.items():
-                    r1_shaped += bonus_value * args.strategic_reward_scale  # scaled strategic bonuses
-            else:
-                strategic_bonuses = {}
+            dist_to_puck = np.sqrt((obs_next[0] - obs_next[12])**2 + (obs_next[1] - obs_next[13])**2)
 
             #########################################################
             # Store transition
@@ -726,14 +950,6 @@ def train(args):
         #         scheduler.step()
 
         #########################################################
-        # Strategic episode-end bonuses (diversity, forcing)
-        #########################################################
-        if args.reward_shaping and args.use_strategic_rewards:
-            end_bonuses = strategic_shaper.compute_episode_end_bonuses()  # diversity and forcing bonuses
-            for bonus_name, bonus_value in end_bonuses.items():
-                episode_reward_p1 += bonus_value * args.strategic_reward_scale
-
-        #########################################################
         # Tie penalty (encourages decisive wins over stalemates)
         # Research: ties should be worse than continuing but better than loss
         #########################################################
@@ -753,7 +969,6 @@ def train(args):
             reward_p2=episode_reward_p2,  # Opponent reward (negative of sparse)
             sparse_reward=episode_sparse_reward  # Unshapen sparse reward only
         )
-        tracker.add_strategic_stats(strategic_shaper.get_episode_stats())
         tracker.add_pbrs_total(pbrs_bonus)
         tracker.finalize_episode_behavior_metrics()  # Compute and store behavior metrics for this episode
 
@@ -853,19 +1068,6 @@ def train(args):
                 log_metrics["per/td_error_std"] = per_stats['per_td_error_std']
                 log_metrics["per/td_error_min"] = per_stats['per_td_error_min']
                 log_metrics["per/td_error_max"] = per_stats['per_td_error_max']
-
-            #########################################################
-            # Strategic reward shaping metrics
-            #########################################################
-            if args.reward_shaping and tracker.strategic_stats:
-                log_metrics["strategic/shots_clear"] = tracker.strategic_stats.get('shots_clear', 0)
-                log_metrics["strategic/shots_blocked"] = tracker.strategic_stats.get('shots_blocked', 0)
-                log_metrics["strategic/shot_quality_ratio"] = tracker.strategic_stats.get('shot_quality_ratio', 0.0)
-                log_metrics["strategic/attack_sides_unique"] = tracker.strategic_stats.get('attack_sides_unique', 0)
-                log_metrics["strategic/attack_diversity_bonus"] = tracker.strategic_stats.get('attack_diversity_bonus', 0.0)
-                log_metrics["strategic/opponent_total_movement"] = tracker.strategic_stats.get('total_opponent_movement', 0.0)
-                log_metrics["strategic/opponent_avg_movement"] = tracker.strategic_stats.get('avg_opponent_movement', 0.0)
-                log_metrics["strategic/forcing_bonus"] = tracker.strategic_stats.get('forcing_bonus', 0.0)
 
             #########################################################
             # Self-Play Metrics
@@ -1199,6 +1401,10 @@ def train(args):
         wandb.finish()
 
     env.close()
+
+    # Cleanup parallel environment if used
+    if parallel_env is not None:
+        parallel_env.close()
 
     return agent, tracker.rewards_p1
 

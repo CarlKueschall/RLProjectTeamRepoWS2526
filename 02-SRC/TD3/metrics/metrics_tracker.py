@@ -44,8 +44,6 @@ class MetricsTracker:
 
         # PBRS tracking
         self.pbrs_totals = []
-        # Strategic stats
-        self.strategic_stats = {}
         # Per-episode tracking (reset each episode)
         self._episode_step_rewards = []
         self._episode_action_magnitudes = []
@@ -67,6 +65,7 @@ class MetricsTracker:
 
         # Shoot/Keep action tracking (action[3])
         self._episode_shoot_actions = []  # Track action[3] values each step
+        self._episode_shoot_actions_when_possess = []  # Track action[3] when having possession
         self._episode_possession_steps = 0  # Count steps with possession
         self.behavior_shoot_action_avg = []  # Average action[3] value per episode
         self.behavior_shoot_action_when_possess = []  # Average action[3] when having possession
@@ -96,7 +95,6 @@ class MetricsTracker:
         self.goals_scored = 0
         self.goals_conceded = 0
         self.pbrs_totals = []
-        self.strategic_stats = {}
         self.behavior_action_magnitude_avg = []
         self.behavior_action_magnitude_max = []
         self.behavior_lazy_action_ratio = []
@@ -152,7 +150,7 @@ class MetricsTracker:
     def add_episode_result(self, reward_p1, length, winner, reward_p2=None, sparse_reward=None):
         #########################################################
         # Record metrics for a single episode
-        # reward_p1: Shaped reward for player 1 (with PBRS + strategic bonuses)
+        # reward_p1: Shaped reward for player 1 (with PBRS)
         # reward_p2: Reward for player 2/opponent (negative of P1 sparse reward)
         # sparse_reward: Unshapen sparse reward (±1 for wins/losses)
         # winner: 1=win, -1=loss, 0=tie
@@ -201,10 +199,6 @@ class MetricsTracker:
     #     #########################################################
     #     decisive_games = self.wins + self.losses
     #     return self.wins / decisive_games if decisive_games > 0 else 0
-
-    def add_strategic_stats(self, stats):
-        # Add strategic reward shaping stats
-        self.strategic_stats.update(stats)
 
     def add_pbrs_total(self, pbrs_total):
         # Add total PBRS reward for an episode
@@ -281,9 +275,10 @@ class MetricsTracker:
             self.behavior_velocity_avg.append(0.0)
             self.behavior_velocity_max.append(0.0)
 
-        # Puck touches from strategic stats
-        if 'puck_touches' in self.strategic_stats:
-            self.behavior_puck_touches.append(float(self.strategic_stats['puck_touches']))
+        # Puck touches: count steps very close to puck (< 0.3 distance)
+        if self._episode_puck_distances:
+            puck_touches = sum(1 for d in self._episode_puck_distances if d < 0.3)
+            self.behavior_puck_touches.append(float(puck_touches))
         else:
             self.behavior_puck_touches.append(0.0)
 

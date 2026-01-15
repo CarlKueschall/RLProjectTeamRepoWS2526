@@ -71,14 +71,6 @@ def parse_args():
     parser.add_argument('--pbrs_scale', type=float, default=1.0,
                         help='PBRS magnitude scaling factor (default: 1.0). Use 0.5 to reduce PBRS influence, allowing sparse rewards to dominate')
 
-    # Strategic rewards (non-invariant bonuses: shots, diversity, forcing, etc.)
-    parser.add_argument('--use_strategic_rewards', action='store_true', default=True,
-                        help='Enable strategic reward bonuses: shot quality, diversity, forcing (default: True)')
-    parser.add_argument('--no_strategic_rewards', dest='use_strategic_rewards', action='store_false',
-                        help='Disable strategic reward bonuses (keep only PBRS if enabled)')
-    parser.add_argument('--strategic_reward_scale', type=float, default=1.0,
-                        help='Scaling factor for all strategic rewards (default: 1.0). Use 0.1 to reduce reward hacking')
-
     # Tie penalty (encourages decisive play over stalemates)
     parser.add_argument('--tie_penalty', type=float, default=-3.0,
                         help='Terminal penalty for tied games (default: -3.0, encourages decisive wins over stalemates)')
@@ -209,6 +201,14 @@ def parse_args():
                         help='PER initial beta for importance sampling correction (default: 0.4, anneals to 1.0)')
     parser.add_argument('--per_beta_frames', type=int, default=100000,
                         help='PER frames to anneal beta from start to 1.0 (default: 100000)')
+
+    # Parallel Environment Data Collection
+    parser.add_argument('--parallel_envs', type=int, default=1,
+                        help='Number of parallel environments for data collection (default: 1, no parallelism). '
+                             'Set to 4-8 for 2-4x speedup on multi-core systems.')
+    parser.add_argument('--parallel_batch_size', type=int, default=0,
+                        help='Episodes to collect per parallel batch (default: 0 = same as parallel_envs). '
+                             'Set higher to collect more episodes before training.')
 
     return parser.parse_args()
 

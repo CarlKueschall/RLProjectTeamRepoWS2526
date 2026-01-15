@@ -112,16 +112,6 @@ def get_critical_metrics():
         'pbrs/avg_per_episode',
         'pbrs/annealing_weight',
 
-        # Strategic Reward Shaping (opponent-aware shooting, attack diversity, forcing)
-        'strategic/shots_clear',
-        'strategic/shots_blocked',
-        'strategic/shot_quality_ratio',
-        'strategic/attack_sides_unique',
-        'strategic/attack_diversity_bonus',
-        'strategic/opponent_total_movement',
-        'strategic/opponent_avg_movement',
-        'strategic/forcing_bonus',
-
         # Self-play configuration and status
         'selfplay/active',
         'selfplay/pool_size',
