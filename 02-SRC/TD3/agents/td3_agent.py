@@ -48,7 +48,8 @@ class QFunction(Model):
                                           betas=(0.9, 0.9),
                                           weight_decay=1e-4)
         # SmoothLoss was recommended in the TD3 paper.
-        self.loss = torch.nn.SmoothL1Loss()
+        # CRITICAL: Use reduction='none' for PER - need per-sample losses for IS weighting
+        self.loss = torch.nn.SmoothL1Loss(reduction='none')
 
     def fit(self, observations, actions, targets, weights=None, regularization=0.0):
         #########################################################

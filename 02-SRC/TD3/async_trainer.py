@@ -212,7 +212,7 @@ class AsyncTrainer:
         Returns:
             TrainingMetrics with loss and gradient information
         """
-        print(f"[AsyncTrainer] _train_step called with batch size {len(batch) if hasattr(batch, '__len__') else '?'}")
+        # Debug logging removed - was causing 3x slowdown (called on every step)
 
         try:
             # Check if PER batch (has indices and weights)
@@ -368,7 +368,6 @@ class AsyncTrainer:
             actor_grad_norm=actor_grad_norm,
             per_stats=per_stats,
         )
-        print(f"[AsyncTrainer] _train_step completed successfully")
         return metrics
 
     def _broadcast_weights(self):

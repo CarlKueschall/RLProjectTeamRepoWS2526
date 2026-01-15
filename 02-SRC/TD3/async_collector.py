@@ -74,11 +74,17 @@ def collector_worker(
     strong_opponent = BasicOpponent(weak=False)
 
     # Create lightweight actor network (CPU-only, for action selection)
+    # CRITICAL: Must match TD3Agent architecture exactly!
+    # - activation_fun=ReLU for hidden layers (matches td3_agent.py)
+    # - output_activation=Tanh for output (action bounds are [-1, 1])
     from agents.model import Model
+    from agents.noise import OUNoise
+
     actor = Model(
         input_size=env_config['obs_dim'],
         output_size=env_config['action_dim'],
         hidden_sizes=env_config['hidden_actor'],
+        activation_fun=torch.nn.ReLU(),  # MUST match TD3Agent!
         output_activation=torch.nn.Tanh()
     )
 
@@ -90,6 +96,11 @@ def collector_worker(
 
     # Current exploration epsilon
     current_eps = initial_eps
+
+    # Create OUNoise for exploration (MUST match TD3Agent exploration strategy!)
+    # TD3 uses OUNoise, not epsilon-greedy. Using epsilon-greedy causes
+    # distribution mismatch between collected experience and policy behavior.
+    action_noise = OUNoise(shape=(env_config['action_dim'],))
 
     # Observation normalization (will be updated with weights)
     obs_mean = np.zeros(env_config['obs_dim'], dtype=np.float32)
@@ -110,26 +121,41 @@ def collector_worker(
         return ((obs - obs_mean) / (obs_std + 1e-8)).astype(np.float32)
 
     def select_action(obs, eps):
-        """Select action with epsilon-greedy exploration."""
-        if np.random.random() < eps:
-            # Random action
-            return np.random.uniform(-1, 1, env_config['action_dim'])
-        else:
-            # Policy action
-            with torch.no_grad():
-                obs_normalized = normalize_obs(obs)
-                obs_tensor = torch.FloatTensor(obs_normalized).unsqueeze(0)
-                action = actor(obs_tensor).squeeze(0).numpy()
-            return action
+        """Select action with OUNoise exploration (matches TD3Agent.act())."""
+        # CRITICAL: Use OUNoise like TD3Agent, NOT epsilon-greedy!
+        # TD3 always takes policy action + scaled noise
+        with torch.no_grad():
+            obs_normalized = normalize_obs(obs)
+            obs_tensor = torch.FloatTensor(obs_normalized).unsqueeze(0)
+            action = actor(obs_tensor).squeeze(0).numpy()
+
+        # Add OUNoise scaled by epsilon (same as TD3Agent.act())
+        if eps > 0:
+            noise = action_noise()
+            action = action + noise * eps
+
+        # Clip to action bounds
+        action = np.clip(action, -1.0, 1.0)
+        return action
 
     # Episode counter for this worker
     episode_counter = 0
     global_episode_offset = worker_id * 1000000  # Unique episode IDs per worker
+    transitions_sent = 0  # Debug counter
+    transitions_dropped = 0  # Track dropped transitions
+    last_queue_warning = time.time()
 
     max_timesteps = env_config.get('max_timesteps', 250)
     reward_scale = env_config.get('reward_scale', 1.0)
 
-    print(f"[Worker {worker_id}] Started, ready for episodes")
+    # Log to both stdout and file (daemon processes may not capture stdout)
+    log_msg = f"[Worker {worker_id}] Started, ready for episodes"
+    print(log_msg)
+    try:
+        with open(f"worker_{worker_id}.log", "a") as f:
+            f.write(log_msg + "\n")
+    except:
+        pass
 
     # Main worker loop - runs continuously
     running = True
@@ -188,6 +214,9 @@ def collector_worker(
         # Reset PBRS shaper
         if pbrs_shaper:
             pbrs_shaper.reset()
+
+        # Reset OUNoise for new episode (important for temporally correlated noise)
+        action_noise.reset()
 
         # Episode tracking
         episode_reward = 0.0
@@ -251,11 +280,21 @@ def collector_worker(
             )
             try:
                 transition_queue.put_nowait(transition)
+                transitions_sent += 1
+                # Debug print every 1000 transitions per worker
+                # Note: Don't call qsize() - it's not implemented on macOS
+                if transitions_sent % 1000 == 0:
+                    print(f"[Worker {worker_id}] Sent {transitions_sent} transitions")
             except queue.Full:
                 # Buffer queue full, drop oldest
+                transitions_dropped += 1
                 try:
-                    transition_queue.get_nowait()
+                    old = transition_queue.get_nowait()
                     transition_queue.put_nowait(transition)
+                    transitions_sent += 1
+                    # Warn every 100 drops
+                    if transitions_dropped % 100 == 0:
+                        print(f"[Worker {worker_id}] WARNING: Dropped {transitions_dropped} transitions (queue overflow)")
                 except:
                     pass
 

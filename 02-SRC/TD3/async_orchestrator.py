@@ -30,7 +30,9 @@ class AsyncMetricsTracker:
     def __init__(self, rolling_window: int = 100, log_interval: int = 50):
         self.rolling_window = rolling_window
         self.log_interval = log_interval
-        self._lock = threading.Lock()
+        # Use RLock (reentrant lock) because get_metrics_dict() calls get_win_rate()
+        # and get_rolling_win_rate() which also acquire the lock
+        self._lock = threading.RLock()
 
         # Episode metrics
         self.episode_rewards = deque(maxlen=rolling_window)
@@ -227,14 +229,31 @@ class AsyncTrainingOrchestrator:
         print(f"[Orchestrator] Using device: {self.device}")
 
         # Create async buffer
+        # IMPORTANT: Scale per_beta_frames based on batch_size
+        # per_beta_frames is specified in "samples to process", convert to training steps
+        # This ensures beta anneals properly regardless of batch_size
+        # Example: per_beta_frames=100000 with batch_size=256 -> 100000/256 ≈ 390 training steps
+        # But that's too few! So we interpret per_beta_frames as "training steps", not samples.
+        # With async training doing ~0.5-1 train step per episode, we need many episodes.
+        # Keep per_beta_frames as training steps, but warn if it seems misconfigured.
+        scaled_beta_frames = args.per_beta_frames if args.use_per else 100000
+        expected_episodes = args.max_episodes
+        expected_train_steps = expected_episodes  # Rough estimate: ~1 train step per episode with good throughput
+        if args.use_per and scaled_beta_frames > expected_train_steps * 2:
+            print(f"[Orchestrator] WARNING: per_beta_frames={scaled_beta_frames} may be too high!")
+            print(f"  With max_episodes={expected_episodes}, expect ~{expected_train_steps} train steps")
+            print(f"  Beta may not reach 1.0. Consider reducing per_beta_frames or increasing max_episodes.")
+
         self.buffer = create_async_buffer(
             use_per=args.use_per,
             max_size=args.buffer_size,
             alpha=args.per_alpha if args.use_per else 0.6,
             beta_start=args.per_beta_start if args.use_per else 0.4,
-            beta_frames=args.per_beta_frames if args.use_per else 100000,
+            beta_frames=scaled_beta_frames,
         )
         print(f"[Orchestrator] Created {'PER' if args.use_per else 'uniform'} buffer (size: {args.buffer_size})")
+        if args.use_per:
+            print(f"  PER: alpha={args.per_alpha}, beta_start={args.per_beta_start}, beta_frames={scaled_beta_frames}")
 
         # Create agent
         from gymnasium import spaces
@@ -274,12 +293,18 @@ class AsyncTrainingOrchestrator:
         print(f"[Orchestrator] Created TD3 agent")
 
         # Create transition queue for collectors -> buffer
-        # Note: macOS has small semaphore limits, so we use a smaller queue
-        # and rely on the buffer's internal queue for overflow
+        # Note: macOS has small semaphore limits, but we try to use reasonable size
+        # If queue fills up, we'll see drops in the debug output
         self._ctx = mp.get_context('spawn')
         import sys
-        queue_size = 1000 if sys.platform == 'darwin' else 50000
+        if sys.platform == 'darwin':
+            # macOS: Use moderately sized queue (semaphore limited)
+            queue_size = 5000  # Increased from 1000 to handle burst collection
+        else:
+            queue_size = 50000
+        print(f"[Orchestrator] Transition queue size: {queue_size} (platform: {sys.platform})")
         self.transition_queue = self._ctx.Queue(maxsize=queue_size)
+        self._transition_queue_drops = 0  # Track how many transitions are dropped
 
         # Create collector
         # IMPORTANT: Convert weights to CPU for pickling (MPS tensors can't be pickled)
@@ -327,33 +352,74 @@ class AsyncTrainingOrchestrator:
         self.best_checkpoint_path = None
 
     def _start_buffer_filler(self):
-        """Start thread that moves transitions from queue to buffer."""
+        """Start thread that moves transitions from queue to buffer's internal queue."""
         def filler_loop():
+            print("[BufferFiller] Thread started")
             batch = []
             batch_size = 100
+            total_filled = 0
+            filled_in_interval = 0
+            last_print = time.time()
+            add_errors = 0
+            loop_count = 0
 
             while self._running:
+                loop_count += 1
+                # Print every 500 loops (~5ms * 500 = 2.5s)
+                if loop_count % 500 == 0:
+                    print(f"[BufferFiller] Loop #{loop_count}: batch_len={len(batch)}, total={total_filled}, buf={self.buffer.size}")
                 try:
                     # Batch transitions for efficiency
                     while len(batch) < batch_size:
                         try:
                             transition = self.transition_queue.get(timeout=0.01)
                             batch.append(transition)
-                        except:
+                        except queue.Empty:
+                            break
+                        except Exception as e:
+                            print(f"[BufferFiller] Error getting from queue: {e}")
                             break
 
                     if batch:
+                        # Add transitions using buffer's non-blocking queue
+                        batch_count = 0
                         for t in batch:
-                            self.buffer.add_transition_direct(t)
+                            try:
+                                self.buffer.add_transition(t)
+                                batch_count += 1
+                            except Exception as add_err:
+                                add_errors += 1
+                                if add_errors <= 3:
+                                    print(f"[BufferFiller] Error: {add_err}")
+
+                        total_filled += batch_count
+                        filled_in_interval += batch_count
                         batch.clear()
+
+                        # Debug print every 2 seconds (not 1)
+                        now = time.time()
+                        if now - last_print > 2.0:
+                            try:
+                                stats = self.buffer.get_stats() if hasattr(self.buffer, 'get_stats') else {}
+                            except:
+                                stats = {}
+                            print(f"[BufferFiller] +{filled_in_interval:.0f} trans/2s | Total: {total_filled} | Buffer.size: {self.buffer.size} | Stats: {stats}")
+                            filled_in_interval = 0
+                            last_print = now
                     else:
-                        time.sleep(0.001)
+                        # No transitions in queue, sleep briefly
+                        time.sleep(0.01)
 
                 except Exception as e:
-                    print(f"[BufferFiller] Error: {e}")
+                    print(f"[BufferFiller] CRITICAL ERROR: {e}")
+                    import traceback
+                    traceback.print_exc()
                     batch.clear()
                     time.sleep(0.1)
 
+            print("[BufferFiller] Thread exiting")
+
+        print("[BufferFiller] Starting buffer filler thread")
         self._buffer_filler_thread = threading.Thread(target=filler_loop, daemon=True)
         self._buffer_filler_thread.start()
 
@@ -368,11 +434,11 @@ class AsyncTrainingOrchestrator:
         # Start buffer (background drain thread)
         self.buffer.start()
 
-        # Start buffer filler (transition queue -> buffer)
-        self._start_buffer_filler()
-
-        # Start collectors
+        # Start collectors (will send to transition_queue)
         self.collector.start()
+
+        # Start buffer filler (transition_queue -> buffer's _add_queue -> buffer.start() drain thread)
+        self._start_buffer_filler()
 
         # Start trainer
         self.trainer.start()
@@ -410,9 +476,11 @@ class AsyncTrainingOrchestrator:
                 )
 
             last_log_time = time.time()
-            last_eval_time = time.time()
-            last_save_time = time.time()
-            last_eps_decay_time = time.time()
+
+            # Track episode-based intervals
+            last_eval_episode = 0
+            last_save_episode = 0
+            last_eps_decay_episode = 0
 
             # Progress bar
             pbar = tqdm(total=self.args.max_episodes, desc="Async Training", unit="ep")
@@ -429,36 +497,43 @@ class AsyncTrainingOrchestrator:
                 for tm in training_metrics:
                     self.metrics.add_training_metrics(tm)
 
+                current_episode = self.metrics.total_episodes
+
                 # Update progress bar
                 pbar.set_postfix({
                     'reward': f'{np.mean(list(self.metrics.episode_rewards)[-10:]):.1f}' if self.metrics.episode_rewards else '0.0',
                     'win_rate': f'{self.metrics.get_rolling_win_rate():.2%}',
                     'buffer': f'{self.buffer.size}',
                     'train': f'{self.trainer.train_step}',
+                    'eps': f'{self.agent._eps:.3f}',
                 })
 
-                # Periodic logging
+                # Periodic logging (time-based, every 10 seconds)
                 current_time = time.time()
-                if current_time - last_log_time >= 10:  # Every 10 seconds
+                if current_time - last_log_time >= 10:
                     self._log_metrics()
                     last_log_time = current_time
 
-                # Periodic epsilon decay
-                if current_time - last_eps_decay_time >= 1.0:  # Every second
-                    self.trainer.decay_epsilon()
-                    last_eps_decay_time = current_time
+                # Periodic epsilon decay (episode-based, decay once per episode)
+                # This matches sequential training behavior: eps *= eps_decay after each episode
+                episodes_since_decay = current_episode - last_eps_decay_episode
+                if episodes_since_decay > 0:
+                    # Decay for each episode that passed
+                    for _ in range(episodes_since_decay):
+                        self.trainer.decay_epsilon()
+                    last_eps_decay_episode = current_episode
+                    # Also sync epsilon to collectors
+                    self.collector.update_epsilon(self.agent._eps)
 
-                # Periodic evaluation
-                eval_interval_seconds = self.args.eval_interval * 2  # Rough estimate
-                if current_time - last_eval_time >= eval_interval_seconds:
+                # Periodic evaluation (episode-based)
+                if current_episode - last_eval_episode >= self.args.eval_interval:
                     self._run_evaluation()
-                    last_eval_time = current_time
+                    last_eval_episode = current_episode
 
-                # Periodic checkpoint
-                save_interval_seconds = self.args.save_interval * 2  # Rough estimate
-                if current_time - last_save_time >= save_interval_seconds:
+                # Periodic checkpoint (episode-based)
+                if current_episode - last_save_episode >= self.args.save_interval:
                     self._save_checkpoint()
-                    last_save_time = current_time
+                    last_save_episode = current_episode
 
                 time.sleep(0.01)  # Prevent busy-waiting
 
