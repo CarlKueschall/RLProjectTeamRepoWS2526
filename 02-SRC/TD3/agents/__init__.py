@@ -9,5 +9,17 @@ from .td3_agent import TD3Agent
 from .ddpg_agent import DDPGAgent
 from .model import Model
 from .memory import Memory, PrioritizedMemory
+from .async_memory import AsyncMemory, AsyncPrioritizedMemory, create_async_buffer
 
-__all__ = ['get_device', 'OUNoise', 'TD3Agent', 'DDPGAgent', 'Model', 'Memory', 'PrioritizedMemory']
+__all__ = [
+    'get_device',
+    'OUNoise',
+    'TD3Agent',
+    'DDPGAgent',
+    'Model',
+    'Memory',
+    'PrioritizedMemory',
+    'AsyncMemory',
+    'AsyncPrioritizedMemory',
+    'create_async_buffer',
+]
