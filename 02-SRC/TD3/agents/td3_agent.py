@@ -10,19 +10,18 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from . import memory as mem
-from .memory import PrioritizedMemory
 from .model import Model
 from .device import get_device # put device in separate file for clarity
-from .noise import OUNoise # put this as well into separate file for clarity
+from .noise import GaussianNoise  # TD3 uses Gaussian noise, not OU noise (DDPG)
 
 
 class QFunction(Model):
     #########################################################
-    #here we can use Model, to specify the critic network.
-    #NOTE: Added clipping to grad and also q-VALUES, noticed in metrics that the q-values were exploding.
+    # Critic network for TD3 (Q-function)
+    # Added clipping to gradients and Q-values to prevent explosion
+    #########################################################
     def __init__(self, observation_dim, action_dim, hidden_sizes=[100, 100],
-                 learning_rate=0.0002, device=None, grad_clip=1.0, q_clip=None, q_clip_mode='hard',
-                 init_bias_positive=False):
+                 learning_rate=0.0002, device=None, grad_clip=1.0, q_clip=None, q_clip_mode='hard'):
         super().__init__(input_size=observation_dim + action_dim,
                          hidden_sizes=hidden_sizes,
                          output_size=1)
@@ -33,24 +32,13 @@ class QFunction(Model):
         self._q_clip = q_clip
         self._q_clip_mode = q_clip_mode
 
-        #########################################################
-        # NOTE: Positive bias initialization was DISABLED
-        # It set output bias to +5.0, causing Q-values to start artificially high
-        # This broke learning: network thought everything was good before training
-        # With gamma=0.99 and sparse rewards, agent became passive (learned nothing)
-        # Fix: Use normal initialization (bias defaults to 0)
-        #########################################################
-        # Bias initialization removed - use default PyTorch initialization
-
+        # TD3 paper: "Critic Regularization: None" - no weight decay
         self.optimizer = torch.optim.Adam(self.parameters(),
-                                          lr=learning_rate,
-                                          eps=0.000001,
-                                          betas=(0.9, 0.9),
-                                          weight_decay=1e-4)
-        # SmoothLoss was recommended in the TD3 paper.
+                                          lr=learning_rate)
+        # SmoothL1Loss was recommended in the TD3 paper
         self.loss = torch.nn.SmoothL1Loss()
 
-    def fit(self, observations, actions, targets, weights=None, regularization=0.0):
+    def fit(self, observations, actions, targets, regularization=0.0):
         #########################################################
         #
         self.train()
@@ -58,12 +46,6 @@ class QFunction(Model):
 
         pred = self.Q_value(observations, actions)
         loss = self.loss(pred, targets)
-
-        if weights is not None:
-            weights_tensor = torch.from_numpy(weights).to(self.device).unsqueeze(1) #this fixed it now, forgot to unsequeeze
-            loss = (weights_tensor * loss).mean()
-        else:
-            loss = loss.mean()
 
         if isinstance(regularization, torch.Tensor) and regularization.requires_grad:
             loss = loss + regularization
@@ -121,25 +103,24 @@ class TD3Agent:
 
         # Set up config dictionary
         self._config = {}
-        # strength of regulazation battling lazy learning issue
+        # VF regularization strength (anti-lazy learning)
+        # Penalizes Q(passive) > Q(active) to encourage movement toward puck
         self._config["vf_reg_lambda"] = userconfig.get("vf_reg_lambda", 0.1)
-        # threshold that determines the point at which the agent is considered active.
-        self._config["vf_reg_active_threshold"] = userconfig.get("vf_reg_active_threshold", 0.3)
-        # exploration noise strength
-        self._config["eps"] = 0.3
+        # exploration noise strength (TD3 paper: N(0, 0.1), so eps=0.1 with sigma=1.0)
+        self._config["eps"] = 0.1
         # minimum exploration noise strength
-        self._config["eps_min"] = 0.3
-        # exploration noise decay rate
-        self._config["eps_decay"] = 0.999
+        self._config["eps_min"] = 0.1
+        # exploration noise decay rate (TD3 paper: no decay, constant noise)
+        self._config["eps_decay"] = 1.0
         # discount factor
         self._config["discount"] = 0.99
         # buffer size
         self._config["buffer_size"] = int(1e6)
-        # batch size (might change for cluster)
-        self._config["batch_size"] = 256
-        #learning rates 
-        self._config["learning_rate_actor"] = 3e-4
-        self._config["learning_rate_critic"] = 3e-4
+        # batch size (TD3 paper: 100)
+        self._config["batch_size"] = 100
+        # learning rates (TD3 paper: 10^-3 for both actor and critic)
+        self._config["learning_rate_actor"] = 1e-3
+        self._config["learning_rate_critic"] = 1e-3
         self._config["hidden_sizes_actor"] = [256, 256]
         self._config["hidden_sizes_critic"] = [256, 256, 128]
         # soft update coefficient (make sure to keep this low)
@@ -165,55 +146,15 @@ class TD3Agent:
         self._eps_min = self._config.get('eps_min', 0.05)
         self._eps_decay = self._config.get('eps_decay', 0.995)
 
-        # Initialize OUNoise
-        noise_shape = (self._action_n, )
-        self.action_noise = OUNoise(noise_shape)
+        # Initialize Gaussian noise (TD3 paper uses N(0, 0.1), not OU noise)
+        # Using sigma=1.0 so that eps directly controls noise std (eps=0.1 -> N(0, 0.1))
+        noise_shape = (self._action_n,)
+        self.action_noise = GaussianNoise(noise_shape, sigma=1.0)
 
-        use_dual_buffers = False #dual replay buffers to prevent catastrophic forgetting during self-play
-        if "use_dual_buffers" in self._config:
-            use_dual_buffers = self._config["use_dual_buffers"]
+        # Replay buffer
+        self.buffer = mem.Memory(max_size=self._config["buffer_size"])
 
-        #########################################################
-        # Prioritized Experience Replay (PER) configuration
-        # PER oversamples high-TD-error transitions to focus learning on surprising experiences
-        #########################################################
-        self.use_per = self._config.get("use_per", False)
-        self.per_alpha = self._config.get("per_alpha", 0.6)
-        self.per_beta_start = self._config.get("per_beta_start", 0.4)
-        self.per_beta_frames = self._config.get("per_beta_frames", 100000)
-
-        #########################################################
-        # all for self play
-        if use_dual_buffers:
-            buffer_size_each = self._config["buffer_size"] // 2
-            if self.use_per:
-                self.buffer_anchor = PrioritizedMemory(
-                    max_size=buffer_size_each, alpha=self.per_alpha,
-                    beta_start=self.per_beta_start, beta_frames=self.per_beta_frames
-                )
-                self.buffer_pool = PrioritizedMemory(
-                    max_size=buffer_size_each, alpha=self.per_alpha,
-                    beta_start=self.per_beta_start, beta_frames=self.per_beta_frames
-                )
-                print(f"Dual PER buffers enabled: {buffer_size_each} each (anchor + pool)")
-                print(f"  PER config: alpha={self.per_alpha}, beta_start={self.per_beta_start}, beta_frames={self.per_beta_frames}")
-            else:
-                self.buffer_anchor = mem.Memory(max_size=buffer_size_each)
-                self.buffer_pool = mem.Memory(max_size=buffer_size_each)
-                print("Dual replay buffers enabled: {} each (anchor + pool)".format(buffer_size_each))
-            self.buffer = self.buffer_anchor
-        else:
-            if self.use_per:
-                self.buffer = PrioritizedMemory(
-                    max_size=self._config["buffer_size"], alpha=self.per_alpha,
-                    beta_start=self.per_beta_start, beta_frames=self.per_beta_frames
-                )
-                print(f"Prioritized Experience Replay (PER) enabled")
-                print(f"  Buffer size: {self._config['buffer_size']}")
-                print(f"  PER config: alpha={self.per_alpha}, beta_start={self.per_beta_start}, beta_frames={self.per_beta_frames}")
-            else:
-                self.buffer = mem.Memory(max_size=self._config["buffer_size"])
-        # getting the aciton space bounds
+        # Getting the action space bounds
         high = torch.from_numpy(self._action_space.high).to(self.device)
         low = torch.from_numpy(self._action_space.low).to(self.device)
         #########################################################
@@ -292,10 +233,9 @@ class TD3Agent:
             hidden_sizes=self._config["hidden_sizes_critic"],
             learning_rate=self._config["learning_rate_critic"],
             device=self.device,
-            grad_clip=self._config.get("grad_clip", 1.0),  # CRITICAL FIX: explicit critic gradient clipping
+            grad_clip=self._config.get("grad_clip", 1.0),
             q_clip=q_clip,
-            q_clip_mode=q_clip_mode,
-            init_bias_positive=self._config.get("init_critic_bias_positive", False)  # CRITICAL FIX: positive bias initialization
+            q_clip_mode=q_clip_mode
         )
 
         self.Q2 = QFunction(
@@ -304,10 +244,9 @@ class TD3Agent:
             hidden_sizes=self._config["hidden_sizes_critic"],
             learning_rate=self._config["learning_rate_critic"],
             device=self.device,
-            grad_clip=self._config.get("grad_clip", 1.0),  # CRITICAL FIX: explicit critic gradient clipping
+            grad_clip=self._config.get("grad_clip", 1.0),
             q_clip=q_clip,
-            q_clip_mode=q_clip_mode,
-            init_bias_positive=self._config.get("init_critic_bias_positive", False)  # CRITICAL FIX: positive bias initialization
+            q_clip_mode=q_clip_mode
         )
         # then replicate the targets equivalently
         self.Q1_target = QFunction(
@@ -336,13 +275,10 @@ class TD3Agent:
         #########################################################
 
         #########################################################
-        # building the optimizer
+        # building the optimizer (TD3 paper uses standard Adam, no weight decay)
         self.optimizer = torch.optim.Adam(
             self.policy.parameters(),
-            lr=self._config["learning_rate_actor"],
-            eps=0.000001,
-            betas=(0.9, 0.9), 
-            weight_decay=1e-4
+            lr=self._config["learning_rate_actor"]
         )
 
 
@@ -352,20 +288,6 @@ class TD3Agent:
 
         self.train_iter = 0
         self.total_steps = 0
-
-        #########################################################
-        # CRITICAL FIX: Observation Normalization
-        # Running normalization to handle 50x scale mismatch between positions and velocities
-        # This fixes critic learning failure caused by mixed-scale inputs
-        #########################################################
-        self.normalize_obs = self._config.get("normalize_obs", True)
-        if self.normalize_obs:
-            self.obs_mean = np.zeros(self._obs_dim, dtype=np.float32)
-            self.obs_std = np.ones(self._obs_dim, dtype=np.float32)
-            self.obs_count = 1e-4  # Small epsilon to avoid division by zero
-            print(f"  Observation normalization ENABLED (fixes 50x position/velocity scale mismatch)")
-        else:
-            print(f"  Observation normalization DISABLED")
 
     def _copy_nets(self):
         #########################################################
@@ -395,12 +317,8 @@ class TD3Agent:
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
     def act(self, observation, eps=None):
-        # CRITICAL FIX: Normalize observation before passing to policy
-        # This fixes the 50x scale mismatch between positions and velocities
-        obs_normalized = self._normalize_obs(observation)
-
-        # convert to tensor FIRST, THEN TO THE DEVICE.
-        obs_tensor = torch.from_numpy(obs_normalized.astype(np.float32)).to(self.device)
+        # Convert observation to tensor
+        obs_tensor = torch.from_numpy(observation.astype(np.float32)).to(self.device)
         #NOTE: NO GRADIENTS HERE!, we're just acting. in train method the policy network gets updated
         with torch.no_grad():
 
@@ -416,38 +334,18 @@ class TD3Agent:
     def store_transition(self, transition):
         self.buffer.add_transition(transition)
     def state(self):
-        #########################################################
-        # Save full agent state including normalization statistics
-        # CRITICAL: Must save obs_mean/obs_std for correct inference
-        #########################################################
+        # Save agent state (Q networks and policy)
         return (
             self.Q1.state_dict(),
             self.Q2.state_dict(),
-            self.policy.state_dict(),
-            self.obs_mean.copy() if self.normalize_obs else None,
-            self.obs_std.copy() if self.normalize_obs else None,
-            self.obs_count if self.normalize_obs else None
+            self.policy.state_dict()
         )
+
     def restore_state(self, state):
         self.Q1.load_state_dict(state[0])
         self.Q2.load_state_dict(state[1])
         self.policy.load_state_dict(state[2])
         self._copy_nets()
-        #########################################################
-        # Restore normalization statistics if available (new format)
-        # Old checkpoints (3-tuple) won't have these - handled gracefully
-        #########################################################
-        if len(state) > 3 and state[3] is not None:
-            self.obs_mean = state[3].copy() if hasattr(state[3], 'copy') else state[3]
-            self.obs_std = state[4].copy() if hasattr(state[4], 'copy') else state[4]
-            self.obs_count = state[5]
-            print(f"  Restored normalization stats: obs_count={self.obs_count:.0f}")
-        elif self.normalize_obs:
-            # Old checkpoint without normalization stats
-            # Keep defaults but warn user
-            print(f"  WARNING: Checkpoint missing normalization stats (old format)")
-            print(f"  Using default obs_mean=0, obs_std=1 - may cause performance issues")
-            print(f"  Consider re-training or disabling normalization for testing")
     def reset(self):
         self.action_noise.reset()
     def decay_epsilon(self):
@@ -457,67 +355,7 @@ class TD3Agent:
 
     # END HELPER FUNCTIONS
     #########################################################
-    # OBSERVATION NORMALIZATION METHODS
-    #########################################################
-    def _update_obs_stats(self, obs_batch):
-        """
-        Update running mean and std for observation normalization.
-        Uses Welford's online algorithm for numerical stability.
-
-        Args:
-            obs_batch: numpy array of shape (batch_size, obs_dim) or (obs_dim,)
-        """
-        if not self.normalize_obs:
-            return
-
-        # Handle both single observation and batch
-        if obs_batch.ndim == 1:
-            obs_batch = obs_batch[np.newaxis, :]
-
-        batch_size = obs_batch.shape[0]
-
-        # Welford's online algorithm for running mean/std
-        for obs in obs_batch:
-            self.obs_count += 1
-            delta = obs - self.obs_mean
-            self.obs_mean += delta / self.obs_count
-            delta2 = obs - self.obs_mean
-            self.obs_std = np.sqrt(np.maximum(
-                (self.obs_std ** 2 * (self.obs_count - 1) + delta * delta2) / self.obs_count,
-                1e-8  # Minimum std to avoid division by zero
-            ))
-
-    def _normalize_obs(self, obs):
-        """
-        Normalize observation using running mean and std.
-
-        Args:
-            obs: numpy array or torch tensor of shape (..., obs_dim)
-
-        Returns:
-            normalized observation (same type as input)
-        """
-        if not self.normalize_obs:
-            return obs
-
-        is_tensor = isinstance(obs, torch.Tensor)
-        device = obs.device if is_tensor else None
-
-        if is_tensor:
-            obs_np = obs.cpu().numpy()
-        else:
-            obs_np = obs
-
-        # Normalize: (obs - mean) / (std + eps)
-        obs_normalized = (obs_np - self.obs_mean) / (self.obs_std + 1e-8)
-
-        if is_tensor:
-            return torch.from_numpy(obs_normalized.astype(np.float32)).to(device)
-        else:
-            return obs_normalized.astype(np.float32)
-
-    #########################################################
-    #TRAINING LOOP
+    # TRAINING LOOP
     def train(self, iter_fit=32):
         #########################################################
         # training loop
@@ -532,85 +370,19 @@ class TD3Agent:
         #########################################################
         losses = []
         grad_norms = []  # Track gradient norms for logging
+        vf_reg_metrics_all = []  # Track VF regularization metrics
         self.train_iter += 1
-
-        # PER statistics collection
-        per_stats = None
-        all_is_weights = []
-        all_td_errors = []
 
         for _ in range(iter_fit):
             self.total_steps += 1
-            #########################################################
-            # sample a batch of data from the replay buffer
-            #########################################################
-            # use dual buffers to prevent catastrophic forgetting during self-play
-            #########################################################
-            #    ANCHOR BUFFER (1/3 of experiences)
-            #      - Weak bot experiences (1/3 of experiences)
-            #      - Strong bot experiences (1/3 of experiences)
-            #      - Purpose: "Remember how to beat baseline opponents"
-            #        (Never delete these - anti-forgetting mechanism)
-            #    POOL BUFFER (2/3 of experiences)
-            #      - Self-play pool experiences (rotating)
-            #      - FIFO: oldest experiences get removed
-            #      - THe Purpose: "Learn from current self-play opponents" (Recent, challenging experiences)
-            use_dual_buffers = self._config.get("use_dual_buffers", False)
-            if use_dual_buffers and hasattr(self, 'buffer_pool') and len(self.buffer_pool) > 0:
-                batch_size = self._config['batch_size']
-                anchor_batch_size = max(1, batch_size // 3)
-                pool_batch_size = batch_size - anchor_batch_size
 
-                # only sample if there are enough experiences in the buffer
-                if len(self.buffer_anchor) >= anchor_batch_size and len(self.buffer_pool) >= pool_batch_size:
-                    data_anchor = self.buffer_anchor.sample(batch=anchor_batch_size)
-                    data_pool = self.buffer_pool.sample(batch=pool_batch_size)
-                    data = np.vstack([data_anchor, data_pool])
-                elif len(self.buffer_anchor) >= batch_size:
-                    data = self.buffer_anchor.sample(batch=batch_size)
-                elif len(self.buffer_pool) >= batch_size:
-                    data = self.buffer_pool.sample(batch=batch_size)
-                else:
-                    # IF NOT ,then we need to sample from both buffers in a balanced way.
-                    total_size = len(self.buffer_anchor) + len(self.buffer_pool)
-                    if total_size > 0:
-                        n_anchor = min(len(self.buffer_anchor), batch_size // 2)
-                        n_pool = min(len(self.buffer_pool), batch_size - n_anchor)
-                        if n_anchor > 0 and n_pool > 0:
-                            data_anchor = self.buffer_anchor.sample(batch=n_anchor)
-                            data_pool = self.buffer_pool.sample(batch=n_pool)
-                            data = np.vstack([data_anchor, data_pool])
-                        elif n_anchor > 0:
-                            data = self.buffer_anchor.sample(batch=n_anchor)
-                        else:
-                            data = self.buffer_pool.sample(batch=n_pool)
-                    else:
-                        continue
-            else:
-                # if not using dual buffers, then we just sample from the main buffer
-                if self.use_per:
-                    data, indices, is_weights = self.buffer.sample(batch=self._config['batch_size'])
-                    # Collect IS weights for PER monitoring
-                    all_is_weights.extend(is_weights.tolist())
-                else:
-                    data = self.buffer.sample(batch=self._config['batch_size'])
-                    indices = None
-                    is_weights = None
+            # Sample batch from replay buffer
+            data = self.buffer.sample(batch=self._config['batch_size'])
 
-            # from all the data we sampled, now we need to split it into the states, actions, rewards, next states, and dones.
-            # have to ensure to 1. convert to tensors, 2. convert to the device, 3. convert to the correct type.
+            # Split into states, actions, rewards, next states, and dones
             # Note: stored actions are 8D (4D agent + 4D opponent) for critic to see full game state
-            s_raw = np.stack(data[:, 0]).astype(np.float32)
-            s_prime_raw = np.stack(data[:, 3]).astype(np.float32)
-
-            # CRITICAL FIX: Update observation statistics and normalize
-            # This fixes critic learning by handling 50x position/velocity scale mismatch
-            self._update_obs_stats(s_raw)
-            self._update_obs_stats(s_prime_raw)
-
-            s = torch.from_numpy(self._normalize_obs(s_raw)).to(self.device)
-            s_prime = torch.from_numpy(self._normalize_obs(s_prime_raw)).to(self.device)
-
+            s = torch.from_numpy(np.stack(data[:, 0]).astype(np.float32)).to(self.device)
+            s_prime = torch.from_numpy(np.stack(data[:, 3]).astype(np.float32)).to(self.device)
             a_full = torch.from_numpy(np.stack(data[:, 1]).astype(np.float32)).to(self.device)  # 8D: [agent_action, opponent_action]
             a_agent = a_full[:, :4]  # Extract agent's 4D action for policy updates
             rew = torch.from_numpy(np.stack(data[:, 2]).astype(np.float32)[:, None]).to(self.device)
@@ -648,83 +420,72 @@ class TD3Agent:
                 else:
                     target_q = torch.clamp(target_q, -q_clip, q_clip)
 
-            # this is where we integrate the be-active regularization term.
+            #########################################################
+            # VALUE FUNCTION REGULARIZATION (Anti-Lazy Learning)
+            # Penalizes Q(passive) > Q(active) to prevent lazy/passive agents
+            #########################################################
             vf_reg_lambda = self._config.get("vf_reg_lambda", 0.1)
-            
-            #########################################################
-            # Q1 VALUE FUNCTION REGULARIZATION (Anti-Lazy Learning)
-            #########################################################
             vf_reg_q1 = torch.tensor(0.0, device=self.device, requires_grad=True)
-            if vf_reg_lambda > 0:  # Only if regularization enabled
-                should_be_active = self._should_be_active(s)  # States where agent should move toward puck
-                if should_be_active.sum() > 0:
-                    # For regularization, we compare agent's passive vs active actions
-                    # Need to construct 8D actions: [agent_action, opponent_action]
-                    a_passive_agent = torch.zeros((should_be_active.sum(), 4), device=self.device)  # Do nothing (4D)
-                    a_active_agent = self._generate_active_action(s[should_be_active])  # Move toward puck (4D)
-                    a_opponent_reg = a_full[should_be_active, 4:]  # Opponent actions (4D)
-                    
-                    a_passive_full = torch.cat([a_passive_agent, a_opponent_reg], dim=1)  # 8D: [passive_agent, opponent]
-                    a_active_full = torch.cat([a_active_agent, a_opponent_reg], dim=1)  # 8D: [active_agent, opponent]
-                    
-                    # Compare Q-values: passive vs active
+            vf_reg_q2 = torch.tensor(0.0, device=self.device, requires_grad=True)
+
+            # Metrics for tracking VF reg effectiveness
+            vf_reg_metrics = {
+                'active_ratio': 0.0,        # % of batch states where agent should be active
+                'violation_ratio': 0.0,     # % of active states where Q(passive) > Q(active) (bad)
+                'q_advantage_mean': 0.0,    # Mean Q(active) - Q(passive) (positive = good)
+                'reg_loss': 0.0,            # Actual regularization loss added
+            }
+
+            if vf_reg_lambda > 0:
+                # Compute once and reuse for both critics
+                should_be_active = self._should_be_active(s)
+                n_active = should_be_active.sum().item()
+                vf_reg_metrics['active_ratio'] = n_active / s.shape[0]
+
+                if n_active > 0:
+                    # Construct passive vs active actions for comparison
+                    a_passive_agent = torch.zeros((n_active, 4), device=self.device)
+                    a_active_agent = self._generate_active_action(s[should_be_active])
+                    a_opponent_reg = a_full[should_be_active, 4:]
+
+                    a_passive_full = torch.cat([a_passive_agent, a_opponent_reg], dim=1)
+                    a_active_full = torch.cat([a_active_agent, a_opponent_reg], dim=1)
+
+                    # Q1 regularization
                     q1_passive = self.Q1.Q_value(s[should_be_active], a_passive_full)
                     q1_active = self.Q1.Q_value(s[should_be_active], a_active_full)
-                    # Penalize if Q(passive) > Q(active) - we want movement to be better!
-                    q1_wrong_ordering = torch.relu(q1_passive - q1_active)
-                    vf_reg_q1 = vf_reg_lambda * q1_wrong_ordering.mean()
+                    q1_advantage = q1_active - q1_passive  # Positive = active is better (good!)
+                    q1_violation = torch.relu(-q1_advantage)  # Penalty when passive > active
+                    vf_reg_q1 = vf_reg_lambda * q1_violation.mean()
 
-            # Pass regularization term to fit - it gets added to the loss
-            # Use full 8D action for critic update
-            q1_loss_value, q1_grad_norm = self.Q1.fit(s, a_full, target_q, weights=is_weights, regularization=vf_reg_q1)
-
-
-            #########################################################
-            # Q2 VALUE FUNCTION REGULARIZATION (Twin Critic)
-            #########################################################
-            vf_reg_q2 = torch.tensor(0.0, device=self.device, requires_grad=True)
-            if vf_reg_lambda > 0:  # Same logic for second critic
-                should_be_active = self._should_be_active(s)
-                if should_be_active.sum() > 0:
-                    # For regularization, we compare agent's passive vs active actions
-                    # Need to construct 8D actions: [agent_action, opponent_action]
-                    a_passive_agent = torch.zeros((should_be_active.sum(), 4), device=self.device)  # Do nothing (4D)
-                    a_active_agent = self._generate_active_action(s[should_be_active])  # Move toward puck (4D)
-                    a_opponent_reg = a_full[should_be_active, 4:]  # Opponent actions (4D)
-
-                    a_passive_full = torch.cat([a_passive_agent, a_opponent_reg], dim=1)  # 8D: [passive_agent, opponent]
-                    a_active_full = torch.cat([a_active_agent, a_opponent_reg], dim=1)  # 8D: [active_agent, opponent]
-
+                    # Q2 regularization
                     q2_passive = self.Q2.Q_value(s[should_be_active], a_passive_full)
                     q2_active = self.Q2.Q_value(s[should_be_active], a_active_full)
-                    # Same penalty: make active better than passive
-                    q2_wrong_ordering = torch.relu(q2_passive - q2_active)
-                    vf_reg_q2 = vf_reg_lambda * q2_wrong_ordering.mean()
+                    q2_advantage = q2_active - q2_passive
+                    q2_violation = torch.relu(-q2_advantage)
+                    vf_reg_q2 = vf_reg_lambda * q2_violation.mean()
+
+                    # Collect metrics (average across both critics)
+                    with torch.no_grad():
+                        avg_advantage = ((q1_advantage + q2_advantage) / 2).mean().item()
+                        # Count violations: states where passive > active
+                        violations = ((q1_advantage < 0).float() + (q2_advantage < 0).float()) / 2
+                        violation_ratio = violations.mean().item()
+                        avg_reg_loss = (vf_reg_q1.item() + vf_reg_q2.item()) / 2
+
+                        vf_reg_metrics['q_advantage_mean'] = avg_advantage
+                        vf_reg_metrics['violation_ratio'] = violation_ratio
+                        vf_reg_metrics['reg_loss'] = avg_reg_loss
+
+            # Fit Q1 with regularization
+            q1_loss_value, q1_grad_norm = self.Q1.fit(s, a_full, target_q, regularization=vf_reg_q1)
 
             # Detach target_q to avoid backward through graph twice
-            # target_q is computed in no_grad() context, but detaching explicitly ensures no graph issues
             target_q_detached = target_q.detach() if isinstance(target_q, torch.Tensor) else target_q
-            # Use full 8D action for critic update
-            q2_loss_value, q2_grad_norm = self.Q2.fit(s, a_full, target_q_detached, weights=is_weights, regularization=vf_reg_q2)
+            # Fit Q2 with regularization
+            q2_loss_value, q2_grad_norm = self.Q2.fit(s, a_full, target_q_detached, regularization=vf_reg_q2)
             avg_critic_loss = (q1_loss_value + q2_loss_value) / 2
             avg_critic_grad_norm = (q1_grad_norm + q2_grad_norm) / 2
-
-            #########################################################
-            # PER Priority Update
-            # Update priorities based on TD errors for prioritized sampling
-            #########################################################
-            if self.use_per and indices is not None:
-                with torch.no_grad():
-                    # Compute current Q-values for the sampled transitions
-                    q1_current = self.Q1.Q_value(s, a_full)
-                    q2_current = self.Q2.Q_value(s, a_full)
-                    q_current = torch.min(q1_current, q2_current)
-                    # TD error = |Q(s,a) - target_q|
-                    td_errors = torch.abs(q_current - target_q).cpu().numpy().flatten()
-                # Collect TD errors for PER monitoring
-                all_td_errors.extend(td_errors.tolist())
-                # Update priorities in the buffer
-                self.buffer.update_priorities(indices, td_errors)
 
             if self.total_steps % self._config["policy_freq"] == 0:
                 #########################################################
@@ -778,33 +539,18 @@ class TD3Agent:
                     # a soft update only as discussed above. blend old targets with new network weights
                     self._soft_update_targets()
 
-        #########################################################
-        # Compute PER statistics for logging
-        #########################################################
-        if self.use_per and len(all_is_weights) > 0:
-            is_weights_arr = np.array(all_is_weights)
-            td_errors_arr = np.array(all_td_errors) if len(all_td_errors) > 0 else np.array([0.0])
-            buffer_stats = self.buffer.get_stats()
-            per_stats = {
-                # Buffer state
-                'per_beta': buffer_stats['beta'],
-                'per_max_priority': buffer_stats['max_priority'],
-                'per_total_priority': buffer_stats['total_priority'],
-                'per_n_entries': buffer_stats['n_entries'],
-                'per_alpha': buffer_stats['alpha'],
-                # IS weight statistics (shows correction strength)
-                'per_is_weight_mean': float(np.mean(is_weights_arr)),
-                'per_is_weight_std': float(np.std(is_weights_arr)),
-                'per_is_weight_min': float(np.min(is_weights_arr)),
-                'per_is_weight_max': float(np.max(is_weights_arr)),
-                # TD error statistics (shows priority distribution)
-                'per_td_error_mean': float(np.mean(td_errors_arr)),
-                'per_td_error_std': float(np.std(td_errors_arr)),
-                'per_td_error_min': float(np.min(td_errors_arr)),
-                'per_td_error_max': float(np.max(td_errors_arr)),
-            }
+            # Track VF reg metrics for this iteration
+            vf_reg_metrics_all.append(vf_reg_metrics)
 
-        return losses, grad_norms, per_stats
+        # Aggregate VF reg metrics across all iterations
+        vf_reg_summary = {
+            'active_ratio': np.mean([m['active_ratio'] for m in vf_reg_metrics_all]),
+            'violation_ratio': np.mean([m['violation_ratio'] for m in vf_reg_metrics_all]),
+            'q_advantage_mean': np.mean([m['q_advantage_mean'] for m in vf_reg_metrics_all]),
+            'reg_loss': np.mean([m['reg_loss'] for m in vf_reg_metrics_all]),
+        }
+
+        return losses, grad_norms, vf_reg_summary
     
 
 

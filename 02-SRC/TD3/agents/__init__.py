@@ -4,10 +4,9 @@ This file was developed with assistance from AI autocomplete features in Cursor 
 """
 
 from .device import get_device
-from .noise import OUNoise
+from .noise import GaussianNoise
 from .td3_agent import TD3Agent
-from .ddpg_agent import DDPGAgent
 from .model import Model
-from .memory import Memory, PrioritizedMemory
+from .memory import Memory
 
-__all__ = ['get_device', 'OUNoise', 'TD3Agent', 'DDPGAgent', 'Model', 'Memory', 'PrioritizedMemory']
+__all__ = ['get_device', 'GaussianNoise', 'TD3Agent', 'Model', 'Memory']

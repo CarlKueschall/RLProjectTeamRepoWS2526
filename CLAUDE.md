@@ -9,7 +9,7 @@ This repository contains two main components:
 1. **TD3 Training System** (`TD3/`): A reinforcement learning framework for training TD3 (Twin Delayed DDPG) agents to play air hockey
 2. **COMPRL Client** (`comprl-hockey-agent/`): A client that connects trained agents to a competition server
 
-The project implements advanced RL techniques including self-play, reward shaping, and opponent pool management.
+The project implements: **Pure TD3 + PBRS + Self-Play with PFSP**
 
 ## Common Commands
 
@@ -20,8 +20,8 @@ The project implements advanced RL techniques including self-play, reward shapin
 cd TD3
 python3 train_hockey.py --mode NORMAL --opponent weak
 
-# Training with self-play
-python3 train_hockey.py --mode NORMAL --opponent self
+# Training with self-play (activates at episode 8000)
+python3 train_hockey.py --mode NORMAL --opponent weak --self_play_start 8000 --use_pfsp
 
 # Training with custom hyperparameters
 python3 train_hockey.py --mode NORMAL --opponent weak --lr_actor 3e-4 --lr_critic 3e-4 --max_episodes 5000
@@ -82,7 +82,7 @@ bash autorestart.sh --server-url <URL> --server-port <PORT> \
 - **`train_hockey.py`**: Main training loop orchestrating the entire RL pipeline
   - Creates hockey environment, opponent, and agent
   - Manages training loop, replay buffer, and checkpoint saving
-  - Integrates reward shaping, metrics tracking, and W&B logging
+  - Integrates PBRS reward shaping, metrics tracking, and W&B logging
   - Handles self-play opponent pool management
 
 - **`test_hockey.py`**: Evaluation script for testing trained checkpoints
@@ -95,30 +95,30 @@ bash autorestart.sh --server-url <URL> --server-port <PORT> \
 
 - **`td3_agent.py`**: TD3Agent class implementing the Twin Delayed DDPG algorithm
   - Actor network (policy) and two critic networks (Q-functions)
-  - Action sampling with exploration noise (Ornstein-Uhlenbeck)
+  - Gaussian exploration noise N(0, sigma)
   - Delayed policy updates and target network smoothing
+  - VF regularization to prevent passive/lazy agents
   - Methods: `act()`, `train()`, `remember()`, `state()`, `restore_state()`
 
-- **`model.py`**: Generic MLP model for actor/critic networks with batch normalization
+- **`model.py`**: Generic MLP model for actor/critic networks
 
-- **`memory.py`**: ReplayBuffer class managing experience storage and sampling
+- **`memory.py`**: ReplayBuffer class managing experience storage and uniform sampling
 
-- **`noise.py`**: OUNoise class for continuous action space exploration
+- **`noise.py`**: GaussianNoise class for continuous action space exploration
 
 - **`device.py`**: Device management (CPU/GPU/MPS detection)
-
-- **`ddpg_agent.py`**: Base DDPG implementation (extended by TD3Agent)
 
 **Opponent Management** (`opponents/`):
 
 - **`self_play.py`**: SelfPlayManager orchestrates training against a pool of previous checkpoints
   - Pool of past agents maintained (FIFO rotation)
-  - Features: PFSP (Prioritized Fictitious Self-Play), dynamic anchor mixing, regression rollback
+  - PFSP (Prioritized Fictitious Self-Play) for smart opponent selection
+  - Balances training against weak/strong anchors vs self-play pool
   - Selects opponents based on win-rate statistics
 
 - **`fixed.py`**: FixedOpponent wraps built-in BasicOpponent (weak/strong)
 
-- **`pfsp.py`**: Prioritized Fictitious Self-Play implementation for smart opponent selection
+- **`pfsp.py`**: Prioritized Fictitious Self-Play implementation for opponent selection weights
 
 - **`base.py`**: BaseOpponent abstract class
 
@@ -127,8 +127,7 @@ bash autorestart.sh --server-url <URL> --server-port <PORT> \
 - **`pbrs.py`**: Potential-Based Reward Shaping (PBRS) for dense exploration guidance
   - Computes potential functions from puck/player positions
   - Policy-invariant reward modification that doesn't change optimal policy
-
-- **`strategic_rewards.py`**: Additional reward shaping strategies
+  - Configurable scaling via `--pbrs_scale`
 
 **Evaluation & Metrics** (`evaluation/`, `metrics/`):
 
@@ -144,12 +143,13 @@ bash autorestart.sh --server-url <URL> --server-port <PORT> \
 
 **Configuration** (`config/`):
 
-- **`parser.py`**: Comprehensive command-line argument parser with all TD3 hyperparameters
+- **`parser.py`**: Command-line argument parser with TD3 hyperparameters
   - Environment settings (mode, opponent, keep_mode)
   - Training settings (episodes, batch size, buffer size)
   - TD3-specific hyperparameters (learning rates, tau, policy frequency)
   - Network architecture (hidden layer sizes)
-  - Reward shaping and Q-value clipping settings
+  - PBRS reward shaping and Q-value clipping settings
+  - Self-play settings (pool size, save interval, PFSP mode)
 
 ### COMPRL Client System
 
@@ -174,7 +174,7 @@ bash autorestart.sh --server-url <URL> --server-port <PORT> \
 3. **Data Collection**: Run episodes, store transitions in replay buffer
 4. **Training Phase**: Sample batches and update agent networks
 5. **Evaluation**: Periodically test against benchmarks, save best checkpoints
-6. **Self-Play**: Maintain opponent pool and select challengers based on performance
+6. **Self-Play**: Maintain opponent pool and select challengers via PFSP
 
 ### Observation Handling
 
@@ -194,7 +194,7 @@ Keep-mode affects observation dimension (OFF=16, ON=18). The training code detec
 ### Checkpoint Format Compatibility
 
 Multiple checkpoint formats supported:
-- Tuple format: Direct agent state (new)
+- Tuple format: Direct agent state (Q1, Q2, policy state dicts)
 - Dict with 'agent_state' key: Wrapped state
 - Dict with network keys ('policy', 'Q1', 'Q2'): Individual components + optimizers
 
@@ -204,25 +204,29 @@ Multiple checkpoint formats supported:
 
 - **Delayed Policy Updates**: Policy updates every N critic updates (policy_freq=2)
 - **Twin Critic Networks**: Two Q-functions to reduce overestimation
-- **Target Policy Smoothing**: Adds noise to target actions for stability
+- **Target Policy Smoothing**: Adds clipped noise to target actions for stability
+- **Gaussian Exploration**: N(0, sigma) noise, constant per TD3 paper (no decay)
 - **Gradient Clipping**: Prevents exploding gradients (grad_clip=1.0)
-- **Q-Value Clipping**: Hard or soft clipping prevents Q-value explosion (q_clip=25.0)
+- **Q-Value Clipping**: Hard or soft (tanh) clipping prevents Q-value explosion (q_clip=25.0)
+- **VF Regularization**: Penalizes near-zero Q-values to prevent passive agents
 
 ### Reward Shaping Strategy
 
 - **PBRS Integration**: Computes potential function based on puck distance/velocity
-- **Policy Invariance**: Shaped rewards don't change optimal policy
+- **Policy Invariance**: Shaped rewards don't change optimal policy (provably)
 - **Exploration Guidance**: Denser reward signal guides learning in early phases
+- **Configurable Weight**: `--pbrs_scale` controls PBRS influence
 
 ### Self-Play Management
 
-- **Opponent Pool**: Circular buffer of N past checkpoints
-- **Save Interval**: New opponent added every M training steps
+- **Opponent Pool**: Circular buffer of N past checkpoints (FIFO rotation)
+- **Save Interval**: New opponent added every M episodes during self-play
 - **Selection Strategy**:
-  - Weak ratio defines probability of facing weak opponent vs. pool
-  - PFSP mode prioritizes hardest opponents (highest win-rate variance)
-  - Dynamic mixing adjusts weak ratio based on forgetting metrics
-- **Regression Rollback**: Reverts to previous checkpoint if performance drops
+  - `weak_ratio` defines probability of facing anchor (weak/strong) vs. pool
+  - PFSP mode selects from pool based on win rates:
+    - `variance`: Prioritizes opponents with ~50% win rate (most learning signal)
+    - `hard`: Prioritizes hardest opponents (lowest win rate)
+- **Activation**: Self-play activates at configurable episode threshold
 
 ## Testing & Validation
 
@@ -232,7 +236,7 @@ Key scenarios to test:
 - Opponent types: weak, strong, self
 - Position alternation: with/without (tournament mode)
 - Checkpoint loading: various format conversions
-- Self-play convergence: pool size, save intervals, selection strategy
+- Self-play convergence: pool size, save intervals, PFSP selection
 
 ## W&B Integration
 

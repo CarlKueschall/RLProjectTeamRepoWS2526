@@ -49,14 +49,6 @@ def parse_args():
     # Tournament behavior testing
     parser.add_argument('--no-alternation', action='store_true', default=False,
                         help='Disable starting position alternation (simulate tournament behavior)')
-    # Observation normalization (for backwards compatibility with old checkpoints)
-    parser.add_argument('--no_normalize', action='store_true', default=False,
-                        help='Disable observation normalization (use for OLD checkpoints without saved stats)')
-    parser.add_argument('--warmup_stats', type=int, default=0,
-                        help='Run N warmup episodes to estimate normalization stats before testing (for old checkpoints)')
-
-
-
 
     #########################################################
     # Visualization
@@ -175,7 +167,6 @@ def test(args):
     print(f"Opponent: {args.opponent}")
     print(f"Episodes: {args.episodes}")
     print(f"Render: {args.render if args.render else 'None'}")
-    print(f"Obs Normalization: {'DISABLED (--no_normalize)' if args.no_normalize else 'ENABLED'}")
     print("###############################")
 
     #########################################################
@@ -214,7 +205,6 @@ def test(args):
         force_cpu=(device.type == 'cpu'),
         hidden_sizes_actor=args.hidden_actor,
         hidden_sizes_critic=args.hidden_critic,
-        normalize_obs=not args.no_normalize,  # Disable for old checkpoints
     )
 
     #########################################################
@@ -224,50 +214,6 @@ def test(args):
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     load_checkpoint(agent, str(checkpoint_path), device)
-
-    #########################################################
-    # Warmup phase to estimate normalization stats (for old checkpoints)
-    #########################################################
-    if args.warmup_stats > 0 and not args.no_normalize:
-        print(f"\n{'='*60}")
-        print(f"WARMUP: Collecting observation statistics ({args.warmup_stats} episodes)")
-        print(f"{'='*60}")
-
-        # Reset agent's normalization stats
-        agent.obs_mean = np.zeros(agent._obs_dim, dtype=np.float32)
-        agent.obs_std = np.ones(agent._obs_dim, dtype=np.float32)
-        agent.obs_count = 1e-4
-
-        warmup_opponent = BasicOpponent(weak=True)
-        all_obs = []
-
-        for warmup_ep in tqdm(range(args.warmup_stats), desc="Warmup"):
-            obs, _ = env.reset()
-            all_obs.append(obs.copy())
-
-            for t in range(get_max_timesteps(mode)):
-                # Use random actions during warmup to get diverse observations
-                action1 = env.action_space.sample()[:4]
-                obs_agent2 = env.obs_agent_two()
-                action2 = warmup_opponent.act(obs_agent2)
-
-                obs, _, done, truncated, _ = env.step(np.hstack([action1, action2]))
-                all_obs.append(obs.copy())
-
-                if done or truncated:
-                    break
-
-        # Compute statistics from collected observations
-        all_obs = np.array(all_obs)
-        agent.obs_mean = np.mean(all_obs, axis=0).astype(np.float32)
-        agent.obs_std = np.std(all_obs, axis=0).astype(np.float32)
-        agent.obs_std = np.maximum(agent.obs_std, 1e-8)  # Avoid division by zero
-        agent.obs_count = len(all_obs)
-
-        print(f"\nEstimated normalization statistics from {len(all_obs)} observations:")
-        print(f"  obs_mean: {agent.obs_mean}")
-        print(f"  obs_std:  {agent.obs_std}")
-        print(f"{'='*60}\n")
 
     #########################################################
     # Set exploration epsilon for testing

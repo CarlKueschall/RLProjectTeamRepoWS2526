@@ -1,159 +1,158 @@
 """
 AI Usage Declaration:
-This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+This file was developed with assistance from AI tools.
+
+Potential-Based Reward Shaping (PBRS) for Air Hockey.
+
+Based on research from:
+- Ng et al. (1999): Policy invariance under reward transformations
+- Wiewiora (2003): Potential-based shaping and Q-value initialization
+
+Design Philosophy:
+- MINIMAL shaping: Only guide behaviors hard to discover from sparse rewards
+- AVOID encoding strategy: Let agent discover shooting angles, timing, etc.
+- PREVENT exploits: No reward for standing near stationary puck
+
+Components:
+1. φ_chase: Reward being close to MOVING puck (defense/interception)
+2. φ_defensive: Triangle defense positioning when puck in own half
+
+Mathematical guarantee: F(s,s') = γφ(s') - φ(s) preserves optimal policy.
 """
 
 import numpy as np
 
 
+# Environment constants for air hockey
+TABLE_LENGTH = 9.0   # -4.5 to +4.5 in x
+TABLE_WIDTH = 5.0    # -2.5 to +2.5 in y
+MAX_DISTANCE = np.sqrt(TABLE_LENGTH**2 + TABLE_WIDTH**2)  # ~10.3
+OPPONENT_GOAL = np.array([4.5, 0.0])
+OWN_GOAL = np.array([-4.5, 0.0])
+
+# Thresholds
+PUCK_MOVING_THRESHOLD = 0.3  # Minimum puck speed to be considered "in play"
+
+
 def compute_potential(obs, gamma=0.99):
-    #########################################################
-    # Compute potential function \[\Phi(s)\] for Potential-Based Reward Shaping (PBRS).
-    #########################################################
-    # HAD TO FIX THIS PARt: Had to scale this down because q-values were exploding
-    # Based on research from Robot Air Hockey Challenge (NeurIPS 2023-2024).
-    # This is the ONLY safe way to shape rewards without changing the optimal policy.
-    # Formula: \[F(s,a,s') = \gamma \cdot \Phi(s') - \Phi(s)\]
-    # The sum over a trajectory telescopes to: \[\Phi(s_T) - \Phi(s_0)\]
-    # This means the agent CANNOT "hack" the reward by looping or doing weird behaviors.
-    # Potential Function:
-    # \[\Phi(s) = \text{SCALE} \cdot [w_1 \cdot (1 - \text{dist}_{\text{puck} \to \text{goal}}) - w_2 \cdot \text{dist}_{\text{agent} \to \text{puck}}]\]
-    #Arguments:
-    # obs: Observation (18 dims)
-    # gamma: Discount factor (must match training gamma)
-    #Returns:
-    # phi: Potential value for this state
-    p1_pos = np.array([obs[0], obs[1]])  # our position
-    puck_pos = np.array([obs[12], obs[13]])  # puck position
-    our_goal_pos = np.array([-4.5, 0.0])  # Constant anchor, our goal
-    opp_goal_pos = np.array([4.5, 0.0])  # Opponent goal position
-    has_puck = obs[16] > 0  # do we have puck?
-    puck_timer = obs[16]  # possession timer (15 down to 0)
-    puck_x = obs[12]  # puck x coord
+    """
+    Minimal potential function for air hockey.
 
-    #########################################################
-    # Offensive progress potential - reward for puck near opponent goal
-    #########################################################
-    dist_puck_to_opp_goal = max(0, 5.0 - puck_x)  # how far from their goal
-    phi_offense = 1.5 * (1.0 - (dist_puck_to_opp_goal / 10.0))  # closer = better
+    Only two components:
+    1. φ_chase: Reward proximity to MOVING puck only
+       - Helps defense: intercept opponent shots
+       - Helps offense: chase rebounds
+       - PREVENTS: standing next to stationary puck (the "do nothing" exploit)
 
-    #########################################################
-    # POSSESSION POTENTIAL - Reward having the puck in attacking position
-    # This encourages KEEPING the puck (action[3] <= 0) while positioning
-    # Higher potential when: (1) we have puck, (2) in offensive zone, (3) facing goal
-    #########################################################
-    phi_possession = 0.0
-    if has_puck:
-        # Reward possession more when in offensive position (puck_x > 0 = opponent half)
-        offensive_position_bonus = np.tanh(puck_x / 2.0)  # Range [-1, 1], positive in opponent half
+    2. φ_defensive: Triangle defense when puck in own half
+       - Position 40% from goal to puck
+       - Blocks direct shots while allowing reaction
 
-        # Reward possession more when aligned with goal (low |y| means centered)
-        goal_alignment = 1.0 - np.tanh(abs(puck_pos[1]) / 1.5)  # 1 when centered, 0 at edges
+    Arguments:
+        obs: 18-dimensional observation
+            [0:2]   - player position (x, y)
+            [12:14] - puck position (x, y)
+            [14:16] - puck velocity (vx, vy)
+        gamma: Discount factor (must match training gamma)
 
-        # Combine: high value when in good shooting position with possession
-        # This creates incentive to KEEP the puck while positioning
-        phi_possession = 2.0 * (0.5 + 0.3 * offensive_position_bonus + 0.2 * goal_alignment)
+    Returns:
+        phi: Potential value for this state
+    """
+    # === Extract state ===
+    player_pos = np.array([obs[0], obs[1]])
+    puck_pos = np.array([obs[12], obs[13]])
+    puck_vel = np.array([obs[14], obs[15]])
+    puck_speed = np.linalg.norm(puck_vel)
 
-        # Timer bonus: reward maintaining possession (higher timer = just got it)
-        # This gives instant reward for gaining possession
-        timer_bonus = 0.5 * (puck_timer / 15.0)  # 0.5 at timer=15, 0 at timer=0
-        phi_possession += timer_bonus
+    # === Component 1: Chase moving puck ===
+    # CRITICAL: Only reward when puck is moving!
+    # This prevents the "stand near stationary puck" exploit.
+    # If puck is stationary, agent gets NO reward for being close.
+    # Agent must HIT the puck to make it move, then can chase it.
+    if puck_speed > PUCK_MOVING_THRESHOLD:
+        dist_to_puck = np.linalg.norm(player_pos - puck_pos)
+        phi_chase = -dist_to_puck / MAX_DISTANCE  # Range: [-1, 0]
+    else:
+        phi_chase = 0.0  # NO reward for stationary puck
 
-    #########################################################
-    # CRITICAL FIX: Add puck velocity component - reward shooting toward goal
-    #########################################################
-    puck_velocity_x = obs[14]  # Puck x velocity (toward opponent goal is positive)
-    # Tanh to saturate at high velocities, scale to ~[-1, 1] range
-    # Positive velocity toward goal (x>0) is good, negative is bad
-    phi_velocity = 2.0 * np.tanh(puck_velocity_x / 2.0)  # Reward puck moving toward goal
+    # === Component 2: Defensive positioning (own half only) ===
+    # Triangle defense: position 40% of the way from goal to puck
+    # This blocks direct shots while allowing reaction to banks
+    puck_in_own_half = puck_pos[0] < 0
 
-    #########################################################
-    # Proximity potential - use tanh to saturate at dist=1.5
-    #########################################################
-    dist_p1_to_puck = np.linalg.norm(p1_pos - puck_pos)  # distance to puck
-    phi_prox = -1.5 * np.tanh(dist_p1_to_puck / 1.5)  # closer is better, smooth curve
+    if puck_in_own_half:
+        ideal_defensive_pos = OWN_GOAL + 0.4 * (puck_pos - OWN_GOAL)
+        defensive_error = np.linalg.norm(player_pos - ideal_defensive_pos)
+        # Normalize by table width, cap at 1.0
+        phi_defensive = -0.4 * min(defensive_error / TABLE_WIDTH, 1.0)
+    else:
+        phi_defensive = 0.0
 
-    #########################################################
-    # Defensive lane potential - gaussian reward for staying in interception lane
-    #########################################################
-    line_vec = puck_pos - our_goal_pos
-    line_unit = line_vec / (np.linalg.norm(line_vec) + 1e-6)
-    proj_len = np.clip(np.dot(p1_pos - our_goal_pos, line_unit), 0, np.linalg.norm(line_vec))
-    closest_point_on_line = our_goal_pos + proj_len * line_unit
-    dist_to_lane = np.linalg.norm(p1_pos - closest_point_on_line)
-    
-    phi_lane = 1.0 * np.exp(-(dist_to_lane**2) / 0.5)  # stay in defensive lane, gaussian falloff
+    # === Combine components ===
+    # Scale to episode-appropriate magnitude
+    # With EPISODE_SCALE=100 and pbrs_scale=0.02:
+    # - Max per-step shaping: ~0.02 * 100 * 0.01 = 0.02
+    # - Max episode shaping: ~0.02 * 100 * 1.4 = 2.8 (< sparse reward 10)
+    EPISODE_SCALE = 100.0
 
-    #########################################################
-    # Cushion potential - push agent back when too far forward
-    #########################################################
-    sigmoid_puck = 1.0 / (1.0 + np.exp(-2.0 * puck_x))
-    # ReLU(p1_x + 2.0) pushes agent back toward -2.0 when too far forward
-    # Condition on !has_puck so we don't penalize breakaways
-    cushion_activation = max(0, p1_pos[0] + 2.0) * sigmoid_puck * (1.0 - float(has_puck))
-    phi_cushion = -2.0 * np.tanh(cushion_activation)
-
-    #########################################################
-    # Combine all potentials with scaling
-    #########################################################
-    # CRITICAL FIX: Increased from 0.05 to 1.0 (20x) to make PBRS truly impactful
-    # Previous 0.05 * pbrs_scale=0.5 = 0.025 total multiplier = only 0.25% of sparse rewards
-    # New 1.0 * pbrs_scale=2.0 = 2.0 total multiplier = ~10-20% of sparse rewards (±10)
-    # This provides meaningful dense guidance while preserving policy invariance
-    # Added phi_possession to encourage keeping the puck while positioning for shots
-    SCALE = 1.0  # Was 0.05, increased 20x to make PBRS contribute 10-20% of total reward
-    phi = SCALE * (phi_offense + phi_prox + phi_lane + phi_cushion + phi_velocity + phi_possession)
+    phi = EPISODE_SCALE * (phi_chase + phi_defensive)
+    # Total range: approximately [-140, 0]
+    # φ_chase: [-100, 0] when puck moving, 0 when stationary
+    # φ_defensive: [-40, 0] when puck in own half, 0 otherwise
 
     return phi
 
 
 def compute_pbrs(obs, obs_next, done, gamma=0.99):
-    #########################################################
-    # Compute Potential-Based Reward Shaping (PBRS) with EPISODIC CORRECTION.
-    #Setting terminal potential to 0 to get rid of bias
-    # \[F(s,a,s') = \gamma \cdot \Phi(s') - \Phi(s)\]
-    # In episodic RL with truncation, we MUST set \[\Phi(s_{\text{terminal}}) = 0\], otherwise
-    # the shaped return includes a bias term \[\gamma^N \cdot \Phi(s_N) - \Phi(s_0)\] that can
-    # systematically distort the reward and destabilize learning.
-    # This is the ONLY form of reward shaping that is guaranteed to preserve
-    # the optimal policy (Ng et al., 1999).
-    # Advantages over naive reward shaping:
-    # - Cannot be "hacked" by agent (sum telescopes to \[\Phi(s_T) - \Phi(s_0)\])
-    # - Preserves optimal policy (policy invariance)
-    # - Provides dense learning signal without changing task objective
-    #Arguments:
-    # obs: Current observation (18 dims)
-    # obs_next: Next observation (18 dims)
-    # done: Boolean, True if episode terminated/truncated
-    # gamma: Discount factor (must match training gamma)
-    #Returns:
-    # shaping_reward: \[F(s,a,s') = \gamma \cdot \Phi(s') - \Phi(s)\] (with terminal correction)
+    """
+    Compute Potential-Based Reward Shaping with episodic correction.
+
+    Formula: F(s,a,s') = γ·φ(s') - φ(s)
+
+    CRITICAL: Terminal state potential must be 0 to avoid bias.
+    Without this, the shaped return includes γ^T·φ(s_T) - φ(s_0) bias.
+
+    Arguments:
+        obs: Current observation (18 dims)
+        obs_next: Next observation (18 dims)
+        done: Boolean, True if episode terminated/truncated
+        gamma: Discount factor (must match training gamma)
+
+    Returns:
+        shaping_reward: F(s,a,s') = γ·φ(s') - φ(s) (with terminal correction)
+    """
     phi_current = compute_potential(obs, gamma)
 
-    #########################################################
-    # IMPORTANT: Force terminal potential to 0
+    # CRITICAL: Force terminal potential to 0
     if done:
-        phi_next = 0.0  # terminal state = 0 potential, no bias
+        phi_next = 0.0
     else:
         phi_next = compute_potential(obs_next, gamma)
 
-    shaping_reward = gamma * phi_next - phi_current  # \[F(s,a,s') = \gamma \cdot \Phi(s') - \Phi(s)\]
+    shaping_reward = gamma * phi_next - phi_current
 
     return shaping_reward
 
 
 class PBRSReward:
-    ######################################################
-    # Potential-Based Reward Shaping wrapper.
+    """
+    Potential-Based Reward Shaping wrapper.
 
-    def __init__(self, gamma=0.99, annealing_episodes=5000, pbrs_scale=1.0, constant_weight=False):
-        #########################################################
-        # Initialize PBRS reward shaper.
-        #Arguments:
-        # gamma: Discount factor
-        # annealing_episodes: Episodes over which to anneal shaping during self-play
-        # pbrs_scale: Global scaling factor for PBRS magnitude (default: 1.0)
-        # constant_weight: If True, disable annealing and keep PBRS weight constant (default: False)
+    Usage:
+        shaper = PBRSReward(gamma=0.99, pbrs_scale=0.02)
+        shaped_reward = sparse_reward + shaper.compute(obs, obs_next, done)
+    """
+
+    def __init__(self, gamma=0.99, annealing_episodes=5000, pbrs_scale=0.02, constant_weight=True):
+        """
+        Initialize PBRS reward shaper.
+
+        Arguments:
+            gamma: Discount factor
+            annealing_episodes: Episodes over which to anneal shaping during self-play
+            pbrs_scale: Global scaling factor (default: 0.02, mathematically derived)
+            constant_weight: If True, disable annealing (recommended for stability)
+        """
         self.gamma = gamma
         self.annealing_episodes = annealing_episodes
         self.pbrs_scale = pbrs_scale
@@ -162,45 +161,40 @@ class PBRSReward:
         self.episode = 0
 
     def set_self_play_start(self, episode):
-        #########################################################
-        # Set the episode when self-play starts (for annealing).
+        """Set the episode when self-play starts (for annealing)."""
         self.self_play_start = episode
 
     def compute(self, obs_curr, obs_next, done, episode=None):
-        #########################################################
-        #Compute PBRS reward with optional annealing.
-        #Arguments:
-        # obs_curr: Current observation
-        # obs_next: Next observation
-        # done: Episode done flag
-        # episode: Current episode number (for annealing)
-        #Returns:
-        # shaped_reward: Additional reward term
+        """
+        Compute PBRS reward with optional annealing.
+
+        Arguments:
+            obs_curr: Current observation
+            obs_next: Next observation
+            done: Episode done flag
+            episode: Current episode number (for annealing)
+
+        Returns:
+            shaped_reward: Additional reward term (add to sparse reward)
+        """
         shaped_reward = compute_pbrs(obs_curr, obs_next, done, self.gamma)
 
-        #########################################################
-        # Apply global PBRS scaling (allows reducing PBRS magnitude)
-        #########################################################
+        # Apply global PBRS scaling
         shaped_reward *= self.pbrs_scale
 
-        #########################################################
-        # PBRS annealing - reduce shaping during self-play to prevent interference
-        # CRITICAL FIX: Can be disabled with constant_weight flag to keep PBRS active
-        #########################################################
-        if not self.constant_weight:  # only anneal if constant_weight is False
+        # Optional annealing during self-play
+        if not self.constant_weight:
             if self.self_play_start is not None and episode is not None:
                 if episode > self.self_play_start:
-                    # Linearly anneal from 1.0 → 0.0 over annealing_episodes
                     episodes_since_selfplay = episode - self.self_play_start
                     w_shaping = max(0.0, 1.0 - (episodes_since_selfplay / self.annealing_episodes))
-                    shaped_reward *= w_shaping  # fade out shaping during self-play, let agent learn naturally
+                    shaped_reward *= w_shaping
 
         return shaped_reward
 
     def get_annealing_weight(self, episode):
-        #########################################################
-        # Get current annealing weight (for logging).
-        if self.constant_weight:  # constant weight mode: always 1.0
+        """Get current annealing weight (for logging)."""
+        if self.constant_weight:
             return 1.0
         if self.self_play_start is None or episode <= self.self_play_start:
             return 1.0
@@ -209,6 +203,50 @@ class PBRSReward:
             return max(0.0, 1.0 - (episodes_since_selfplay / self.annealing_episodes))
 
     def reset(self):
-        #########################################################
-        # Reset episode state.
+        """Reset episode state (no-op for stateless shaper)."""
         pass
+
+
+# === Utility functions for debugging and analysis ===
+
+def get_potential_components(obs):
+    """
+    Get individual potential components for debugging.
+
+    Returns dict with each component's contribution.
+    """
+    player_pos = np.array([obs[0], obs[1]])
+    puck_pos = np.array([obs[12], obs[13]])
+    puck_vel = np.array([obs[14], obs[15]])
+    puck_speed = np.linalg.norm(puck_vel)
+
+    # Chase component
+    dist_to_puck = np.linalg.norm(player_pos - puck_pos)
+    puck_is_moving = puck_speed > PUCK_MOVING_THRESHOLD
+
+    if puck_is_moving:
+        phi_chase = -dist_to_puck / MAX_DISTANCE
+    else:
+        phi_chase = 0.0
+
+    # Defensive component
+    puck_in_own_half = puck_pos[0] < 0
+    phi_defensive = 0.0
+    ideal_defensive_pos = None
+
+    if puck_in_own_half:
+        ideal_defensive_pos = OWN_GOAL + 0.4 * (puck_pos - OWN_GOAL)
+        defensive_error = np.linalg.norm(player_pos - ideal_defensive_pos)
+        phi_defensive = -0.4 * min(defensive_error / TABLE_WIDTH, 1.0)
+
+    return {
+        'phi_chase': phi_chase,
+        'phi_defensive': phi_defensive,
+        'phi_total': phi_chase + phi_defensive,
+        'phi_scaled': 100.0 * (phi_chase + phi_defensive),
+        'puck_speed': puck_speed,
+        'puck_is_moving': puck_is_moving,
+        'dist_to_puck': dist_to_puck,
+        'puck_in_own_half': puck_in_own_half,
+        'ideal_defensive_pos': ideal_defensive_pos,
+    }

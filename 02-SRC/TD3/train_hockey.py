@@ -4,13 +4,13 @@ This file was developed with assistance from AI autocomplete features in Cursor 
 """
 
 import pickle
+import sys
 import time
 from pathlib import Path
 from collections import deque
 
 import numpy as np
 import torch
-import torch.optim.lr_scheduler as lr_scheduler
 import wandb
 from tqdm import tqdm
 from gymnasium import spaces
@@ -25,7 +25,7 @@ from evaluation import evaluate_vs_opponent
 from visualization import create_gif_for_wandb, save_gif_to_wandb
 from metrics import MetricsTracker
 from opponents import SelfPlayManager, FixedOpponent
-from rewards import PBRSReward, StrategicRewardShaper
+from rewards import PBRSReward
 
 
 def train(args):
@@ -105,12 +105,16 @@ def train(args):
     #########################################################
     # Initialize W&B
     #########################################################
+    # Reconstruct command for logging
+    training_command = ' '.join(sys.argv)
+
     # logging all the config stuff so we can track experiments
     if not args.no_wandb:
         wandb.init(
             project="rl-hockey",
             name=run_name,
             config={
+                "command": training_command,
                 "algorithm": "TD3",
                 "environment": "Hockey",
                 "mode": args.mode,
@@ -131,6 +135,7 @@ def train(args):
                 "batch_size": args.batch_size,
                 "grad_clip": args.grad_clip,
                 "train_freq": args.train_freq,
+                "iter_fit": args.iter_fit,
                 "grad_accum": args.grad_accum,
                 "warmup_episodes": args.warmup_episodes,
                 "noise_eps": args.eps,
@@ -145,40 +150,17 @@ def train(args):
                 "eval_interval": args.eval_interval,
                 "eval_episodes": args.eval_episodes,
                 "self_play_weak_ratio": args.self_play_weak_ratio,
-                "use_dual_buffers": args.use_dual_buffers,
                 "use_pfsp": args.use_pfsp,
                 "pfsp_mode": args.pfsp_mode if args.use_pfsp else None,
-                "dynamic_anchor_mixing": args.dynamic_anchor_mixing,
-                "performance_gated_selfplay": args.performance_gated_selfplay,
-                "selfplay_gate_winrate": args.selfplay_gate_winrate if args.performance_gated_selfplay else None,
-                "regression_rollback": args.regression_rollback,
-                "regression_threshold": args.regression_threshold if args.regression_rollback else None,
-                # New research-based hyperparameters
-                "tie_penalty": args.tie_penalty if not args.no_tie_penalty else 0.0,
-                "lr_decay": args.lr_decay,
-                "lr_min_factor": args.lr_min_factor if args.lr_decay else None,
                 "episode_block_size": args.episode_block_size,
-                # Reward shaping configuration (for ablation studies)
                 "pbrs_scale": args.pbrs_scale if args.reward_shaping else 0.0,
-                "use_strategic_rewards": args.use_strategic_rewards,
-                "strategic_reward_scale": args.strategic_reward_scale if args.use_strategic_rewards else 0.0,
-                # Prioritized Experience Replay (PER)
-                "use_per": args.use_per,
-                "per_alpha": args.per_alpha if args.use_per else None,
-                "per_beta_start": args.per_beta_start if args.use_per else None,
-                "per_beta_frames": args.per_beta_frames if args.use_per else None,
+                "vf_reg_lambda": args.vf_reg_lambda,
             },
             tags=["TD3", "Hockey", args.mode, args.opponent]
                   + (["self-play"] if args.self_play_start > 0 else [])
-                  + (["dual-buffers"] if args.use_dual_buffers else [])
                   + (["PFSP"] if args.use_pfsp else [])
-                  + (["tie-penalty"] if not args.no_tie_penalty else [])
-                  + (["lr-decay"] if args.lr_decay else [])
                   + (["episode-blocking"] if args.episode_block_size > 1 else [])
-                  + (["no-strategic-rewards"] if not args.use_strategic_rewards else [])
-                  + (["scaled-strategic"] if args.use_strategic_rewards and args.strategic_reward_scale != 1.0 else [])
                   + (["scaled-pbrs"] if args.reward_shaping and args.pbrs_scale != 1.0 else [])
-                  + (["PER"] if args.use_per else [])
         )
 
     # Track starting episode (for resuming from checkpoint)
@@ -267,14 +249,8 @@ def train(args):
         force_cpu=args.cpu,
         q_clip=args.q_clip,
         q_clip_mode=args.q_clip_mode,
-        init_critic_bias_positive=args.init_critic_bias_positive,  # CRITICAL FIX: positive bias to counter negative Q-spiral
-        use_dual_buffers=args.use_dual_buffers,
         critic_action_dim=critic_action_dim,  # Pass inferred dimension
-        # Prioritized Experience Replay (PER) configuration
-        use_per=args.use_per,
-        per_alpha=args.per_alpha,
-        per_beta_start=args.per_beta_start,
-        per_beta_frames=args.per_beta_frames,
+        vf_reg_lambda=args.vf_reg_lambda,  # VF regularization strength (anti-lazy)
     )
 
     #########################################################
@@ -328,39 +304,21 @@ def train(args):
             force_cpu=args.cpu,
             q_clip=args.q_clip,
             q_clip_mode=args.q_clip_mode,
-            init_critic_bias_positive=args.init_critic_bias_positive,  # CRITICAL FIX: positive bias to counter negative Q-spiral
         )
         torch.manual_seed(args.seed + 1)  # different seed for agent2
         np.random.seed(args.seed + 1)
 
     #########################################################
-    # LR schedulers REMOVED (caused learning freeze at phase transitions)
-    # Keeping constant LR throughout training for stability
-    #########################################################
-    lr_schedulers = None
-    # if args.lr_decay:  # DISABLED - LR decay caused 3x learning rate drop at self-play boundary
-    #     lr_min_actor = args.lr_actor * args.lr_min_factor
-    #     lr_min_critic = args.lr_critic * args.lr_min_factor
-    #     lr_schedulers = {
-    #         'actor': lr_scheduler.CosineAnnealingLR(...),
-    #         'critic_Q1': lr_scheduler.CosineAnnealingLR(...),
-    #         'critic_Q2': lr_scheduler.CosineAnnealingLR(...),
-    #     }
-    # LR decay DISABLED by default - caused learning freeze at self-play transition
-
-    #########################################################
-    # Initialize reward shapers
+    # Initialize reward shaper (PBRS)
     #########################################################
     pbrs_shaper = PBRSReward(
         gamma=args.gamma,
         annealing_episodes=5000,
         pbrs_scale=args.pbrs_scale,
-        constant_weight=args.pbrs_constant_weight  # CRITICAL FIX: keep PBRS active during self-play
+        constant_weight=args.pbrs_constant_weight  # Keep PBRS active during self-play
     )
     if args.reward_shaping and args.self_play_start > 0:
-        pbrs_shaper.set_self_play_start(args.self_play_start)  # anneal during self-play (unless constant_weight=True)
-
-    strategic_shaper = StrategicRewardShaper()
+        pbrs_shaper.set_self_play_start(args.self_play_start)
 
     #########################################################
     # Initialize self-play manager
@@ -372,11 +330,6 @@ def train(args):
         device=device,
         use_pfsp=args.use_pfsp,
         pfsp_mode=args.pfsp_mode,
-        dynamic_anchor_mixing=args.dynamic_anchor_mixing,
-        performance_gated=args.performance_gated_selfplay,
-        gate_winrate=args.selfplay_gate_winrate,
-        regression_rollback=args.regression_rollback,
-        regression_threshold=args.regression_threshold,
         observation_space=obs_space,
         action_space=single_player_action_space,
         enabled=not args.disable_selfplay,
@@ -393,33 +346,29 @@ def train(args):
     print("###############################")
     print(f"Training TD3 on Hockey ({args.mode} mode)")
     print(f"Run: {run_name}")
+    print(f"Command: {training_command}")
     print(f"Opponent: {args.opponent}")
     print(f"Max timesteps per episode: {max_timesteps}")
     print(f"Warmup episodes: {args.warmup_episodes} (NO training, just exploration)")
     print(f"Epsilon: {args.eps} -> {args.eps_min} (decay: {args.eps_decay})")
+
+    # Warn if epsilon won't decay (common misconfiguration)
+    if args.eps_decay >= 1.0 and args.eps > args.eps_min:
+        print(f"WARNING: eps_decay={args.eps_decay} means epsilon will NOT decay!")
+        print(f"         Set --eps_decay 0.99995 for gradual decay over ~60k episodes")
+    # Training configuration (standard TD3: 250 updates per episode)
+    if args.train_freq == -1:
+        print(f"Training: {args.iter_fit} gradient updates after each episode (standard TD3)")
+    else:
+        scaled_iters = max(1, int(args.iter_fit / (250 / args.train_freq)))
+        print(f"Training: every {args.train_freq} steps, {scaled_iters} updates (~{args.iter_fit}/episode)")
+    print(f"Batch size: {args.batch_size}")
     print(f"Evaluation interval: {args.eval_interval} episodes")
     print(f"Buffer size: {args.buffer_size:,} transitions")
-    # Research-based enhancements
-    if not args.no_tie_penalty:
-        print(f"Tie penalty: {args.tie_penalty} (encourages decisive wins)")
-    if args.lr_decay:
-        print(f"LR decay: cosine annealing to {args.lr_min_factor*100:.0f}% of initial")
     if args.episode_block_size > 1:
         print(f"Episode blocking: {args.episode_block_size} episodes per opponent")
-    # Reward shaping configuration (ablation study)
-    if args.reward_shaping:
-        if args.pbrs_scale != 1.0:
-            print(f"PBRS magnitude: SCALED by {args.pbrs_scale}x (reducing dense reward influence)")
-        if not args.use_strategic_rewards:
-            print(f"Strategic rewards: DISABLED (PBRS only, focusing on winning)")
-        elif args.strategic_reward_scale != 1.0:
-            print(f"Strategic rewards: SCALED by {args.strategic_reward_scale}x (testing reward hacking)")
-    # Prioritized Experience Replay (PER)
-    if args.use_per:
-        print(f"Prioritized Experience Replay (PER): ENABLED")
-        print(f"  alpha={args.per_alpha} (priority exponent)")
-        print(f"  beta_start={args.per_beta_start} (IS correction, anneals to 1.0)")
-        print(f"  beta_frames={args.per_beta_frames} (annealing schedule)")
+    if args.reward_shaping and args.pbrs_scale != 1.0:
+        print(f"PBRS magnitude: SCALED by {args.pbrs_scale}x")
     print("###############################")
 
     if args.self_play_start > 0:
@@ -433,12 +382,6 @@ def train(args):
         if args.use_pfsp:
             print(f"PFSP enabled: {args.pfsp_mode} mode")
         print(f"Episode blocking: {args.episode_block_size} episodes per opponent")
-        if args.dynamic_anchor_mixing:
-            print("Dynamic anchor mixing enabled (anti-forgetting)")
-        if args.performance_gated_selfplay:
-            print(f"Performance-gated activation: {args.selfplay_gate_winrate:.0%} win-rate")
-        if args.regression_rollback:
-            print(f"Regression rollback enabled: threshold {args.regression_threshold:.0%}")
         print("###############################")
 
     #########################################################
@@ -477,7 +420,6 @@ def train(args):
         #########################################################
         # Reset shapers and trackers for new episode
         #########################################################
-        strategic_shaper.reset()
         pbrs_shaper.reset()
         tracker.reset_episode()
 
@@ -499,8 +441,6 @@ def train(args):
                     print(f"\n[ACTIVATION CHECK ep={i_episode}]")
                     print(f"  start_episode={self_play_manager.start_episode}")
                     print(f"  last_eval_vs_weak={last_eval_vs_weak}")
-                    print(f"  performance_gated={self_play_manager.performance_gated}")
-                    print(f"  gate_winrate={self_play_manager.gate_winrate}")
                     will_activate = self_play_manager.should_activate(i_episode, last_eval_vs_weak)
                     print(f"  → should_activate={will_activate}\n")
 
@@ -550,8 +490,10 @@ def train(args):
         episode_reward_p1 = 0  # Shaped reward (with PBRS + bonuses)
         episode_sparse_reward = 0  # Unshapen sparse reward only
         episode_reward_p2 = 0  # Opponent reward (negative of sparse)
+        episode_pbrs_total = 0  # Total PBRS bonus for this episode
         episode_step_count = 0
         winner = 0  # Initialize winner (default to tie)
+        episode_vf_reg_summary = None  # VF reg metrics (populated during training)
 
         for t in range(max_timesteps):
             global_step += 1
@@ -609,61 +551,38 @@ def train(args):
             if args.reward_shaping:
                 pbrs_bonus = pbrs_shaper.compute(obs_curr, obs_next, done=(done or truncated), episode=i_episode)
                 r1_shaped = r1 + pbrs_bonus  # add PBRS bonus to sparse reward
+                episode_pbrs_total += pbrs_bonus  # Accumulate PBRS for episode total
             else:
                 r1_shaped = r1
                 pbrs_bonus = 0.0
 
-            #########################################################
-            # Strategic bonuses (can be disabled to test reward hacking hypothesis)
-            #########################################################
-            dist_to_puck = np.sqrt((obs_next[0] - obs_next[12])**2 + (obs_next[1] - obs_next[13])**2)  # distance to puck (needed for metrics)
+            # Track distance to puck (for metrics)
+            dist_to_puck = np.sqrt((obs_next[0] - obs_next[12])**2 + (obs_next[1] - obs_next[13])**2)
 
-            # ALWAYS track puck touches (decoupled from strategic_rewards flag)
-            # This ensures behavior metrics are accurate regardless of reward configuration
-            env_touch_reward = info.get('reward_touch_puck', 0.0)
-            if env_touch_reward > 0:
-                strategic_shaper.puck_touches += 1
-            elif dist_to_puck < 0.3 and env_touch_reward == 0:
-                # Backup: if env didn't detect, use distance threshold
-                strategic_shaper.puck_touches += 1
-
-            if args.reward_shaping and args.use_strategic_rewards:
-                strategic_bonuses = strategic_shaper.compute(obs_next, info, dist_to_puck)
-
-                # Record opponent position for forcing metric
-                strategic_shaper.record_opponent_position([obs_next[6], obs_next[7]])  # track where opponent is
-
-                # Apply strategic bonuses with optional scaling
-                for bonus_name, bonus_value in strategic_bonuses.items():
-                    r1_shaped += bonus_value * args.strategic_reward_scale  # scaled strategic bonuses
-            else:
-                strategic_bonuses = {}
+            # Compute puck speed and alignment for hacking detection
+            puck_vel = np.array([obs_next[14], obs_next[15]])
+            puck_speed = np.linalg.norm(puck_vel)
+            alignment = 0.0
+            if puck_speed > 0.1:
+                puck_pos = np.array([obs_next[12], obs_next[13]])
+                opponent_goal = np.array([4.5, 0.0])
+                goal_vector = opponent_goal - puck_pos
+                goal_dist = np.linalg.norm(goal_vector)
+                if goal_dist > 0.1:
+                    alignment = np.dot(puck_vel / puck_speed, goal_vector / goal_dist)
 
             #########################################################
             # Store transition
             #########################################################
             # Store action_combined (8D: 4D agent + 4D opponent) so critic can see full game state
-            # This matches the old version where critic had 26D input (18 obs + 8 actions)
-            # dual buffers: separate anchor (weak/strong) and pool (self-play) experiences
-            if args.use_dual_buffers and hasattr(agent, 'buffer_anchor') and hasattr(agent, 'buffer_pool'):
-                # Anchor buffer: weak and strong opponent experiences
-                # Pool buffer: self-play experiences
-                if opponent_type in ['weak', 'strong'] or (not self_play_manager.active and opponent_type is None):
-                    agent.buffer_anchor.add_transition((obs_curr, action_combined.copy(), r1_shaped, obs_next.copy(), float(done or truncated)))
-                elif opponent_type == 'self-play':
-                    agent.buffer_pool.add_transition((obs_curr, action_combined.copy(), r1_shaped, obs_next.copy(), float(done or truncated)))
-                else:
-                    # Fallback: use main buffer
-                    agent.buffer.add_transition((obs_curr, action_combined.copy(), r1_shaped, obs_next.copy(), float(done or truncated)))
-            else:
-                agent.buffer.add_transition((obs_curr, action_combined.copy(), r1_shaped, obs_next.copy(), float(done or truncated)))
+            agent.buffer.add_transition((obs_curr, action_combined.copy(), r1_shaped, obs_next.copy(), float(done or truncated)))
 
             # Update tracker
             tracker.add_step_reward(r1_shaped)
             tracker.add_action_magnitude(np.linalg.norm(action1[:2]))  # track action magnitude
             tracker.add_agent_position([obs_next[0], obs_next[1]])  # track agent position
             tracker.add_puck_distance(dist_to_puck)  # track distance to puck
-            tracker.add_shoot_action(action1[3], obs_next[16] > 0)  # track shoot/keep action and possession
+            tracker.add_shoot_action(action1[3], obs_next[16] > 0, puck_speed, alignment)  # track shoot/keep action and possession
 
             episode_reward_p1 += r1_shaped
             episode_step_count += 1
@@ -680,14 +599,17 @@ def train(args):
             # Train during episode
             #########################################################
             warmup_complete = i_episode >= args.warmup_episodes  # wait for warmup before training
-            per_stats = None  # PER statistics from training (if PER enabled)
             if args.train_freq != -1 and len(agent.buffer) >= args.batch_size and warmup_complete:
                 if global_step % args.train_freq == 0:
-                    scaled_iterations = max(1, int(32 / (250 / args.train_freq)))  # scale training iterations based on freq
-                    losses, grad_norms, per_stats = agent.train(iter_fit=scaled_iterations)
+                    # Scale iterations to distribute iter_fit updates across episode (~250 steps)
+                    # E.g., train_freq=1, iter_fit=250 -> 1 update per step (standard TD3)
+                    # E.g., train_freq=10, iter_fit=250 -> 10 updates every 10 steps
+                    scaled_iterations = max(1, int(args.iter_fit / (250 / args.train_freq)))
+                    losses, grad_norms, vf_reg_summary = agent.train(iter_fit=scaled_iterations)
                     if losses:
                         tracker.add_losses(losses)
                         tracker.add_grad_norms(grad_norms)
+                    episode_vf_reg_summary = vf_reg_summary  # Track for logging
 
             if done or truncated:
                 winner = info.get('winner', 0)
@@ -697,19 +619,21 @@ def train(args):
 
         #########################################################
         # Train after episode (if train_freq == -1)
+        # Standard TD3: ~250 gradient updates per episode (1 per env step)
         #########################################################
         if args.train_freq == -1 and warmup_complete:
             if len(agent.buffer) >= args.batch_size:
-                losses, grad_norms, per_stats = agent.train(iter_fit=32)
+                losses, grad_norms, vf_reg_summary = agent.train(iter_fit=args.iter_fit)
                 if losses:
                     tracker.add_losses(losses)
                     tracker.add_grad_norms(grad_norms)
+                episode_vf_reg_summary = vf_reg_summary  # Track for logging
 
         #########################################################
         # Train agent2 in self-play
         #########################################################
         if agent2 and len(agent2.buffer) >= args.batch_size:
-            agent2.train(iter_fit=32)  # train the second agent too
+            agent2.train(iter_fit=args.iter_fit)
 
         #########################################################
         # Decay exploration
@@ -717,30 +641,6 @@ def train(args):
         agent.decay_epsilon()
         if agent2:
             agent2.decay_epsilon()
-
-        #########################################################
-        # Step LR schedulers (DISABLED - constant LR for stability)
-        #########################################################
-        # if lr_schedulers is not None:  # DISABLED - no LR decay
-        #     for scheduler in lr_schedulers.values():
-        #         scheduler.step()
-
-        #########################################################
-        # Strategic episode-end bonuses (diversity, forcing)
-        #########################################################
-        if args.reward_shaping and args.use_strategic_rewards:
-            end_bonuses = strategic_shaper.compute_episode_end_bonuses()  # diversity and forcing bonuses
-            for bonus_name, bonus_value in end_bonuses.items():
-                episode_reward_p1 += bonus_value * args.strategic_reward_scale
-
-        #########################################################
-        # Tie penalty (encourages decisive wins over stalemates)
-        # Research: ties should be worse than continuing but better than loss
-        #########################################################
-        tie_penalty_applied = 0.0
-        if not args.no_tie_penalty and winner == 0:
-            tie_penalty_applied = args.tie_penalty
-            episode_reward_p1 += tie_penalty_applied
 
         #########################################################
         # Update tracker
@@ -753,8 +653,7 @@ def train(args):
             reward_p2=episode_reward_p2,  # Opponent reward (negative of sparse)
             sparse_reward=episode_sparse_reward  # Unshapen sparse reward only
         )
-        tracker.add_strategic_stats(strategic_shaper.get_episode_stats())
-        tracker.add_pbrs_total(pbrs_bonus)
+        tracker.add_pbrs_total(episode_pbrs_total, sparse_reward=episode_sparse_reward)
         tracker.finalize_episode_behavior_metrics()  # Compute and store behavior metrics for this episode
 
         #########################################################
@@ -815,12 +714,6 @@ def train(args):
             log_metrics["training/eps_per_sec"] = eps_per_sec
             log_metrics["training/episode"] = i_episode
             log_metrics["training/pbrs_enabled"] = args.reward_shaping
-            log_metrics["training/tie_penalty"] = tie_penalty_applied
-
-            # LR decay tracking (DISABLED - constant LR)
-            # if lr_schedulers is not None:  # DISABLED - no LR decay
-            #     log_metrics["training/lr_actor"] = lr_schedulers['actor'].get_last_lr()[0]
-            #     log_metrics["training/lr_critic"] = lr_schedulers['critic_Q1'].get_last_lr()[0]
 
             # Episode blocking tracking (only log when self-play is active)
             if self_play_manager is not None and self_play_manager.active:
@@ -833,39 +726,15 @@ def train(args):
                     log_metrics["pbrs/annealing_weight"] = pbrs_shaper.get_annealing_weight(i_episode)
 
             #########################################################
-            # Prioritized Experience Replay (PER) metrics
-            # Tracks buffer state, IS weight distribution, and TD error statistics
-            # Useful for monitoring PER effectiveness and debugging issues
+            # VF Regularization Metrics (Anti-Lazy Learning)
+            # These metrics help diagnose if the agent is learning to prefer
+            # active behavior over passive behavior
             #########################################################
-            if args.use_per and per_stats is not None:
-                # Buffer state
-                log_metrics["per/beta"] = per_stats['per_beta']
-                log_metrics["per/max_priority"] = per_stats['per_max_priority']
-                log_metrics["per/total_priority"] = per_stats['per_total_priority']
-                log_metrics["per/n_entries"] = per_stats['per_n_entries']
-                # IS weight distribution (shows correction strength)
-                log_metrics["per/is_weight_mean"] = per_stats['per_is_weight_mean']
-                log_metrics["per/is_weight_std"] = per_stats['per_is_weight_std']
-                log_metrics["per/is_weight_min"] = per_stats['per_is_weight_min']
-                log_metrics["per/is_weight_max"] = per_stats['per_is_weight_max']
-                # TD error distribution (shows priority spread)
-                log_metrics["per/td_error_mean"] = per_stats['per_td_error_mean']
-                log_metrics["per/td_error_std"] = per_stats['per_td_error_std']
-                log_metrics["per/td_error_min"] = per_stats['per_td_error_min']
-                log_metrics["per/td_error_max"] = per_stats['per_td_error_max']
-
-            #########################################################
-            # Strategic reward shaping metrics
-            #########################################################
-            if args.reward_shaping and tracker.strategic_stats:
-                log_metrics["strategic/shots_clear"] = tracker.strategic_stats.get('shots_clear', 0)
-                log_metrics["strategic/shots_blocked"] = tracker.strategic_stats.get('shots_blocked', 0)
-                log_metrics["strategic/shot_quality_ratio"] = tracker.strategic_stats.get('shot_quality_ratio', 0.0)
-                log_metrics["strategic/attack_sides_unique"] = tracker.strategic_stats.get('attack_sides_unique', 0)
-                log_metrics["strategic/attack_diversity_bonus"] = tracker.strategic_stats.get('attack_diversity_bonus', 0.0)
-                log_metrics["strategic/opponent_total_movement"] = tracker.strategic_stats.get('total_opponent_movement', 0.0)
-                log_metrics["strategic/opponent_avg_movement"] = tracker.strategic_stats.get('avg_opponent_movement', 0.0)
-                log_metrics["strategic/forcing_bonus"] = tracker.strategic_stats.get('forcing_bonus', 0.0)
+            if episode_vf_reg_summary is not None and args.vf_reg_lambda > 0:
+                log_metrics["vf_reg/active_ratio"] = episode_vf_reg_summary['active_ratio']
+                log_metrics["vf_reg/violation_ratio"] = episode_vf_reg_summary['violation_ratio']
+                log_metrics["vf_reg/q_advantage_mean"] = episode_vf_reg_summary['q_advantage_mean']
+                log_metrics["vf_reg/reg_loss"] = episode_vf_reg_summary['reg_loss']
 
             #########################################################
             # Self-Play Metrics
@@ -911,7 +780,7 @@ def train(args):
             #########################################################
             # Debug: Always check evaluation condition (for debugging)
             eval_modulo = i_episode % args.eval_interval
-            should_eval = (eval_modulo == 0)
+            should_eval = (eval_modulo == 0) and (i_episode >= args.warmup_episodes)
             if i_episode <= i_episode_start + 30 or should_eval:  # Print for first 30 episodes OR when eval should run
                 print(f"[EVAL CHECK ep={i_episode}] eval_interval={args.eval_interval}, modulo={eval_modulo}, should_eval={should_eval}", flush=True)
             
@@ -1002,29 +871,6 @@ def train(args):
                 tracker.set_last_eval('strong', eval_strong['win_rate_decisive'])
 
                 #########################################################
-                # Update self-play manager with eval results (only if self-play is active)
-                #########################################################
-                if self_play_manager is not None and self_play_manager.active:
-                    if self_play_manager.dynamic_anchor_mixing:
-                        last_eval = tracker.get_last_eval('weak')
-                        peak_eval = tracker.get_peak_eval('weak')
-                        drop_from_peak = peak_eval - eval_weak['win_rate_decisive'] if peak_eval > 0 else 0.0
-                        self_play_manager.update_anchor_ratio(drop_from_peak)
-
-                    if self_play_manager.regression_rollback:
-                        should_rollback, rollback_path = self_play_manager.check_regression(eval_weak['win_rate_decisive'])
-                        if should_rollback:
-                            print("###############################")
-                            print("REGRESSION ROLLBACK TRIGGERED")
-                            print(f"Rolling back to: {rollback_path}")
-                            print("###############################")
-                            if rollback_path and Path(rollback_path).exists():
-                                checkpoint = torch.load(rollback_path, map_location=device)
-                                agent.restore_state(checkpoint['agent_state'])
-                            else:
-                                print(f"WARNING: Rollback path not found or invalid: {rollback_path}")
-
-                #########################################################
                 # GIF Recording (comprehensive gameplay visualization)
                 # Record behavior during evaluation against all opponent types
                 #########################################################
@@ -1082,12 +928,7 @@ def train(args):
                 q_values = []
                 with torch.no_grad():
                     for _ in range(min(100, len(agent.buffer))):
-                        batch = agent.buffer.sample(1)
-                        # Handle PER vs regular buffer: PER returns (transitions, indices, weights)
-                        if isinstance(batch, tuple):
-                            transitions = batch[0]
-                        else:
-                            transitions = batch
+                        transitions = agent.buffer.sample(1)
                         state = transitions[0][0]
                         action_full = transitions[0][1]  # 8D action from buffer
                         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(agent.device)
@@ -1135,13 +976,6 @@ def train(args):
             if not args.no_wandb:
                 wandb.save(str(checkpoint_path))
             print(f'--- Checkpoint saved: {checkpoint_path.name} ---')
-            
-            # Update best checkpoint for regression rollback if enabled
-            if self_play_manager is not None and self_play_manager.regression_rollback:
-                last_eval = tracker.get_last_eval('weak')
-                if last_eval is not None and abs(last_eval - self_play_manager.best_eval_vs_weak) < 0.001:
-                    # This checkpoint corresponds to the best eval (within small tolerance for float comparison)
-                    self_play_manager.set_best_checkpoint(str(checkpoint_path))
 
     #########################################################
     # Final summary

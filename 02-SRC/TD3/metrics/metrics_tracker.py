@@ -76,6 +76,14 @@ class MetricsTracker:
         self._last_eval = {}  # {opponent_type: win_rate}
         self._peak_eval = {}  # {opponent_type: win_rate}
 
+        # Reward Hacking Detection (research-based)
+        # Track: possession hoarding, PBRS exploitation, shooting behavior
+        self._episode_puck_speed_when_possess = []  # Track puck speed when agent has possession
+        self._episode_alignment_when_possess = []  # Track velocity alignment when possessing
+        self.hacking_possession_hoarding_ratio = []  # Ratio of possession without shooting
+        self.hacking_pbrs_to_sparse_ratio = []  # PBRS magnitude vs sparse reward
+        self.hacking_possession_no_shoot_count = []  # Steps possessing with slow/misaligned puck
+
     def reset(self):
         #########################################################
         # Reset all metrics
@@ -109,6 +117,9 @@ class MetricsTracker:
         self.behavior_puck_touches = []
         self._last_eval = {}
         self._peak_eval = {}
+        self.hacking_possession_hoarding_ratio = []
+        self.hacking_pbrs_to_sparse_ratio = []
+        self.hacking_possession_no_shoot_count = []
 
     def reset_episode(self):
         # Reset per-episode tracking
@@ -120,6 +131,10 @@ class MetricsTracker:
         self._episode_shoot_actions = []  # Track action[3] values
         self._episode_shoot_actions_when_possess = []  # Track action[3] when having possession
         self._episode_possession_steps = 0  # Count steps with possession
+        # Hacking detection per-episode tracking
+        self._episode_puck_speed_when_possess = []
+        self._episode_alignment_when_possess = []
+        self._episode_hoarding_steps = 0  # Steps with possession but not shooting
 
     def add_step_reward(self, reward):
         # Add reward for a single step
@@ -140,14 +155,27 @@ class MetricsTracker:
         if distance < 0.5:
             self._episode_time_near_puck += 1
 
-    def add_shoot_action(self, shoot_action, has_possession):
+    def add_shoot_action(self, shoot_action, has_possession, puck_speed=None, alignment=None):
         # Track action[3] (shoot/keep) and possession status
         # shoot_action: value of action[3], negative=keep, positive=shoot
         # has_possession: True if obs[16] > 0 (agent has puck)
+        # puck_speed: speed of puck (for hacking detection)
+        # alignment: velocity alignment toward goal (for hacking detection)
         self._episode_shoot_actions.append(shoot_action)
         if has_possession:
             self._episode_possession_steps += 1
             self._episode_shoot_actions_when_possess.append(shoot_action)
+            # Hacking detection: track puck state when possessing
+            if puck_speed is not None:
+                self._episode_puck_speed_when_possess.append(puck_speed)
+            if alignment is not None:
+                self._episode_alignment_when_possess.append(alignment)
+            # Detect hoarding: possessing but puck slow or misaligned
+            SHOOTING_SPEED_THRESHOLD = 0.5
+            ALIGNMENT_THRESHOLD = 0.3
+            if puck_speed is not None and alignment is not None:
+                if puck_speed < SHOOTING_SPEED_THRESHOLD or alignment < ALIGNMENT_THRESHOLD:
+                    self._episode_hoarding_steps += 1
 
     def add_episode_result(self, reward_p1, length, winner, reward_p2=None, sparse_reward=None):
         #########################################################
@@ -206,9 +234,16 @@ class MetricsTracker:
         # Add strategic reward shaping stats
         self.strategic_stats.update(stats)
 
-    def add_pbrs_total(self, pbrs_total):
+    def add_pbrs_total(self, pbrs_total, sparse_reward=None):
         # Add total PBRS reward for an episode
         self.pbrs_totals.append(pbrs_total)
+        # Track PBRS to sparse ratio for hacking detection
+        if sparse_reward is not None and abs(sparse_reward) > 1e-6:
+            ratio = abs(pbrs_total) / abs(sparse_reward)
+            self.hacking_pbrs_to_sparse_ratio.append(float(ratio))
+        elif pbrs_total != 0:
+            # Sparse reward is 0 but PBRS is not - could indicate exploitation
+            self.hacking_pbrs_to_sparse_ratio.append(float(abs(pbrs_total)))
 
     def get_win_rate(self):
         # Calculate overall win rate
@@ -302,6 +337,16 @@ class MetricsTracker:
         # Possession ratio: fraction of episode with puck possession
         self.behavior_possession_ratio.append(float(self._episode_possession_steps / episode_length))
 
+        # Hacking detection metrics
+        # 1. Possession hoarding ratio: % of possession time spent not shooting
+        if self._episode_possession_steps > 0:
+            hoarding_ratio = self._episode_hoarding_steps / self._episode_possession_steps
+            self.hacking_possession_hoarding_ratio.append(float(hoarding_ratio))
+            self.hacking_possession_no_shoot_count.append(float(self._episode_hoarding_steps))
+        else:
+            self.hacking_possession_hoarding_ratio.append(0.0)
+            self.hacking_possession_no_shoot_count.append(0.0)
+
     def get_behavior_metrics(self):
         #########################################################
         # Get averaged behavior metrics for the last log_interval episodes
@@ -325,6 +370,11 @@ class MetricsTracker:
         metrics['behavior/shoot_action_avg'] = np.mean(self.behavior_shoot_action_avg[-self.log_interval:]) if self.behavior_shoot_action_avg else 0.0
         metrics['behavior/shoot_action_when_possess'] = np.mean(self.behavior_shoot_action_when_possess[-self.log_interval:]) if self.behavior_shoot_action_when_possess else 0.0
         metrics['behavior/possession_ratio'] = np.mean(self.behavior_possession_ratio[-self.log_interval:]) if self.behavior_possession_ratio else 0.0
+
+        # Hacking detection metrics
+        metrics['hacking/possession_hoarding_ratio'] = np.mean(self.hacking_possession_hoarding_ratio[-self.log_interval:]) if self.hacking_possession_hoarding_ratio else 0.0
+        metrics['hacking/possession_no_shoot_count'] = np.mean(self.hacking_possession_no_shoot_count[-self.log_interval:]) if self.hacking_possession_no_shoot_count else 0.0
+        metrics['hacking/pbrs_to_sparse_ratio'] = np.mean(self.hacking_pbrs_to_sparse_ratio[-self.log_interval:]) if self.hacking_pbrs_to_sparse_ratio else 0.0
 
         return metrics
 
