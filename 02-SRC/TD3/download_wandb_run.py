@@ -37,7 +37,7 @@ def parse_args():
     parser.add_argument('--output', type=str, default=None,
                         help='Output file path (default: ./wandb_run_data.txt)')
     parser.add_argument('--include_metrics', type=str, nargs='+', default=None,
-                        help='Specific metrics to include (default: all critical metrics)')
+                        help='Specific metrics to include (default: ALL metrics - no filtering)')
 
     return parser.parse_args()
 
@@ -67,149 +67,34 @@ def get_run(entity, project, run_name=None, run_id=None):
     return run
 
 
-def get_critical_metrics():
-    """Define critical metrics to always include (matches train_hockey.py logging)"""
-    return [
-        # Performance metrics
-        'performance/cumulative_win_rate',
-        'performance/wins',
-        'performance/losses',
-        'performance/ties',
+def get_all_metrics():
+    """
+    Return None to indicate we want ALL metrics from the run.
 
-        # Reward metrics (shaped vs sparse)
-        'rewards/p1',
-        'rewards/p2',
-        'rewards/sparse_only',
-        'rewards/sparse_ratio',
+    The script will automatically fetch all W&B metrics (those with "/" in name).
+    This ensures we never miss any logged metrics.
 
-        # Scoring metrics
-        'scoring/goals_scored',
-        'scoring/goals_conceded',
-
-        # Training dynamics
-        'training/epsilon',
-        'training/eps_per_sec',
-        'training/episode',
-        'training/pbrs_enabled',
-        'training/calls_per_episode',
-        'training/avg_episode_length',
-        'training/tie_penalty',
-        'training/lr_actor',
-        'training/lr_critic',
-        'training/episode_block_size',
-        'training/episodes_in_current_block',
-
-        # Loss metrics (CRITICAL for diagnosing training stability)
-        'losses/critic_loss',
-        'losses/actor_loss',
-
-        # Gradient norm metrics (CRITICAL for monitoring learning health)
-        # NEW FIX: Added gradient norm logging to detect vanishing/exploding gradients
-        'gradients/critic_grad_norm',
-        'gradients/actor_grad_norm',
-
-        # PBRS (Potential-Based Reward Shaping)
-        'pbrs/avg_per_episode',
-        'pbrs/annealing_weight',
-
-        # Strategic Reward Shaping (opponent-aware shooting, attack diversity, forcing)
-        'strategic/shots_clear',
-        'strategic/shots_blocked',
-        'strategic/shot_quality_ratio',
-        'strategic/attack_sides_unique',
-        'strategic/attack_diversity_bonus',
-        'strategic/opponent_total_movement',
-        'strategic/opponent_avg_movement',
-        'strategic/forcing_bonus',
-
-        # Self-play configuration and status
-        'selfplay/active',
-        'selfplay/pool_size',
-        'selfplay/weak_ratio_target',
-        'selfplay/anchor_ratio_current',
-        'selfplay/episode_opponent_type_weak',
-        'selfplay/episode_opponent_type_strong',
-        'selfplay/episode_opponent_type_selfplay',
-
-        # Self-play anchor buffer balance (weak vs strong episodes)
-        'selfplay/anchor_weak_episodes',
-        'selfplay/anchor_strong_episodes',
-        'selfplay/anchor_weak_ratio',
-        'selfplay/anchor_strong_ratio',
-        'selfplay/anchor_balance_score',
-
-        # Self-play opponent selection and PFSP metrics
-        'selfplay/opponent_pool_index',
-        'selfplay/opponent_checkpoint_episode',
-        'selfplay/opponent_age_episodes',
-        'selfplay/pfsp_num_opponents_tracked',
-        'selfplay/pfsp_avg_winrate',
-        'selfplay/pfsp_std_winrate',
-        'selfplay/pfsp_min_winrate',
-        'selfplay/pfsp_max_winrate',
-        'selfplay/pfsp_median_winrate',
-        'selfplay/pfsp_diversity_metric',
-
-        # Self-play regression tracking and rollback
-        'selfplay/best_eval_vs_weak',
-        'selfplay/consecutive_eval_drops',
-        'selfplay/rollback_enabled',
-
-        # Evaluation metrics (comprehensive three-way evaluation)
-        # Evaluation vs WEAK opponent (baseline)
-        'eval/weak/win_rate',
-        'eval/weak/win_rate_decisive',
-        'eval/weak/tie_rate',
-        'eval/weak/loss_rate',
-        'eval/weak/avg_reward',
-        'eval/weak/wins',
-        'eval/weak/losses',
-        'eval/weak/ties',
-
-        # Evaluation vs STRONG opponent (training opponent)
-        'eval/strong/win_rate',
-        'eval/strong/win_rate_decisive',
-        'eval/strong/tie_rate',
-        'eval/strong/loss_rate',
-        'eval/strong/avg_reward',
-        'eval/strong/wins',
-        'eval/strong/losses',
-        'eval/strong/ties',
-
-        # Evaluation vs SELF-PLAY opponent (if active)
-        'eval/selfplay/win_rate',
-        'eval/selfplay/win_rate_decisive',
-        'eval/selfplay/tie_rate',
-        'eval/selfplay/loss_rate',
-        'eval/selfplay/avg_reward',
-        'eval/selfplay/wins',
-        'eval/selfplay/losses',
-        'eval/selfplay/ties',
-        'eval/selfplay/opponent_age',
-
-        # Behavioral metrics (CRITICAL for lazy learning detection)
-        'behavior/action_magnitude_avg',
-        'behavior/action_magnitude_max',
-        'behavior/lazy_action_ratio',
-        'behavior/dist_to_puck_avg',
-        'behavior/dist_to_puck_min',
-        'behavior/puck_touches',
-        'behavior/time_near_puck',
-        'behavior/distance_traveled',
-        'behavior/velocity_avg',
-        'behavior/velocity_max',
-
-        # Value function health
-        'values/Q_avg',
-        'values/Q_std',
-        'values/Q_min',
-        'values/Q_max',
-
-        # Shoot/Keep behavior metrics (possession strategy)
-        'behavior/shoot_action_avg',
-        'behavior/shoot_action_when_possess',
-        'behavior/possession_ratio',
-    ]
+    Known metric categories (for reference):
+    - performance/: cumulative_win_rate, wins, losses, ties
+    - rewards/: p1, p2, sparse_only, sparse_ratio
+    - scoring/: goals_scored, goals_conceded
+    - training/: epsilon, eps_per_sec, episode, pbrs_enabled, calls_per_episode,
+                 avg_episode_length, episode_block_size, episodes_in_current_block
+    - losses/: critic_loss, actor_loss
+    - gradients/: critic_grad_norm, actor_grad_norm
+    - pbrs/: avg_per_episode, annealing_weight
+    - vf_reg/: active_ratio, violation_ratio, q_advantage_mean, reg_loss
+    - selfplay/: active, pool_size, weak_ratio_target, anchor_*, pfsp_*, episode_opponent_type_*
+    - eval/weak/: win_rate, win_rate_decisive, tie_rate, loss_rate, avg_reward, wins, losses, ties
+    - eval/strong/: win_rate, win_rate_decisive, tie_rate, loss_rate, avg_reward, wins, losses, ties
+    - eval/selfplay/: win_rate, win_rate_decisive, tie_rate, loss_rate, avg_reward, wins, losses, ties, opponent_age
+    - behavior/: action_magnitude_avg, action_magnitude_max, lazy_action_ratio, dist_to_puck_avg,
+                 dist_to_puck_min, puck_touches, time_near_puck, distance_traveled, velocity_avg,
+                 velocity_max, shoot_action_avg, shoot_action_when_possess, possession_ratio
+    - values/: Q_avg, Q_std, Q_min, Q_max
+    - hacking/: possession_hoarding_ratio, possession_no_shoot_count, pbrs_to_sparse_ratio
+    """
+    return None  # None means fetch ALL metrics
 
 
 def discretize_data(data, max_points=200):
@@ -258,10 +143,8 @@ def format_run_data(run, include_metrics=None, max_chars=100000):
     summary = run.summary
 
     # Determine which metrics to include
-    if include_metrics:
-        metrics_to_fetch = include_metrics
-    else:
-        metrics_to_fetch = get_critical_metrics()
+    # If include_metrics is None, we'll fetch ALL metrics from the run
+    metrics_to_fetch = include_metrics  # None means all
 
     # Fetch history data
     print(f"Fetching run history for: {run.name}")
@@ -298,22 +181,30 @@ def format_run_data(run, include_metrics=None, max_chars=100000):
         if available_metrics:
             print(f"    Sample W&B metrics: {available_metrics[:15]}")
 
-        # Show which requested metrics are actually available
-        available_requested = [m for m in metrics_to_fetch if m in history.columns]
-        missing_requested = [m for m in metrics_to_fetch if m not in history.columns]
-        if available_requested:
-            print(f"  ✓ Found {len(available_requested)} requested metrics")
-        if missing_requested:
-            print(f"    Not found (not logged): {missing_requested[:10]}")
+        # Show metrics availability
+        if metrics_to_fetch is not None:
+            available_requested = [m for m in metrics_to_fetch if m in history.columns]
+            missing_requested = [m for m in metrics_to_fetch if m not in history.columns]
+            if available_requested:
+                print(f"  ✓ Found {len(available_requested)} requested metrics")
+            if missing_requested:
+                print(f"    Not found (not logged): {missing_requested[:10]}")
+        else:
+            print(f"  ✓ Fetching ALL {len(available_metrics)} W&B metrics (no filtering)")
 
     # Organize data by metric (only if history was successfully fetched)
     if history is not None and not history.empty:
         metrics_data = defaultdict(list)
 
-        # Use available metrics if they exist, otherwise use all
-        metrics_to_process = [m for m in metrics_to_fetch if m in history.columns]
-        if not metrics_to_process:
-            print(f"  No requested metrics found. Using all available W&B metrics...")
+        # Determine which metrics to process
+        if metrics_to_fetch is not None:
+            # User specified specific metrics
+            metrics_to_process = [m for m in metrics_to_fetch if m in history.columns]
+            if not metrics_to_process:
+                print(f"  No requested metrics found. Using all available W&B metrics...")
+                metrics_to_process = [col for col in history.columns if '/' in col]
+        else:
+            # Fetch ALL W&B metrics (columns with "/" in name)
             metrics_to_process = [col for col in history.columns if '/' in col]
 
         print(f"  Processing {len(metrics_to_process)} metrics from {len(history)} history rows...")

@@ -131,15 +131,15 @@ Implementation follows the TD3 paper (Fujimoto et al., 2018):
 - Gaussian exploration noise N(0, 0.1)
 - Q-value clipping (soft/hard) to prevent explosion
 
-### Reward Shaping (PBRS V3)
+### Reward Shaping (PBRS V3.1)
 
-Potential-Based Reward Shaping V3 provides **balanced offense/defense incentives** while preserving optimal policy (Ng et al., 1999).
+Potential-Based Reward Shaping V3.1 uses **strong chase + simple math** while preserving optimal policy (Ng et al., 1999).
 
 **Design Philosophy:**
-- THREE components: φ_chase + φ_attack + φ_defense
-- **ASYMMETRIC φ_attack**: Only active in opponent half (no penalty for defensive positions)
-- **FULL φ_chase in our half**: Stationary puck reduction only in opponent half (encourage defensive recovery)
-- **NEW φ_defense**: Reward being between puck and own goal during defensive situations
+- **STRONG φ_chase (W=1.0)**: Agent always races toward the puck
+- **φ_attack (W=1.2)**: Slightly higher weight ensures forward shooting is net positive
+- **NO conditional logic**: Both components always active everywhere
+- **Simple math**: W_ATTACK > W_CHASE guarantees correct shooting incentive
 
 #### Sparse Environment Rewards
 
@@ -149,47 +149,52 @@ Potential-Based Reward Shaping V3 provides **balanced offense/defense incentives
 | **Loss** | -10 | -1.0 | Terminal penalty for conceding a goal |
 | **Tie** | 0 | 0 | No reward for draws |
 
-#### PBRS V3 Potential Components
+#### PBRS V3.1 Potential Components
 
-| Component | Weight | Range | Active When | Description |
-|-----------|--------|-------|-------------|-------------|
-| **φ_chase** | W=0.5 | [-1, 0] | Always | Reward agent proximity to puck. Full strength when moving OR in our half. 30% when stationary in opponent half. |
-| **φ_attack** | W=0.7 | [-1, 0] | Puck in opponent half | Reward puck proximity to opponent goal. **Disabled in our half** to avoid penalizing defense. |
-| **φ_defense** | W=0.3 | [-1, +1] | Puck in our half | Reward being between puck and own goal. Encourages proper defensive positioning. |
+| Component | Weight | Range | Description |
+|-----------|--------|-------|-------------|
+| **φ_chase** | W=1.0 | [-1, 0] | Reward agent proximity to puck. **STRONG**, always active everywhere. |
+| **φ_attack** | W=1.2 | [-1, 0] | Reward puck proximity to opponent goal. Always active. |
 
 **Combined Potential:**
 ```
-φ(s) = W_CHASE × φ_chase + W_ATTACK × φ_attack + W_DEFENSE × φ_defense
-     = 0.5 × chase + 0.7 × attack + 0.3 × defense
+φ(s) = W_CHASE × φ_chase + W_ATTACK × φ_attack
+     = 1.0 × (-dist_to_puck/MAX) + 1.2 × (-dist_puck_to_goal/MAX)
 ```
 
-#### Reward Matrix (V3 Behavior)
+#### Shooting Math (The Key Insight)
 
-| Situation | φ_chase | φ_attack | φ_defense | Net | Result |
-|-----------|---------|----------|-----------|-----|--------|
-| **Chase puck (opponent half)** | + | 0 | 0 | **+** | Encouraged |
-| **Shoot toward opponent goal** | - | + | 0 | **+** | Encouraged |
-| **Chase puck (our half)** | + | 0 | + | **++** | STRONGLY encouraged! |
-| **Good defensive position** | ~ | 0 | + | **+** | Encouraged |
-| **Ignore puck in our half** | 0 | 0 | - | **-** | Penalized |
-| **Camp near stationary puck** | weak | 0 | 0 | **~** | Not rewarded |
+When shooting the puck distance D:
+```
+Forward shot:  Δ = W_ATTACK × (+D/MAX) + W_CHASE × (-D/MAX) = D/MAX × (1.2 - 1.0) = +0.2D ✓
+Backward shot: Δ = W_ATTACK × (-D/MAX) + W_CHASE × (-D/MAX) = D/MAX × (-1.2 - 1.0) = -2.2D ✗
+```
 
-#### Key V3 Improvements
+**W_ATTACK > W_CHASE guarantees forward shooting is always positive!**
 
-1. **Defensive Recovery**: When opponent shoots into our half, φ_chase is FULL strength (not 30%) to encourage chasing
-2. **No Defensive Penalty**: φ_attack = 0 when puck is in our half, so agent isn't penalized for being in defensive situations
-3. **Defensive Positioning**: φ_defense rewards getting between puck and own goal when under attack
+#### Reward Matrix (V3.1 Behavior)
+
+| Action | φ_chase | φ_attack | Net PBRS | Result |
+|--------|---------|----------|----------|--------|
+| **Chase puck** | +1.0 | 0 | **+1.0** | STRONG encourage |
+| **Shoot forward** | -1.0 | +1.2 | **+0.2** | Encouraged |
+| **Shoot backward** | -1.0 | -1.2 | **-2.2** | Heavily penalized |
+| **Puck in our half** | chase active | penalty active | chase dominates | Agent races to puck |
+
+#### Why This Works
+
+1. **Strong chase handles everything**: Defense, interception, ready position
+2. **Puck in our half**: φ_attack penalty creates urgency, strong φ_chase drives agent to puck
+3. **Shooting preserved**: W_ATTACK > W_CHASE ensures forward shots are always net positive
+4. **Simple and robust**: No conditional logic, no edge cases
 
 #### Annealing Strategy
-
-PBRS anneals slowly from 1.0 to minimum weight over training:
 
 | Parameter | Value | Purpose |
 |-----------|-------|---------|
 | `pbrs_anneal_start` | 5000 | Episode to start annealing |
 | `pbrs_anneal_episodes` | 15000 | Duration of annealing phase |
 | `pbrs_min_weight` | 0.1 | Minimum weight (never fully turns off) |
-| `epsilon_reset_at_anneal` | True | Re-enable exploration when annealing starts |
 
 **Timeline (100k training):**
 ```
@@ -200,7 +205,7 @@ Episode 5000-20000:  PBRS weight = 1.0 → 0.1 (gradual fade)
 Episode 20000+:      PBRS weight = 0.1 (minimal guidance retained)
 ```
 
-#### Scaling Derivation
+#### Scaling
 
 | Parameter | Value | Purpose |
 |-----------|-------|---------|
@@ -208,18 +213,8 @@ Episode 20000+:      PBRS weight = 0.1 (minimal guidance retained)
 | `pbrs_scale` | 0.02 | Ensures episode PBRS < sparse reward |
 | `reward_scale` | 0.1 | Maps sparse +/-10 to +/-1 |
 
-#### Complete Reward Formula
-
-```
-r_total = r_sparse × reward_scale + pbrs_scale × weight(episode) × (γ·φ(s') - φ(s))
-        = r_sparse × 0.1          + 0.02       × weight          × (0.99·φ(s') - φ(s))
-```
-
-| Term | Typical Magnitude | Role |
-|------|-------------------|------|
-| Sparse (win/loss) | +/-1.0 | Primary optimization target |
-| PBRS per-step | +/-0.03 | Dense learning signal |
-| PBRS per-episode | +/-1.0 to +/-2.0 | Guides exploration |
+**Max potential range:** 220 (W_CHASE × 1 + W_ATTACK × 1 = 2.2, × 100)
+**Max episode PBRS:** 220 × 0.02 = 4.4 (less than sparse reward of 10)
 
 ### Self-Play
 

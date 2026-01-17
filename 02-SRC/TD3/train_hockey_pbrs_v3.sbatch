@@ -18,32 +18,38 @@ cd /scratch/$SLURM_JOB_ID/02-SRC/TD3
 export WANDB_API_KEY="cc059bf17f0dffb378947bc37398b00eea0d1944"
 
 # ============================================================================
-# TD3 Hockey Training - PBRS V3 Configuration (Balanced Offense/Defense)
+# TD3 Hockey Training - PBRS V3.1 Configuration (Strong Chase, Simple Math)
 # ============================================================================
 #
-# PBRS V3 DESIGN (Balanced Offense/Defense):
-# ------------------------------------------
-# Three-component potential function:
-#   phi(s) = W_CHASE * phi_chase + W_ATTACK * phi_attack + W_DEFENSE * phi_defense
-#          = 0.5 * chase + 0.7 * attack + 0.3 * defense
+# PBRS V3.1 DESIGN (Strong Chase, Simple Math):
+# ---------------------------------------------
+# Two-component potential function (simplified from V3):
+#   phi(s) = W_CHASE * phi_chase + W_ATTACK * phi_attack
+#          = 1.0 * (-dist_to_puck/MAX) + 1.2 * (-dist_puck_to_goal/MAX)
 #
-# KEY V3 IMPROVEMENTS:
-# 1. ASYMMETRIC phi_attack: Only active in opponent half (no defensive penalty)
-# 2. FULL phi_chase in our half: Stationary reduction only in opponent half
-# 3. NEW phi_defense: Rewards being between puck and own goal
+# KEY INSIGHT:
+#   W_ATTACK > W_CHASE ensures forward shooting is ALWAYS net positive
+#   Strong chase (W=1.0) handles defense, interception, ready position
+#
+# SHOOTING MATH:
+#   Forward shot (D):  delta = 1.2*(+D) + 1.0*(-D) = +0.2D  (encouraged)
+#   Backward shot (D): delta = 1.2*(-D) + 1.0*(-D) = -2.2D  (penalized)
 #
 # REWARD MATRIX:
-# | Situation                | chase | attack | defense | Net | Result      |
-# |--------------------------|-------|--------|---------|-----|-------------|
-# | Chase puck (opp half)    | +     | 0      | 0       | +   | Encouraged  |
-# | Shoot toward opp goal    | -     | +      | 0       | +   | Encouraged  |
-# | Chase puck (OUR half)    | +     | 0      | +       | ++  | STRONGLY!   |
-# | Good defensive position  | ~     | 0      | +       | +   | Encouraged  |
-# | Ignore puck in our half  | 0     | 0      | -       | -   | Penalized   |
+# | Action              | phi_chase | phi_attack | Net    | Result           |
+# |---------------------|-----------|------------|--------|------------------|
+# | Chase puck          | +1.0      | 0          | +1.0   | STRONG encourage |
+# | Shoot forward       | -1.0      | +1.2       | +0.2   | Encouraged       |
+# | Shoot backward      | -1.0      | -1.2       | -2.2   | Heavily penalized|
+# | Puck in our half    | active    | penalty    | chase  | Agent races to it|
+#
+# SIMPLIFICATIONS FROM V3:
+#   - Removed phi_defense (strong chase handles it)
+#   - Removed stationary puck reduction (always full chase)
+#   - Removed asymmetric logic (both components always active)
 #
 # EPSILON DECAY:
 #   - Only starts AFTER warmup (not during warmup)
-#   - Keeps exploration high during initial buffer filling
 #
 # ANNEALING TIMELINE (100k episodes):
 #   Episode 0-warmup:    epsilon = initial (no decay)
