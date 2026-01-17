@@ -1,11 +1,11 @@
 """
 PBRS Potential Function Validation Tests
 
-These tests verify the minimal PBRS implementation:
-1. φ_chase only rewards when puck is MOVING (prevents "do nothing" exploit)
-2. φ_defensive provides triangle defense in own half
-3. Terminal potential is forced to 0
-4. Scaling keeps PBRS < sparse rewards
+These tests verify the PBRS implementation with reduced stationary puck weight:
+1. φ_chase rewards proximity to puck (full weight for moving, 30% for stationary)
+2. Terminal potential is forced to 0
+3. Scaling keeps PBRS < sparse rewards
+4. Reduced stationary weight prevents "stand and wait" exploit while guiding approach
 
 Run with: python tests/test_pbrs_potential.py
 """
@@ -23,7 +23,7 @@ from rewards.pbrs import (
     PBRSReward,
     get_potential_components,
     PUCK_MOVING_THRESHOLD,
-    OWN_GOAL,
+    STATIONARY_PUCK_WEIGHT,
     MAX_DISTANCE,
 )
 
@@ -38,24 +38,28 @@ def create_obs(player_pos=(0, 0), puck_pos=(0, 0), puck_vel=(0, 0)):
 
 
 class TestChaseComponent:
-    """Test that φ_chase only rewards when puck is MOVING."""
+    """Test φ_chase with full/reduced weight based on puck movement."""
 
-    def test_stationary_puck_no_reward(self):
-        """Standing next to stationary puck should give ZERO chase reward."""
+    def test_stationary_puck_reduced_reward(self):
+        """Standing next to stationary puck should give REDUCED (30%) reward."""
         # Agent right next to stationary puck
         obs = create_obs(player_pos=(0, 0), puck_pos=(0.1, 0), puck_vel=(0, 0))
         components = get_potential_components(obs)
 
         assert not components['puck_is_moving'], "Puck should be stationary"
-        assert components['phi_chase'] == 0.0, "NO reward for stationary puck!"
+        assert components['weight_applied'] == STATIONARY_PUCK_WEIGHT, "Should use reduced weight"
+        # phi_chase should be 30% of what it would be if moving
+        expected = STATIONARY_PUCK_WEIGHT * components['phi_chase_base']
+        assert abs(components['phi_chase'] - expected) < 1e-6, "Should be 30% of base"
 
-    def test_moving_puck_rewards_proximity(self):
-        """Being close to a MOVING puck should give reward."""
+    def test_moving_puck_full_reward(self):
+        """Being close to a MOVING puck should give FULL reward."""
         # Agent near moving puck
         obs = create_obs(player_pos=(0, 0), puck_pos=(0.5, 0), puck_vel=(1.0, 0))
         components = get_potential_components(obs)
 
         assert components['puck_is_moving'], "Puck should be moving"
+        assert components['weight_applied'] == 1.0, "Should use full weight"
         assert components['phi_chase'] < 0, "Chase component should be negative (closer = less negative)"
         assert components['phi_chase'] > -0.1, "Close to puck = small negative"
 
@@ -71,102 +75,108 @@ class TestChaseComponent:
 
     def test_threshold_boundary(self):
         """Puck at exactly the moving threshold."""
-        # Just below threshold - should be 0
+        # Just below threshold - should use reduced weight
         obs_slow = create_obs(puck_pos=(1, 0), puck_vel=(0.29, 0))
-        # Just above threshold - should be active
+        # Just above threshold - should use full weight
         obs_fast = create_obs(puck_pos=(1, 0), puck_vel=(0.31, 0))
 
         comp_slow = get_potential_components(obs_slow)
         comp_fast = get_potential_components(obs_fast)
 
-        assert comp_slow['phi_chase'] == 0.0, "Below threshold = no reward"
-        assert comp_fast['phi_chase'] < 0.0, "Above threshold = active"
+        assert comp_slow['weight_applied'] == STATIONARY_PUCK_WEIGHT, "Below threshold = reduced"
+        assert comp_fast['weight_applied'] == 1.0, "Above threshold = full"
+        # Fast should be more negative (full weight)
+        assert comp_fast['phi_chase'] < comp_slow['phi_chase'], "Moving puck = stronger signal"
+
+    def test_stationary_vs_moving_magnitude_ratio(self):
+        """Stationary puck should give exactly 30% of moving puck reward."""
+        obs_stationary = create_obs(player_pos=(0, 0), puck_pos=(3, 0), puck_vel=(0, 0))
+        obs_moving = create_obs(player_pos=(0, 0), puck_pos=(3, 0), puck_vel=(1, 0))
+
+        phi_stationary = compute_potential(obs_stationary)
+        phi_moving = compute_potential(obs_moving)
+
+        ratio = phi_stationary / phi_moving
+        assert abs(ratio - STATIONARY_PUCK_WEIGHT) < 1e-6, \
+            f"Ratio should be {STATIONARY_PUCK_WEIGHT}, got {ratio}"
 
 
 class TestDoNothingExploit:
-    """Test that the 'stand next to stationary puck' exploit is prevented."""
+    """Test that the 'stand and wait' exploit is prevented via reduced magnitude."""
 
-    def test_no_reward_for_standing_near_stationary_puck(self):
-        """The exact scenario that was causing problems: walk up and freeze."""
-        # Puck spawns at (-2, 0), agent walks to (-2.1, 0) and stops
+    def test_reduced_reward_for_stationary_puck(self):
+        """Stationary puck gives reduced (30%) reward - guides approach but not exploit."""
+        # Puck spawns at (-2, 0), agent at (-2.1, 0)
         obs = create_obs(player_pos=(-2.1, 0), puck_pos=(-2, 0), puck_vel=(0, 0))
         components = get_potential_components(obs)
 
-        assert components['phi_chase'] == 0.0, "CRITICAL: No reward for standing near stationary puck!"
+        # Should have reduced (30%) chase reward, not zero
+        assert components['phi_chase'] < 0, "Should have some negative phi (close to puck)"
+        assert components['weight_applied'] == STATIONARY_PUCK_WEIGHT, "Should use reduced weight"
 
-    def test_hitting_puck_enables_chase_reward(self):
-        """After hitting puck (it moves), agent can get chase reward."""
+    def test_hitting_puck_increases_chase_signal(self):
+        """After hitting puck (it moves), chase signal increases (full weight)."""
         # Before hit: puck stationary
         obs_before = create_obs(player_pos=(-2.1, 0), puck_pos=(-2, 0), puck_vel=(0, 0))
         # After hit: puck moving
         obs_after = create_obs(player_pos=(-2.1, 0), puck_pos=(-1.5, 0), puck_vel=(2, 0))
 
-        phi_before = get_potential_components(obs_before)['phi_chase']
-        phi_after = get_potential_components(obs_after)['phi_chase']
+        comp_before = get_potential_components(obs_before)
+        comp_after = get_potential_components(obs_after)
 
-        assert phi_before == 0.0, "No chase reward before hitting"
-        assert phi_after < 0.0, "Chase reward activates after puck moves"
+        assert comp_before['weight_applied'] == STATIONARY_PUCK_WEIGHT, "Before = reduced"
+        assert comp_after['weight_applied'] == 1.0, "After = full"
+        # After hitting, the signal is stronger (full weight) even though distance changed
+        assert comp_after['phi_chase'] < comp_before['phi_chase'], "Moving puck = stronger signal"
 
     def test_standing_still_no_pbrs_accumulation(self):
-        """Standing still should not accumulate PBRS rewards."""
-        # Same state twice (standing still)
+        """Standing still gives zero PBRS (F = γφ' - φ = 0 when φ' = φ)."""
+        # Same state twice (standing still, puck not moving)
         obs = create_obs(player_pos=(-2.1, 0), puck_pos=(-2, 0), puck_vel=(0, 0))
 
+        phi = compute_potential(obs)
         pbrs = compute_pbrs(obs, obs, done=False)
 
-        # PBRS = gamma * phi(s') - phi(s) = 0.99 * phi - phi = -0.01 * phi
-        # But phi = 0 (only defensive might be active), so PBRS should be very small
-        assert abs(pbrs) < 1.0, f"Standing still should give minimal PBRS, got {pbrs}"
+        # phi is non-zero (reduced weight), but PBRS is 0 for same state
+        assert phi < 0, f"Potential should be negative (close to puck), got {phi}"
+        assert abs(pbrs) < 1e-6, f"PBRS should be ~0 when nothing changes, got {pbrs}"
 
+    def test_approaching_stationary_puck_gives_positive_pbrs(self):
+        """Moving TOWARD stationary puck should give positive PBRS."""
+        # Agent starts far, moves closer to stationary puck
+        obs_far = create_obs(player_pos=(-4, 0), puck_pos=(-2, 0), puck_vel=(0, 0))
+        obs_close = create_obs(player_pos=(-2.5, 0), puck_pos=(-2, 0), puck_vel=(0, 0))
 
-class TestDefensivePositioning:
-    """Test triangle defense when puck in own half."""
+        pbrs = compute_pbrs(obs_far, obs_close, done=False)
 
-    def test_defense_active_in_own_half(self):
-        """Defensive component should be active when puck in own half."""
-        obs = create_obs(player_pos=(0, 0), puck_pos=(-2, 0))
-        components = get_potential_components(obs)
+        # PBRS should be positive (rewarding approach)
+        assert pbrs > 0, f"Approaching puck should give positive PBRS, got {pbrs}"
+        # But it should be small (reduced weight)
+        assert pbrs < 0.5, f"PBRS should be small (reduced weight), got {pbrs}"
 
-        assert components['puck_in_own_half'], "Puck at x=-2 is in own half"
-        assert components['phi_defensive'] != 0, "Defense should be active in own half"
+    def test_walk_to_puck_total_reward_small(self):
+        """Walking to stationary puck should give small total PBRS (not exploit-worthy)."""
+        # Agent walks from far corner to puck
+        obs_start = create_obs(player_pos=(-4, 2), puck_pos=(-2, 0), puck_vel=(0, 0))
+        obs_end = create_obs(player_pos=(-2.1, 0), puck_pos=(-2, 0), puck_vel=(0, 0))
 
-    def test_defense_inactive_in_opponent_half(self):
-        """Defensive component should be zero when puck in opponent half."""
-        obs = create_obs(player_pos=(0, 0), puck_pos=(2, 0))
-        components = get_potential_components(obs)
+        phi_start = compute_potential(obs_start)
+        phi_end = compute_potential(obs_end)
 
-        assert not components['puck_in_own_half'], "Puck at x=2 is in opponent half"
-        assert components['phi_defensive'] == 0, "Defense should be inactive in opponent half"
+        # Total PBRS for walking to puck (telescoping sum)
+        # F_total ≈ γ*phi_end - phi_start (ignoring intermediate steps)
+        total_pbrs = 0.99 * phi_end - phi_start
 
-    def test_good_defensive_position(self):
-        """Good defensive position should have smaller penalty."""
-        puck_pos = (-3, 0)
-        ideal_pos = OWN_GOAL + 0.4 * (np.array(puck_pos) - OWN_GOAL)
+        print(f"phi_start: {phi_start}, phi_end: {phi_end}")
+        print(f"Total PBRS for walking to stationary puck: {total_pbrs}")
 
-        obs_good = create_obs(player_pos=ideal_pos, puck_pos=puck_pos)
-        obs_bad = create_obs(player_pos=(0, 2), puck_pos=puck_pos)
+        # With pbrs_scale=0.02, this becomes ~0.02 * total_pbrs
+        scaled_pbrs = 0.02 * total_pbrs
+        print(f"Scaled PBRS: {scaled_pbrs}")
 
-        comp_good = get_potential_components(obs_good)
-        comp_bad = get_potential_components(obs_bad)
-
-        # At ideal position, error should be ~0, so phi_defensive ~0
-        assert comp_good['phi_defensive'] > -0.01, "Perfect position = ~0 penalty"
-        assert comp_good['phi_defensive'] > comp_bad['phi_defensive'], \
-            "Good position should have smaller penalty"
-
-    def test_defensive_position_calculation(self):
-        """Verify the ideal defensive position is calculated correctly."""
-        puck_pos = (-2, 0)
-        obs = create_obs(puck_pos=puck_pos)
-        components = get_potential_components(obs)
-
-        # Ideal = OWN_GOAL + 0.4 * (puck - OWN_GOAL)
-        # OWN_GOAL = (-4.5, 0), puck = (-2, 0)
-        # Ideal = (-4.5, 0) + 0.4 * (2.5, 0) = (-4.5 + 1.0, 0) = (-3.5, 0)
-        expected_ideal = np.array([-3.5, 0])
-
-        assert np.allclose(components['ideal_defensive_pos'], expected_ideal), \
-            f"Ideal pos should be {expected_ideal}, got {components['ideal_defensive_pos']}"
+        # Should be positive but small (not worth exploiting vs sparse ±10)
+        assert total_pbrs > 0, "Walking toward puck should be positive"
+        assert scaled_pbrs < 0.3, f"Scaled PBRS should be small, got {scaled_pbrs}"
 
 
 class TestTerminalPotential:
@@ -198,12 +208,10 @@ class TestScaling:
 
     def test_max_potential_range(self):
         """Verify the potential range is as expected."""
-        # Worst case: far from moving puck in own half, bad defensive position
+        # Worst case: far from moving puck
         obs_worst = create_obs(player_pos=(4, 2), puck_pos=(-4, 0), puck_vel=(1, 0))
-        # Best case: on top of moving puck, perfect defensive position
-        puck_pos = (-2, 0)
-        ideal_pos = OWN_GOAL + 0.4 * (np.array(puck_pos) - OWN_GOAL)
-        obs_best = create_obs(player_pos=ideal_pos, puck_pos=puck_pos, puck_vel=(1, 0))
+        # Best case: on top of moving puck
+        obs_best = create_obs(player_pos=(0, 0), puck_pos=(0.1, 0), puck_vel=(1, 0))
 
         phi_worst = compute_potential(obs_worst)
         phi_best = compute_potential(obs_best)
@@ -212,19 +220,16 @@ class TestScaling:
         print(f"phi_best: {phi_best}")
         print(f"Range: {phi_best - phi_worst}")
 
-        # phi_worst should be very negative (far from puck + bad defense)
-        # phi_best should be much less negative (near puck + good defense)
-        assert phi_worst < -100, f"Worst case should be < -100, got {phi_worst}"
-        assert phi_best > -20, f"Best case should be > -20, got {phi_best}"
+        # φ_chase only: range is [-100, 0]
+        assert phi_worst < -80, f"Worst case should be < -80, got {phi_worst}"
+        assert phi_best > -5, f"Best case should be > -5, got {phi_best}"
         assert phi_best > phi_worst, "Best should be better than worst"
 
     def test_episode_shaping_less_than_sparse(self):
         """Total episode PBRS should be less than sparse reward magnitude."""
-        # Max potential change
+        # Max potential change (φ_chase only now)
         obs_worst = create_obs(player_pos=(4, 2), puck_pos=(-4, 0), puck_vel=(1, 0))
-        puck_pos = (-2, 0)
-        ideal_pos = OWN_GOAL + 0.4 * (np.array(puck_pos) - OWN_GOAL)
-        obs_best = create_obs(player_pos=ideal_pos, puck_pos=puck_pos, puck_vel=(1, 0))
+        obs_best = create_obs(player_pos=(0, 0), puck_pos=(0.1, 0), puck_vel=(1, 0))
 
         phi_worst = compute_potential(obs_worst)
         phi_best = compute_potential(obs_best)
@@ -261,6 +266,97 @@ class TestPBRSRewardClass:
         assert weight == 1.0, "Constant weight should always be 1.0"
 
 
+class TestIndependentAnnealing:
+    """Test the new independent annealing functionality."""
+
+    def test_no_annealing_when_disabled(self):
+        """When anneal_start=0, no annealing should happen."""
+        shaper = PBRSReward(pbrs_scale=0.03, anneal_start=0)
+
+        assert shaper.get_annealing_weight(episode=0) == 1.0
+        assert shaper.get_annealing_weight(episode=5000) == 1.0
+        assert shaper.get_annealing_weight(episode=100000) == 1.0
+
+    def test_annealing_before_start(self):
+        """Before anneal_start, weight should be 1.0."""
+        shaper = PBRSReward(pbrs_scale=0.03, anneal_start=3000, anneal_episodes=3000)
+
+        assert shaper.get_annealing_weight(episode=0) == 1.0
+        assert shaper.get_annealing_weight(episode=1000) == 1.0
+        assert shaper.get_annealing_weight(episode=2999) == 1.0
+
+    def test_annealing_at_start(self):
+        """At exactly anneal_start, weight should be 1.0."""
+        shaper = PBRSReward(pbrs_scale=0.03, anneal_start=3000, anneal_episodes=3000)
+
+        # At start, we're 0 episodes into annealing, so weight = 1.0
+        weight = shaper.get_annealing_weight(episode=3000)
+        assert weight == 1.0, f"At anneal_start, weight should be 1.0, got {weight}"
+
+    def test_annealing_midpoint(self):
+        """At midpoint, weight should be ~0.5."""
+        shaper = PBRSReward(pbrs_scale=0.03, anneal_start=3000, anneal_episodes=3000)
+
+        # Midpoint: episode 4500 = 1500 into 3000 duration = 50%
+        weight = shaper.get_annealing_weight(episode=4500)
+        assert abs(weight - 0.5) < 0.01, f"At midpoint, weight should be ~0.5, got {weight}"
+
+    def test_annealing_at_end(self):
+        """At anneal_start + anneal_episodes, weight should be 0."""
+        shaper = PBRSReward(pbrs_scale=0.03, anneal_start=3000, anneal_episodes=3000)
+
+        weight = shaper.get_annealing_weight(episode=6000)
+        assert weight == 0.0, f"At end of annealing, weight should be 0.0, got {weight}"
+
+    def test_annealing_after_end(self):
+        """After annealing completes, weight should remain 0."""
+        shaper = PBRSReward(pbrs_scale=0.03, anneal_start=3000, anneal_episodes=3000)
+
+        assert shaper.get_annealing_weight(episode=7000) == 0.0
+        assert shaper.get_annealing_weight(episode=100000) == 0.0
+
+    def test_annealing_affects_reward(self):
+        """Annealing should scale the actual reward."""
+        shaper = PBRSReward(pbrs_scale=0.03, anneal_start=3000, anneal_episodes=3000)
+        obs = create_obs(player_pos=(0, 0), puck_pos=(3, 0), puck_vel=(1, 0))
+        obs_next = create_obs(player_pos=(1, 0), puck_pos=(3, 0), puck_vel=(1, 0))
+
+        # Before annealing: full reward
+        reward_before = shaper.compute(obs, obs_next, done=False, episode=2000)
+
+        # At midpoint: half reward
+        reward_mid = shaper.compute(obs, obs_next, done=False, episode=4500)
+
+        # After annealing: zero reward
+        reward_after = shaper.compute(obs, obs_next, done=False, episode=7000)
+
+        print(f"Reward before: {reward_before}")
+        print(f"Reward mid: {reward_mid}")
+        print(f"Reward after: {reward_after}")
+
+        assert abs(reward_mid - reward_before * 0.5) < 0.001, \
+            f"Midpoint reward should be half of full reward"
+        assert reward_after == 0.0, \
+            f"After annealing, reward should be 0, got {reward_after}"
+
+    def test_independent_annealing_priority(self):
+        """Independent annealing should take priority over legacy self-play annealing."""
+        # Set up both independent and legacy annealing
+        shaper = PBRSReward(
+            pbrs_scale=0.03,
+            anneal_start=1000,       # Independent: start at 1000
+            anneal_episodes=1000,    # Independent: end at 2000
+            constant_weight=False,   # Legacy: enable
+            annealing_episodes=5000  # Legacy: would take longer
+        )
+        shaper.set_self_play_start(500)  # Legacy: would start at 500
+
+        # Independent annealing should be used (starts at 1000, not 500)
+        assert shaper.get_annealing_weight(episode=750) == 1.0, "Before independent start"
+        assert shaper.get_annealing_weight(episode=1500) == 0.5, "Midpoint of independent"
+        assert shaper.get_annealing_weight(episode=2500) == 0.0, "After independent end"
+
+
 class TestNoEncodedStrategy:
     """Test that we're NOT encoding specific strategies."""
 
@@ -274,7 +370,6 @@ class TestNoEncodedStrategy:
         obs_side = create_obs(puck_pos=(0, 0), puck_vel=(0, 2))
 
         # All should have similar phi_chase (only depends on distance, not direction)
-        # The puck is at same position in all cases
         comp_toward = get_potential_components(obs_toward)
         comp_away = get_potential_components(obs_away)
         comp_side = get_potential_components(obs_side)
@@ -299,6 +394,18 @@ class TestNoEncodedStrategy:
         assert abs(comp_near['phi_chase'] - comp_far['phi_chase']) < 0.01, \
             "Puck-to-goal distance should not affect reward"
 
+    def test_no_defensive_positioning_reward(self):
+        """There should be NO defensive positioning reward - only chase component."""
+        # Puck in own half - used to trigger defensive component
+        obs = create_obs(player_pos=(0, 0), puck_pos=(-2, 0), puck_vel=(0, 0))
+        components = get_potential_components(obs)
+
+        # With puck stationary, phi should be reduced (30%) chase only, no defensive
+        assert components['weight_applied'] == STATIONARY_PUCK_WEIGHT, "Should use reduced weight"
+        # phi_chase and phi_total should be equal (no separate defensive component)
+        assert components['phi_chase'] == components['phi_total'], \
+            "Only chase component should exist (no defensive)"
+
 
 def run_all_tests():
     """Run all tests without pytest."""
@@ -307,10 +414,10 @@ def run_all_tests():
     test_classes = [
         TestChaseComponent,
         TestDoNothingExploit,
-        TestDefensivePositioning,
         TestTerminalPotential,
         TestScaling,
         TestPBRSRewardClass,
+        TestIndependentAnnealing,
         TestNoEncodedStrategy,
     ]
 

@@ -573,38 +573,52 @@ class TD3Agent:
     #########################################################
     def _generate_active_action(self, states):
         #########################################################
-        # this function generates an active action based on the state of the game.
-        #########################################################
-        # it's acutally very simple, just move towards puck by using the vector between the agent and the puck.
+        # Generate an "active" action for comparison with passive (zero) action.
+        #
+        # KEY FIX: When agent is CLOSE to puck, "active" means "hit it hard"
+        # (high magnitude action), not just "move toward it" (which would be ~zero).
+        #
+        # When FAR from puck: active = move toward puck
+        # When CLOSE to puck: active = high magnitude action (toward opponent goal)
         #########################################################
         p1_x = states[:, 0]
         p1_y = states[:, 1]
         puck_x = states[:, 12]
         puck_y = states[:, 13]
-        
+
         dx = puck_x - p1_x
         dy = puck_y - p1_y
         dist = torch.sqrt(dx**2 + dy**2 + 1e-6)
-        
-        dx_norm = dx / dist
-        dy_norm = dy / dist
-            
-        active_magnitude = 0.6
-        #########################################################
+
+        # Threshold: if agent is within 0.5 units of puck, use "hit" action instead
+        CLOSE_TO_PUCK_THRESHOLD = 0.5
+        is_close = dist < CLOSE_TO_PUCK_THRESHOLD
+
         actions = torch.zeros((states.shape[0], self._action_n), device=states.device)
-        actions[:, 0] = dx_norm * active_magnitude
-        actions[:, 1] = dy_norm * active_magnitude
-        actions[:, 2] = 0.0
 
+        # For states FAR from puck: move toward puck
+        far_mask = ~is_close
+        if far_mask.any():
+            dx_norm = dx[far_mask] / dist[far_mask]
+            dy_norm = dy[far_mask] / dist[far_mask]
+            actions[far_mask, 0] = dx_norm * 0.6
+            actions[far_mask, 1] = dy_norm * 0.6
 
+        # For states CLOSE to puck: high magnitude action toward opponent goal
+        # This represents "hitting" the puck rather than just positioning
+        if is_close.any():
+            # Direction toward opponent goal (positive x direction)
+            # Use high magnitude to represent an actual hit
+            actions[is_close, 0] = 0.8  # Strong movement toward opponent side
+            actions[is_close, 1] = 0.0  # Straight ahead
+            # Also encourage shooting (action[3] > 0 = shoot)
+            if self._action_n > 3:
+                actions[is_close, 3] = 0.5  # Encourage shooting when close to puck
 
-        if self._action_n > 3:
-            actions[:, 3] = 0.0
-        #ahve to stay within bounds
+        # Clamp to action space bounds
         actions = actions.clamp(
             torch.from_numpy(self._action_space.low).to(states.device),
             torch.from_numpy(self._action_space.high).to(states.device)
         )
-        
+
         return actions
-        #########################################################

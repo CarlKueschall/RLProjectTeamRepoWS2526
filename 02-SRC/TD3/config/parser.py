@@ -86,11 +86,32 @@ def parse_args():
     parser.add_argument('--epsilon_reset_value', type=float, default=0.5,
                         help='Epsilon value to reset to when self-play starts (default: 0.5)')
 
-    # PBRS constant weight (disable annealing during self-play)
+    # PBRS Annealing (independent of self-play)
+    parser.add_argument('--pbrs_anneal_start', type=int, default=0,
+                        help='Episode to start PBRS annealing (0=never anneal, default: 0). '
+                             'Recommended: 5000 for 100k training to let PBRS guide early learning.')
+    parser.add_argument('--pbrs_anneal_episodes', type=int, default=15000,
+                        help='Episodes over which to anneal PBRS (default: 15000, slow annealing). '
+                             'After anneal_start + anneal_episodes, PBRS weight = min_weight.')
+    parser.add_argument('--pbrs_min_weight', type=float, default=0.1,
+                        help='Minimum PBRS weight after annealing (default: 0.1). '
+                             'Retains attack incentive to prevent shooting backward exploit.')
+
+    # Epsilon reset at PBRS annealing (re-explore when reward landscape changes)
+    parser.add_argument('--epsilon_reset_at_anneal', action='store_true', default=False,
+                        help='Reset epsilon when PBRS annealing starts (default: False). '
+                             'Forces re-exploration when reward landscape changes.')
+    parser.add_argument('--no_epsilon_reset_at_anneal', dest='epsilon_reset_at_anneal', action='store_false',
+                        help='Do not reset epsilon when PBRS annealing starts')
+    parser.add_argument('--epsilon_anneal_reset_value', type=float, default=0.4,
+                        help='Epsilon value to reset to when PBRS annealing starts (default: 0.4)')
+
+    # Legacy: PBRS constant weight (for self-play annealing, kept for compatibility)
     parser.add_argument('--pbrs_constant_weight', action='store_true', default=True,
-                        help='Keep PBRS weight constant instead of annealing (default: True)')
+                        help='Keep PBRS weight constant during self-play (default: True). '
+                             'Note: Use --pbrs_anneal_start for independent annealing.')
     parser.add_argument('--no_pbrs_constant_weight', dest='pbrs_constant_weight', action='store_false',
-                        help='Enable PBRS annealing during self-play')
+                        help='Enable PBRS annealing during self-play (legacy, prefer --pbrs_anneal_start)')
 
     parser.add_argument('--q_clip', type=float, default=25.0,
                         help='Maximum absolute Q-value (clip to [-q_clip, q_clip], default: 25.0, tighter bounds prevent explosion)')

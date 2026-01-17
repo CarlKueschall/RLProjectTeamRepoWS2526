@@ -18,24 +18,26 @@ mkdir -p logs
 # REWARD SCALING DERIVATION:
 # -------------------------
 # Sparse rewards: ±10 (win/loss)
-# PBRS potential range: ~105 (worst to best state)
+# PBRS potential range: ~79 (worst to best state)
 #
 # With reward_scale=0.1 and pbrs_scale=0.02:
 #   - Sparse in training: 10 × 0.1 = ±1.0
-#   - Max episode PBRS: 105 × 0.02 = 2.1
+#   - Max episode PBRS: 79 × 0.02 = 1.58
 #   - Per-step PBRS: typically ±0.02 to ±0.1
 #
-# Ratio check: 2.1 / 10 = 0.21 (PBRS < sparse) ✓
+# Ratio check: 1.58 / 10 = 0.16 (PBRS < sparse) ✓
 #
-# PBRS COMPONENTS:
-# ----------------
-# φ_chase: Reward proximity to MOVING puck only (prevents "do nothing" exploit)
-# φ_defensive: Triangle defense positioning when puck in own half
+# PBRS COMPONENT (single, minimal):
+# ---------------------------------
+# φ_chase: Reward proximity to MOVING puck only
+#   - Prevents "do nothing" exploit (no reward for stationary puck)
+#   - Helps defense (intercept shots) and offense (chase rebounds)
 #
 # NOT ENCODED (let agent discover):
 # - Shot direction (bank shots, angles)
 # - Puck-to-goal distance
 # - Possession rewards
+# - Defensive positioning (was causing "wait" behavior)
 # ============================================================================
 
 singularity exec --nv ~/containers/hockey.sif python3 train_hockey.py \

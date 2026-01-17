@@ -154,6 +154,11 @@ def train(args):
                 "pfsp_mode": args.pfsp_mode if args.use_pfsp else None,
                 "episode_block_size": args.episode_block_size,
                 "pbrs_scale": args.pbrs_scale if args.reward_shaping else 0.0,
+                "pbrs_anneal_start": args.pbrs_anneal_start,
+                "pbrs_anneal_episodes": args.pbrs_anneal_episodes,
+                "pbrs_min_weight": args.pbrs_min_weight,
+                "epsilon_reset_at_anneal": args.epsilon_reset_at_anneal,
+                "epsilon_anneal_reset_value": args.epsilon_anneal_reset_value,
                 "vf_reg_lambda": args.vf_reg_lambda,
             },
             tags=["TD3", "Hockey", args.mode, args.opponent]
@@ -161,6 +166,7 @@ def train(args):
                   + (["PFSP"] if args.use_pfsp else [])
                   + (["episode-blocking"] if args.episode_block_size > 1 else [])
                   + (["scaled-pbrs"] if args.reward_shaping and args.pbrs_scale != 1.0 else [])
+                  + (["pbrs-annealing"] if args.pbrs_anneal_start > 0 else [])
         )
 
     # Track starting episode (for resuming from checkpoint)
@@ -309,16 +315,32 @@ def train(args):
         np.random.seed(args.seed + 1)
 
     #########################################################
-    # Initialize reward shaper (PBRS)
+    # Initialize reward shaper (PBRS V2 - with attack incentive)
     #########################################################
     pbrs_shaper = PBRSReward(
         gamma=args.gamma,
-        annealing_episodes=5000,
         pbrs_scale=args.pbrs_scale,
-        constant_weight=args.pbrs_constant_weight  # Keep PBRS active during self-play
+        # Independent annealing (preferred)
+        anneal_start=args.pbrs_anneal_start,
+        anneal_episodes=args.pbrs_anneal_episodes,
+        min_weight=args.pbrs_min_weight,
+        # Legacy self-play annealing (for compatibility)
+        constant_weight=args.pbrs_constant_weight,
+        annealing_episodes=5000,
     )
     if args.reward_shaping and args.self_play_start > 0:
         pbrs_shaper.set_self_play_start(args.self_play_start)
+
+    # Log annealing configuration
+    if args.pbrs_anneal_start > 0:
+        print(f"[PBRS V2] Annealing enabled: start={args.pbrs_anneal_start}, "
+              f"duration={args.pbrs_anneal_episodes}, "
+              f"min_weight={args.pbrs_min_weight}")
+        print(f"[PBRS V2] Epsilon reset at anneal: {args.epsilon_reset_at_anneal} "
+              f"(reset to {args.epsilon_anneal_reset_value})")
+
+    # Track if epsilon reset has been triggered
+    epsilon_anneal_reset_done = False
 
     #########################################################
     # Initialize self-play manager
@@ -485,6 +507,21 @@ def train(args):
             opponent_type = args.opponent if args.opponent in ['weak', 'strong'] else None
 
         #########################################################
+        # PBRS V2: Epsilon reset when annealing starts
+        # When reward landscape changes, re-enable exploration
+        #########################################################
+        if (args.epsilon_reset_at_anneal and
+            args.pbrs_anneal_start > 0 and
+            i_episode == args.pbrs_anneal_start and
+            not epsilon_anneal_reset_done):
+            old_eps = agent._eps
+            agent._eps = args.epsilon_anneal_reset_value
+            epsilon_anneal_reset_done = True
+            print(f"\n[EPSILON RESET] PBRS annealing started at episode {i_episode}!")
+            print(f"  Epsilon reset: {old_eps:.3f} → {args.epsilon_anneal_reset_value:.3f}")
+            print(f"  Re-enabling exploration for new reward landscape\n")
+
+        #########################################################
         # Episode loop
         #########################################################
         episode_reward_p1 = 0  # Shaped reward (with PBRS + bonuses)
@@ -636,11 +673,13 @@ def train(args):
             agent2.train(iter_fit=args.iter_fit)
 
         #########################################################
-        # Decay exploration
+        # Decay exploration (ONLY after warmup completes)
+        # During warmup, keep epsilon at initial value for maximum exploration
         #########################################################
-        agent.decay_epsilon()
-        if agent2:
-            agent2.decay_epsilon()
+        if i_episode >= args.warmup_episodes:
+            agent.decay_epsilon()
+            if agent2:
+                agent2.decay_epsilon()
 
         #########################################################
         # Update tracker
@@ -722,8 +761,14 @@ def train(args):
 
             if args.reward_shaping:
                 log_metrics["pbrs/avg_per_episode"] = tracker.get_avg_pbrs()
-                if self_play_manager.active:
-                    log_metrics["pbrs/annealing_weight"] = pbrs_shaper.get_annealing_weight(i_episode)
+                # Always log annealing weight (works with independent annealing or self-play annealing)
+                current_annealing_weight = pbrs_shaper.get_annealing_weight(i_episode)
+                log_metrics["pbrs/annealing_weight"] = current_annealing_weight
+
+                # Debug: Print annealing weight every 500 episodes
+                if i_episode % 500 == 0 and args.pbrs_anneal_start > 0:
+                    print(f"[PBRS DEBUG] Episode {i_episode}: annealing_weight={current_annealing_weight:.4f} "
+                          f"(start={pbrs_shaper.anneal_start}, duration={pbrs_shaper.anneal_episodes})")
 
             #########################################################
             # VF Regularization Metrics (Anti-Lazy Learning)
