@@ -96,6 +96,10 @@ def parse_args():
     parser.add_argument('--pbrs_min_weight', type=float, default=0.1,
                         help='Minimum PBRS weight after annealing (default: 0.1). '
                              'Retains attack incentive to prevent shooting backward exploit.')
+    parser.add_argument('--pbrs_cross_weight', type=float, default=0.4,
+                        help='Weight for cross-court bonus component (default: 0.4). '
+                             'Rewards shooting away from opponent position to encourage alternating shots. '
+                             'Set to 0 to disable cross-court bonus.')
 
     # Epsilon reset at PBRS annealing (re-explore when reward landscape changes)
     parser.add_argument('--epsilon_reset_at_anneal', action='store_true', default=False,

@@ -2,34 +2,44 @@
 AI Usage Declaration:
 This file was developed with assistance from AI tools.
 
-Potential-Based Reward Shaping (PBRS) V3.1 for Air Hockey.
+Potential-Based Reward Shaping (PBRS) V3.2 for Air Hockey.
 
 Based on research from:
 - Ng et al. (1999): Policy invariance under reward transformations
 - Wiewiora (2003): Potential-based shaping and Q-value initialization
 
-Design Philosophy (V3.1 - Strong Chase, Simple Math):
-- TWO components: φ_chase + φ_attack (simplified from V3)
+Design Philosophy (V3.2 - Cross-Court Bonus):
+- THREE components: φ_chase + φ_attack + φ_cross
 - STRONG φ_chase (W=1.0): Agent always races toward the puck
-- φ_attack (W=1.2): Slightly higher to ensure forward shooting is positive
-- NO conditional logic: Both components always active everywhere
-- NO stationary puck reduction: Always full chase incentive
+- φ_attack (W=1.2): Ensures forward shooting is net positive
+- φ_cross (W=0.4): NEW - Cross-court bonus for alternating shots
 
-Key Insight:
-- Strong chase handles EVERYTHING: defense, interception, ready position
-- The only constraint: W_ATTACK > W_CHASE so shooting forward is net positive
+Key Insight (V3.2 - Cross-Court):
+- When shooting, reward puck being far from opponent's y-position
+- This encourages alternating shots (upper/lower corners)
+- Tires out opponent by forcing them to move
+- Similar to table tennis strategy
+
+Cross-Court Math:
+  φ_cross = (|puck_y - opponent_y| / TABLE_WIDTH) × tanh(puck_vel_x)
+  - Only active when puck moving toward opponent goal (vel_x > 0)
+  - Smooth activation via tanh (no discontinuity)
+  - Higher reward when opponent is out of position
 
 Shooting Math:
   Forward shot:  Δ = W_ATTACK × (+D) + W_CHASE × (-D) = D × (1.2 - 1.0) = +0.2D ✓
   Backward shot: Δ = W_ATTACK × (-D) + W_CHASE × (-D) = D × (-1.2 - 1.0) = -2.2D ✗
 
-Reward Matrix (V3.1):
-| Action              | φ_chase | φ_attack | Net    | Result            |
-|---------------------|---------|----------|--------|-------------------|
-| Chase puck          | +1.0    | 0        | +1.0   | STRONG encourage  |
-| Shoot forward       | -1.0    | +1.2     | +0.2   | Encouraged        |
-| Shoot backward      | -1.0    | -1.2     | -2.2   | Heavily penalized |
-| Puck in our half    | active  | penalty  | chase  | Agent races to it |
+Reward Matrix (V3.2):
+| Action              | φ_chase | φ_attack | φ_cross | Net      | Result              |
+|---------------------|---------|----------|---------|----------|---------------------|
+| Chase puck          | +1.0    | 0        | 0       | +1.0     | STRONG encourage    |
+| Shoot forward       | -1.0    | +1.2     | +0.4*   | +0.6     | Encouraged          |
+| Cross-court shot    | -1.0    | +1.2     | +0.4    | +0.6     | BONUS for cross     |
+| Shoot at opponent   | -1.0    | +1.2     | 0       | +0.2     | Less rewarded       |
+| Shoot backward      | -1.0    | -1.2     | 0       | -2.2     | Heavily penalized   |
+
+* φ_cross bonus depends on opponent position relative to puck trajectory
 
 Mathematical guarantee: F(s,s') = γφ(s') - φ(s) preserves optimal policy.
 """
@@ -43,18 +53,19 @@ TABLE_WIDTH = 5.0    # -2.5 to +2.5 in y
 MAX_DISTANCE = np.sqrt(TABLE_LENGTH**2 + TABLE_WIDTH**2)  # ~10.3
 OPPONENT_GOAL = np.array([4.5, 0.0])
 
-# Component weights (V3.1 design - Strong Chase, Simple Math)
+# Component weights (V3.2 design - Strong Chase + Cross-Court)
 # Key constraint: W_ATTACK > W_CHASE ensures forward shooting is net positive
 W_CHASE = 1.0    # Agent → Puck (STRONG, always active everywhere)
 W_ATTACK = 1.2   # Puck → Opponent Goal (always active, slightly higher than chase)
+W_CROSS = 0.4    # Cross-court bonus (reward puck away from opponent's y-position)
 
 # Scaling
 EPISODE_SCALE = 100.0
 
 
-def compute_potential(obs, gamma=0.99):
+def compute_potential(obs, gamma=0.99, w_cross=None):
     """
-    Two-component potential function for air hockey (V3.1 - Strong Chase, Simple Math).
+    Three-component potential function for air hockey (V3.2 - Cross-Court).
 
     Components:
     1. φ_chase (W=1.0): Reward agent proximity to puck
@@ -65,24 +76,30 @@ def compute_potential(obs, gamma=0.99):
        - Always active everywhere
        - W_ATTACK > W_CHASE ensures forward shooting is net positive
 
-    Combined: φ(s) = W_CHASE × φ_chase + W_ATTACK × φ_attack
+    3. φ_cross (W=0.4): Cross-court bonus (NEW in V3.2)
+       - Reward puck being far from opponent's y-position when moving toward goal
+       - Uses smooth tanh activation based on puck velocity toward goal
+       - Encourages alternating shots to tire out opponent
 
-    Shooting math:
-      Forward shot (D distance):  Δ = 1.2×(+D) + 1.0×(-D) = +0.2D ✓
-      Backward shot (D distance): Δ = 1.2×(-D) + 1.0×(-D) = -2.2D ✗
+    Combined: φ(s) = W_CHASE × φ_chase + W_ATTACK × φ_attack + W_CROSS × φ_cross
 
     Arguments:
         obs: 18-dimensional observation
             [0:2]   - player position (x, y)
+            [6:8]   - opponent position (x, y)
             [12:14] - puck position (x, y)
+            [14:16] - puck velocity (vx, vy)
         gamma: Discount factor (must match training gamma)
+        w_cross: Override weight for cross-court component (None = use W_CROSS)
 
     Returns:
         phi: Potential value for this state
     """
     # === Extract state ===
     player_pos = np.array([obs[0], obs[1]])
+    opponent_y = obs[7]  # Opponent's y-position
     puck_pos = np.array([obs[12], obs[13]])
+    puck_vel_x = obs[14]  # Puck velocity toward opponent goal
 
     # === φ_chase: Agent proximity to puck (STRONG, always active) ===
     dist_to_puck = np.linalg.norm(player_pos - puck_pos)
@@ -92,17 +109,36 @@ def compute_potential(obs, gamma=0.99):
     dist_puck_to_opp_goal = np.linalg.norm(puck_pos - OPPONENT_GOAL)
     phi_attack = -dist_puck_to_opp_goal / MAX_DISTANCE  # Range: [-1, 0]
 
+    # === φ_cross: Cross-court bonus (smooth activation) ===
+    # Only active when puck is moving toward opponent goal
+    # Uses tanh for smooth activation (no discontinuity)
+    puck_y = obs[13]
+    y_separation = abs(puck_y - opponent_y)  # How far puck is from opponent's y
+    y_separation_normalized = y_separation / TABLE_WIDTH  # Range: [0, 1]
+
+    # Smooth activation: tanh(puck_vel_x) ranges from -1 to 1
+    # When puck moving toward opponent goal (vel_x > 0): positive activation
+    # When puck moving away (vel_x < 0): zero or negative (clamped to 0)
+    velocity_activation = np.tanh(puck_vel_x)  # Smooth, bounded [-1, 1]
+    velocity_activation = max(0.0, velocity_activation)  # Only reward forward motion
+
+    # φ_cross: higher when puck is far from opponent AND moving toward goal
+    phi_cross = y_separation_normalized * velocity_activation  # Range: [0, 1]
+
     # === Combine with weights ===
-    phi_combined = W_CHASE * phi_chase + W_ATTACK * phi_attack
+    cross_weight = w_cross if w_cross is not None else W_CROSS
+    phi_combined = (W_CHASE * phi_chase +
+                    W_ATTACK * phi_attack +
+                    cross_weight * phi_cross)
 
     # === Scale for episode ===
     phi = EPISODE_SCALE * phi_combined
-    # Range: [-220, 0] (W_CHASE × 1 + W_ATTACK × 1 = 2.2, × 100 = 220)
+    # Range: approx [-220, +40] with cross-court bonus
 
     return phi
 
 
-def compute_pbrs(obs, obs_next, done, gamma=0.99):
+def compute_pbrs(obs, obs_next, done, gamma=0.99, w_cross=None):
     """
     Compute Potential-Based Reward Shaping with episodic correction.
 
@@ -116,17 +152,18 @@ def compute_pbrs(obs, obs_next, done, gamma=0.99):
         obs_next: Next observation (18 dims)
         done: Boolean, True if episode terminated/truncated
         gamma: Discount factor (must match training gamma)
+        w_cross: Override weight for cross-court component (None = use W_CROSS)
 
     Returns:
         shaping_reward: F(s,a,s') = γ·φ(s') - φ(s) (with terminal correction)
     """
-    phi_current = compute_potential(obs, gamma)
+    phi_current = compute_potential(obs, gamma, w_cross=w_cross)
 
     # CRITICAL: Force terminal potential to 0
     if done:
         phi_next = 0.0
     else:
-        phi_next = compute_potential(obs_next, gamma)
+        phi_next = compute_potential(obs_next, gamma, w_cross=w_cross)
 
     shaping_reward = gamma * phi_next - phi_current
 
@@ -137,14 +174,18 @@ class PBRSReward:
     """
     Potential-Based Reward Shaping wrapper with independent annealing support.
 
-    V2 Features:
-    - Two-component potential (chase + attack)
+    V3.2 Features:
+    - Three-component potential (chase + attack + cross-court)
+    - Cross-court bonus to encourage alternating shots
     - Minimum weight floor (never fully removes PBRS)
     - Slow annealing support
 
     Usage:
         # No annealing (constant PBRS)
         shaper = PBRSReward(gamma=0.99, pbrs_scale=0.02)
+
+        # With cross-court bonus
+        shaper = PBRSReward(gamma=0.99, pbrs_scale=0.02, w_cross=0.4)
 
         # With slow annealing and minimum weight
         shaper = PBRSReward(gamma=0.99, pbrs_scale=0.02,
@@ -156,7 +197,7 @@ class PBRSReward:
 
     def __init__(self, gamma=0.99, pbrs_scale=0.02,
                  anneal_start=0, anneal_episodes=15000,
-                 min_weight=0.0,
+                 min_weight=0.0, w_cross=None,
                  constant_weight=True, annealing_episodes=5000):
         """
         Initialize PBRS reward shaper.
@@ -164,6 +205,7 @@ class PBRSReward:
         Arguments:
             gamma: Discount factor
             pbrs_scale: Global scaling factor (default: 0.02)
+            w_cross: Weight for cross-court component (None = use default W_CROSS=0.4)
 
             Independent annealing (recommended):
             anneal_start: Episode to start annealing (0=never anneal)
@@ -176,6 +218,7 @@ class PBRSReward:
         """
         self.gamma = gamma
         self.pbrs_scale = pbrs_scale
+        self.w_cross = w_cross  # None means use default W_CROSS
 
         # Independent annealing (new, preferred)
         self.anneal_start = anneal_start
@@ -209,7 +252,8 @@ class PBRSReward:
         Returns:
             shaped_reward: Additional reward term (add to sparse reward)
         """
-        shaped_reward = compute_pbrs(obs_curr, obs_next, done, self.gamma)
+        shaped_reward = compute_pbrs(obs_curr, obs_next, done, self.gamma,
+                                     w_cross=self.w_cross)
 
         # Apply global PBRS scaling
         shaped_reward *= self.pbrs_scale
@@ -259,14 +303,17 @@ class PBRSReward:
 
 # === Utility functions for debugging and analysis ===
 
-def get_potential_components(obs):
+def get_potential_components(obs, w_cross=None):
     """
-    Get individual potential components for debugging (V3.1 - simplified).
+    Get individual potential components for debugging (V3.2 - with cross-court).
 
     Returns dict with each component's contribution.
     """
     player_pos = np.array([obs[0], obs[1]])
+    opponent_y = obs[7]  # Opponent's y-position
     puck_pos = np.array([obs[12], obs[13]])
+    puck_y = obs[13]
+    puck_vel_x = obs[14]
 
     # Chase component (always full strength)
     dist_to_puck = np.linalg.norm(player_pos - puck_pos)
@@ -276,8 +323,17 @@ def get_potential_components(obs):
     dist_puck_to_opp_goal = np.linalg.norm(puck_pos - OPPONENT_GOAL)
     phi_attack = -dist_puck_to_opp_goal / MAX_DISTANCE
 
+    # Cross-court component
+    y_separation = abs(puck_y - opponent_y)
+    y_separation_normalized = y_separation / TABLE_WIDTH
+    velocity_activation = max(0.0, np.tanh(puck_vel_x))
+    phi_cross = y_separation_normalized * velocity_activation
+
     # Combined potential
-    phi_combined = W_CHASE * phi_chase + W_ATTACK * phi_attack
+    cross_weight = w_cross if w_cross is not None else W_CROSS
+    phi_combined = (W_CHASE * phi_chase +
+                    W_ATTACK * phi_attack +
+                    cross_weight * phi_cross)
 
     return {
         # Chase component
@@ -288,10 +344,20 @@ def get_potential_components(obs):
         'phi_attack': phi_attack,
         'phi_attack_weighted': W_ATTACK * phi_attack,
         'dist_puck_to_opp_goal': dist_puck_to_opp_goal,
+        # Cross-court component
+        'phi_cross': phi_cross,
+        'phi_cross_weighted': cross_weight * phi_cross,
+        'y_separation': y_separation,
+        'y_separation_normalized': y_separation_normalized,
+        'velocity_activation': velocity_activation,
+        'puck_vel_x': puck_vel_x,
+        'opponent_y': opponent_y,
+        'puck_y': puck_y,
         # Combined
         'phi_combined': phi_combined,
         'phi_scaled': EPISODE_SCALE * phi_combined,
         # Weights
         'W_CHASE': W_CHASE,
         'W_ATTACK': W_ATTACK,
+        'W_CROSS': cross_weight,
     }

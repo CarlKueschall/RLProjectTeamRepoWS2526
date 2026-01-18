@@ -315,11 +315,12 @@ def train(args):
         np.random.seed(args.seed + 1)
 
     #########################################################
-    # Initialize reward shaper (PBRS V2 - with attack incentive)
+    # Initialize reward shaper (PBRS V3.2 - with cross-court bonus)
     #########################################################
     pbrs_shaper = PBRSReward(
         gamma=args.gamma,
         pbrs_scale=args.pbrs_scale,
+        w_cross=args.pbrs_cross_weight,  # Cross-court bonus weight
         # Independent annealing (preferred)
         anneal_start=args.pbrs_anneal_start,
         anneal_episodes=args.pbrs_anneal_episodes,
