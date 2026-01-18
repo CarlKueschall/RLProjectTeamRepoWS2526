@@ -197,7 +197,7 @@ class PBRSReward:
 
     def __init__(self, gamma=0.99, pbrs_scale=0.02,
                  anneal_start=0, anneal_episodes=15000,
-                 min_weight=0.0, w_cross=None,
+                 min_weight=0.0, w_cross=None, pbrs_clip=None,
                  constant_weight=True, annealing_episodes=5000):
         """
         Initialize PBRS reward shaper.
@@ -206,6 +206,8 @@ class PBRSReward:
             gamma: Discount factor
             pbrs_scale: Global scaling factor (default: 0.02)
             w_cross: Weight for cross-court component (None = use default W_CROSS=0.4)
+            pbrs_clip: Max absolute value for per-step PBRS (None = no clipping).
+                       Recommended: 1.0-2.0 to prevent reward signal inconsistencies.
 
             Independent annealing (recommended):
             anneal_start: Episode to start annealing (0=never anneal)
@@ -219,6 +221,7 @@ class PBRSReward:
         self.gamma = gamma
         self.pbrs_scale = pbrs_scale
         self.w_cross = w_cross  # None means use default W_CROSS
+        self.pbrs_clip = pbrs_clip  # Per-step clipping (after scaling)
 
         # Independent annealing (new, preferred)
         self.anneal_start = anneal_start
@@ -236,7 +239,7 @@ class PBRSReward:
 
     def compute(self, obs_curr, obs_next, done, episode=None):
         """
-        Compute PBRS reward with optional annealing.
+        Compute PBRS reward with optional annealing and clipping.
 
         Annealing priority:
         1. Independent annealing (if anneal_start > 0)
@@ -261,6 +264,10 @@ class PBRSReward:
         # Apply annealing weight
         weight = self.get_annealing_weight(episode)
         shaped_reward *= weight
+
+        # Apply per-step clipping to prevent reward explosion
+        if self.pbrs_clip is not None:
+            shaped_reward = np.clip(shaped_reward, -self.pbrs_clip, self.pbrs_clip)
 
         return shaped_reward
 

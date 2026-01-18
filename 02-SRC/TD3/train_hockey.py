@@ -317,10 +317,12 @@ def train(args):
     #########################################################
     # Initialize reward shaper (PBRS V3.2 - with cross-court bonus)
     #########################################################
+    pbrs_clip = args.pbrs_clip if args.pbrs_clip > 0 else None  # 0 = disable clipping
     pbrs_shaper = PBRSReward(
         gamma=args.gamma,
         pbrs_scale=args.pbrs_scale,
         w_cross=args.pbrs_cross_weight,  # Cross-court bonus weight
+        pbrs_clip=pbrs_clip,  # Per-step PBRS clipping
         # Independent annealing (preferred)
         anneal_start=args.pbrs_anneal_start,
         anneal_episodes=args.pbrs_anneal_episodes,

@@ -100,6 +100,10 @@ def parse_args():
                         help='Weight for cross-court bonus component (default: 0.4). '
                              'Rewards shooting away from opponent position to encourage alternating shots. '
                              'Set to 0 to disable cross-court bonus.')
+    parser.add_argument('--pbrs_clip', type=float, default=1.0,
+                        help='Max absolute value for per-step PBRS reward (default: 1.0). '
+                             'Prevents reward signal inconsistencies from large potential changes. '
+                             'Set to 0 to disable clipping.')
 
     # Epsilon reset at PBRS annealing (re-explore when reward landscape changes)
     parser.add_argument('--epsilon_reset_at_anneal', action='store_true', default=False,
