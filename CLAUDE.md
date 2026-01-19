@@ -40,9 +40,6 @@ python3 train_hockey.py --mode NORMAL --opponent weak --seed 42
 cd DreamerV3
 python3 train_hockey.py --opponent weak --seed 42
 
-# Training with PBRS disabled
-python3 train_hockey.py --opponent weak --no_pbrs
-
 # Training with custom hyperparameters
 python3 train_hockey.py --opponent weak \
     --lr_world 3e-4 --lr_actor 8e-5 --lr_critic 1e-4 \
@@ -51,7 +48,7 @@ python3 train_hockey.py --opponent weak \
 # Disable W&B for local testing
 python3 train_hockey.py --opponent weak --no_wandb --gradient_steps 10000
 
-# Full configuration example
+# Full configuration example (with auxiliary tasks - enabled by default)
 python3 train_hockey.py \
     --opponent weak \
     --seed 42 \
@@ -63,8 +60,7 @@ python3 train_hockey.py \
     --lr_actor 0.00008 \
     --lr_critic 0.0001 \
     --entropy_scale 0.003 \
-    --use_pbrs \
-    --pbrs_scale 0.03 \
+    --gradient_clip 100 \
     --gif_interval 10000
 ```
 
@@ -224,10 +220,14 @@ bash autorestart.sh --server-url <URL> --server-port <PORT> \
   - `computeLambdaValues()`: TD(λ) returns
   - `Moments`: Percentile-based value normalization
   - `sequentialModel1D()`: MLP builder
+  - `TwoHotSymlog`: Discretized reward/value prediction for sparse signals
 
-**Reward Shaping** (`rewards/`):
+**Auxiliary Tasks** (in `networks.py` and `dreamer.py`):
 
-- **`pbrs.py`**: Same PBRS as TD3 (policy-invariant shaping)
+- **`GoalPredictionHead`**: Binary classification predicting if goal will occur in next K steps
+- **`DistanceHead`**: Regression predicting puck-to-goal distance
+- **`ShotQualityHead`**: Regression predicting offensive opportunity quality
+- These help the world model learn goal-relevant representations without corrupting the reward signal
 
 **Visualization** (`visualization/`):
 
@@ -270,10 +270,10 @@ bash autorestart.sh --server-url <URL> --server-port <PORT> \
 2. **Main Loop** (per iteration):
    - **Gradient Updates** (replay_ratio times):
      - Sample sequence batch from buffer
-     - Train world model (reconstruction, reward, KL losses)
+     - Train world model (reconstruction, reward, KL, auxiliary tasks)
      - Train actor-critic in imagination (lambda returns)
    - **Environment Interaction**: Run episode, add to buffer
-3. **Evaluation**: Periodic eval episodes without PBRS
+3. **Evaluation**: Periodic eval episodes
 4. **GIF Recording**: Periodic gameplay visualization for W&B
 
 ### Observation Handling
@@ -314,6 +314,8 @@ Multiple checkpoint formats supported:
 
 - **RSSM World Model**: Recurrent state space model with deterministic (GRU) + stochastic (categorical) states
 - **Categorical Latents**: 16 variables × 16 classes = 256-dim stochastic state (vs Gaussian in v1/v2)
+- **Two-Hot Symlog**: Discretized reward/value prediction that handles sparse rewards (goals)
+- **Auxiliary Tasks**: Goal prediction, distance, and shot quality heads improve latent representations
 - **Free Nats**: KL loss has threshold below which it's not penalized (prevents posterior collapse)
 - **Lambda Returns**: TD(λ) for value targets in imagination
 - **Value Normalization**: Percentile-based moments for stable advantage computation
@@ -357,6 +359,7 @@ Key scenarios to test:
 
 **DreamerV3 Metrics**:
 - World model: `world/loss`, `world/recon_loss`, `world/reward_loss`, `world/kl_loss`
+- Auxiliary tasks: `world/aux_goal_loss`, `world/aux_distance_loss`, `world/aux_quality_loss`
 - Behavior: `behavior/actor_loss`, `behavior/critic_loss`, `behavior/entropy`, `behavior/advantages`
 - Stats: `stats/win_rate`, `stats/mean_reward`, `stats/buffer_size`
 - Evaluation: `eval/win_rate`, `eval/gif_*` (gameplay GIFs)

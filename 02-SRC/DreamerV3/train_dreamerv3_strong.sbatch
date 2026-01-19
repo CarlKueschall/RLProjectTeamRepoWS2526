@@ -60,11 +60,6 @@ singularity exec --nv ~/containers/hockey.sif python3 train_hockey.py \
     --free_nats 1.0 \
     --gradient_clip 100 \
     \
-    --use_pbrs \
-    --pbrs_scale 0.03 \
-    --pbrs_w_chase 0.5 \
-    --pbrs_w_attack 1.0 \
-    \
     --buffer_capacity 100000 \
     \
     --checkpoint_interval 5000 \

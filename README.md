@@ -247,9 +247,6 @@ cd 02-SRC/DreamerV3
 # Basic training against weak opponent
 python train_hockey.py --opponent weak --seed 42
 
-# Training with PBRS disabled
-python train_hockey.py --opponent weak --no_pbrs
-
 # Training with custom hyperparameters
 python train_hockey.py \
     --opponent weak \
@@ -262,7 +259,7 @@ python train_hockey.py \
     --batch_size 32 \
     --batch_length 32
 
-# Full configuration example
+# Full configuration example (auxiliary tasks enabled by default)
 python train_hockey.py \
     --opponent weak \
     --seed 42 \
@@ -280,8 +277,7 @@ python train_hockey.py \
     --lr_critic 0.0001 \
     --discount 0.997 \
     --entropy_scale 0.003 \
-    --use_pbrs \
-    --pbrs_scale 0.03 \
+    --gradient_clip 100 \
     --checkpoint_interval 5000 \
     --eval_interval 1000 \
     --gif_interval 10000 \
@@ -292,8 +288,9 @@ python train_hockey.py \
 
 - **World Model**: RSSM with categorical latents (16x16 = 256 dim stochastic state)
 - **Imagination Training**: Actor-critic trained entirely in latent space rollouts
+- **Two-Hot Symlog**: Discretized reward/value prediction for sparse reward handling
+- **Auxiliary Tasks**: Goal prediction, distance, and shot quality heads improve representations
 - **MLP Architecture**: Simple encoder/decoder for 18-dim observations
-- **PBRS Integration**: Optional dense reward shaping for faster exploration
 - **GIF Recording**: Periodic gameplay GIFs logged to W&B
 
 ### File Structure
@@ -302,13 +299,11 @@ python train_hockey.py \
 02-SRC/DreamerV3/
 ├── train_hockey.py          # Main training script
 ├── dreamer.py               # Dreamer agent (world model + behavior)
-├── networks.py              # Neural network components
+├── networks.py              # Neural network components (incl. auxiliary task heads)
 ├── buffer.py                # Replay buffer for sequences
-├── utils.py                 # Helpers (lambda returns, moments, etc.)
+├── utils.py                 # Helpers (lambda returns, moments, TwoHotSymlog)
 ├── configs/
 │   └── hockey.yml           # Default configuration
-├── rewards/
-│   └── pbrs.py              # Potential-Based Reward Shaping
 └── visualization/
     ├── gif_recorder.py      # GIF recording for W&B
     └── frame_capture.py     # Frame capture utilities
@@ -348,6 +343,7 @@ python train_hockey.py \
 
 Training logs to Weights & Biases with:
 - **World Model**: reconstruction loss, reward loss, KL divergence
+- **Auxiliary Tasks**: goal prediction loss, distance loss, shot quality loss
 - **Behavior**: actor loss, critic loss, entropy, advantages
 - **Stats**: win rate, episode rewards, buffer size
 - **Visualization**: Periodic gameplay GIFs

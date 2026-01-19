@@ -82,33 +82,37 @@ selfPlayStart: 0                 # Episode to start self-play (0 = disabled)
                                  # Not yet implemented in simplified version
 
 # -----------------------------------------------------------------------------
-# PBRS (Potential-Based Reward Shaping)
+# AUXILIARY TASKS (World Model Representation Learning)
 # -----------------------------------------------------------------------------
-# PBRS adds dense reward signal to guide exploration without changing
-# the optimal policy (proven by Ng et al. 1999).
+# Auxiliary tasks help the world model learn goal-relevant representations
+# without corrupting the reward signal.
 #
-# Formula: F(s,s') = gamma * phi(s') - phi(s)
+# DreamerV3 is designed to handle sparse rewards via imagination. Instead of
+# using PBRS (which corrupts rewards), we use auxiliary prediction tasks to
+# improve the latent representations directly.
 #
-# Our potential function has two components:
-#   phi_chase:  Rewards agent proximity to puck (pulls agent toward puck)
-#   phi_attack: Rewards puck proximity to goal (pulls puck toward goal)
+# Three complementary tasks at different abstraction levels:
+#   1. Goal Prediction:   "Will a goal happen in next K steps?" (binary)
+#   2. Puck-Goal Distance: "How far is puck from opponent goal?" (regression)
+#   3. Shot Quality:      "How good is current scoring opportunity?" (regression)
 #
-# Why it helps DreamerV3:
-#   - World model learns meaningful reward dynamics (not just sparse terminals)
-#   - Imagination produces non-trivial reward predictions
-#   - Policy gets gradient signal even without scoring
-#
-# Weight constraint: W_ATTACK > W_CHASE ensures forward shooting is net positive
+# These tasks force the latent state to encode scoring-relevant features
+# without changing what the reward predictor needs to learn.
 # -----------------------------------------------------------------------------
 
-usePBRS: True                    # Enable PBRS reward shaping
-pbrsScale: 0.03                  # Global scale for shaping rewards
-                                 # Keep small so shaped << sparse (±10 for win/loss)
-                                 # 0.03 means max episode shaping ~3-4 (less than sparse 10)
+useAuxiliaryTasks: True          # Enable auxiliary prediction tasks
+                                 # Recommended: True (helps world model learn goal dynamics)
 
-pbrsWChase: 0.5                  # Weight for chase component (agent -> puck)
-pbrsWAttack: 1.0                 # Weight for attack component (puck -> goal)
-                                 # W_ATTACK > W_CHASE ensures shooting is rewarded
+auxTaskScale: 1.0                # Weight multiplier for auxiliary losses
+                                 # 1.0 = equal weight to main world model losses
+                                 # Reduce if auxiliary tasks dominate training
+
+goalPredictionHorizon: 15        # Look-ahead window for goal prediction task
+                                 # "Will a goal happen in next K steps?"
+                                 # 15 steps ≈ 1-2 seconds of gameplay
+
+auxHiddenSize: 128               # Hidden layer size for auxiliary task heads
+                                 # Smaller than main networks (256) since simpler tasks
 
 # -----------------------------------------------------------------------------
 # LOGGING (Weights & Biases)

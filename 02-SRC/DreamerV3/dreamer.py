@@ -11,12 +11,16 @@ This file was developed with assistance from Claude Code.
 import torch
 import torch.nn as nn
 from torch.distributions import kl_divergence, Independent, OneHotCategoricalStraightThrough, Normal
-import numpy as np
 import os
 
-from networks import RecurrentModel, PriorNet, PosteriorNet, RewardModel, ContinueModel, EncoderMLP, DecoderMLP, Actor, Critic
+from networks import (
+    RecurrentModel, PriorNet, PosteriorNet, RewardModel, ContinueModel,
+    EncoderMLP, DecoderMLP, Actor, Critic,
+    GoalPredictionHead, DistanceHead, ShotQualityHead  # Auxiliary task heads
+)
 from utils import computeLambdaValues, Moments, TwoHotSymlog, symlog
 from buffer import ReplayBuffer
+import torch.nn.functional as F
 
 
 class Dreamer:
@@ -68,6 +72,26 @@ class Dreamer:
         self.actor = Actor(self.fullStateSize, actionSize, actionLow, actionHigh, device, config.actor).to(device)
         self.critic = Critic(self.fullStateSize, config.critic).to(device)
 
+        # =================================================================
+        # Auxiliary Task Heads
+        # =================================================================
+        # These help the world model learn goal-relevant representations
+        # without corrupting the reward signal.
+        #
+        # Task 1: Goal Prediction - "Will a goal happen in next K steps?"
+        # Task 2: Puck-Goal Distance - "How far is puck from scoring zone?"
+        # Task 3: Shot Quality - "How good is current scoring opportunity?"
+        # =================================================================
+        self.useAuxiliaryTasks = getattr(config, 'useAuxiliaryTasks', True)
+        self.auxTaskScale = getattr(config, 'auxTaskScale', 1.0)
+        self.goalPredictionHorizon = getattr(config, 'goalPredictionHorizon', 15)  # Look ahead K steps
+
+        if self.useAuxiliaryTasks:
+            auxHiddenSize = getattr(config, 'auxHiddenSize', 128)
+            self.goalPredictor = GoalPredictionHead(self.fullStateSize, auxHiddenSize).to(device)
+            self.puckGoalDistPredictor = DistanceHead(self.fullStateSize, auxHiddenSize).to(device)
+            self.shotQualityPredictor = ShotQualityHead(self.fullStateSize, auxHiddenSize).to(device)
+
         # Replay buffer
         self.buffer = ReplayBuffer(observationSize, actionSize, config.buffer, device)
 
@@ -93,6 +117,14 @@ class Dreamer:
         )
         if config.useContinuationPrediction:
             self.worldModelParameters += list(self.continuePredictor.parameters())
+
+        # Add auxiliary task parameters
+        if self.useAuxiliaryTasks:
+            self.worldModelParameters += (
+                list(self.goalPredictor.parameters()) +
+                list(self.puckGoalDistPredictor.parameters()) +
+                list(self.shotQualityPredictor.parameters())
+            )
 
         # Optimizers
         self.worldModelOptimizer = torch.optim.Adam(self.worldModelParameters, lr=config.worldModelLR)
@@ -215,6 +247,67 @@ class Dreamer:
             continueLoss = -continueDist.log_prob(1 - data.dones[:, 1:].squeeze(-1)).mean()
             worldModelLoss += continueLoss
 
+        # =================================================================
+        # Auxiliary Task Training
+        # =================================================================
+        # These tasks improve world model representations for goal prediction
+        # without corrupting the reward signal.
+        # =================================================================
+        auxLosses = {}
+        if self.useAuxiliaryTasks:
+            observations = data.observations  # (B, T, 18)
+
+            # --- Task 1: Goal Prediction ---
+            # "Will a goal be scored in the next K steps?"
+            # Target: 1 if any |reward| > threshold in next K steps, 0 otherwise
+            rewards_for_goal = data.rewards[:, 1:].squeeze(-1)  # (B, T-1)
+            goalHorizon = min(self.goalPredictionHorizon, rewards_for_goal.shape[1])
+
+            # Compute "goal in next K steps" for each timestep
+            goalTargets = torch.zeros_like(rewards_for_goal)
+            for t in range(rewards_for_goal.shape[1]):
+                endIdx = min(t + goalHorizon, rewards_for_goal.shape[1])
+                futureRewards = rewards_for_goal[:, t:endIdx]
+                goalTargets[:, t] = (futureRewards.abs() > 5.0).any(dim=1).float()
+
+            # Predict from latent states
+            goalLogits = self.goalPredictor(fullStates.view(-1, self.fullStateSize))
+            goalLogits = goalLogits.view(batchSize, batchLength - 1)
+            goalLoss = F.binary_cross_entropy_with_logits(goalLogits, goalTargets)
+            auxLosses['goal'] = goalLoss
+
+            # --- Task 2: Puck-Goal Distance ---
+            # "How far is the puck from the opponent's goal?"
+            # Hockey coords: opponent goal at x ≈ +2.5, y ∈ [-0.5, 0.5]
+            puckPos = observations[:, 1:, 12:14]  # (B, T-1, 2) - puck x, y
+            opponentGoalCenter = torch.tensor([2.5, 0.0], device=self.device)
+            puckGoalDist = (puckPos - opponentGoalCenter).norm(dim=-1)  # (B, T-1)
+
+            puckGoalDistPred = self.puckGoalDistPredictor(fullStates.view(-1, self.fullStateSize))
+            puckGoalDistPred = puckGoalDistPred.view(batchSize, batchLength - 1)
+            puckGoalDistLoss = F.mse_loss(puckGoalDistPred, puckGoalDist)
+            auxLosses['puck_goal_dist'] = puckGoalDistLoss
+
+            # --- Task 3: Shot Quality ---
+            # Combines position and velocity into a scoring opportunity metric
+            # High quality = puck close to goal AND moving toward it
+            puckVelX = observations[:, 1:, 14]  # (B, T-1) - puck x velocity
+
+            # Shot quality: higher when puck is close to goal (x near 2.5) and moving toward it (vx > 0)
+            # Normalized to roughly [0, 1] range
+            distanceComponent = torch.clamp(1.0 - puckGoalDist / 3.0, 0.0, 1.0)  # Closer = higher
+            velocityComponent = torch.clamp(puckVelX / 2.0 + 0.5, 0.0, 1.0)  # Moving right = higher
+            shotQualityTarget = distanceComponent * velocityComponent  # (B, T-1)
+
+            shotQualityPred = self.shotQualityPredictor(fullStates.view(-1, self.fullStateSize))
+            shotQualityPred = shotQualityPred.view(batchSize, batchLength - 1)
+            shotQualityLoss = F.mse_loss(torch.sigmoid(shotQualityPred), shotQualityTarget)
+            auxLosses['shot_quality'] = shotQualityLoss
+
+            # Add weighted auxiliary losses to world model loss
+            totalAuxLoss = self.auxTaskScale * (goalLoss + puckGoalDistLoss + shotQualityLoss)
+            worldModelLoss = worldModelLoss + totalAuxLoss
+
         # Backprop
         self.worldModelOptimizer.zero_grad()
         worldModelLoss.backward()
@@ -266,7 +359,7 @@ class Dreamer:
             sparse_actual_mean = 0.0
             sparse_sign_accuracy = 0.0
 
-        # Non-sparse (dense/PBRS) reward prediction
+        # Non-sparse reward prediction (near-zero rewards)
         nonsparse_mask = ~sparse_mask
         if nonsparse_mask.sum() > 0:
             nonsparse_pred_error = rewardPredError[nonsparse_mask].mean().item()
@@ -337,6 +430,43 @@ class Dreamer:
             actualContinue = 1 - data.dones[:, 1:].squeeze(-1)
             metrics["world/continue_pred_mean"] = continueProb.mean().item()
             metrics["world/continue_actual_mean"] = actualContinue.mean().item()
+
+        # Auxiliary task metrics (if enabled)
+        if self.useAuxiliaryTasks:
+            # Losses
+            metrics["aux/goal_loss"] = auxLosses['goal'].item()
+            metrics["aux/puck_goal_dist_loss"] = auxLosses['puck_goal_dist'].item()
+            metrics["aux/shot_quality_loss"] = auxLosses['shot_quality'].item()
+            metrics["aux/total_loss"] = totalAuxLoss.item()
+
+            # Goal prediction accuracy
+            with torch.no_grad():
+                goalPred = torch.sigmoid(goalLogits) > 0.5
+                goalAccuracy = (goalPred == goalTargets).float().mean().item()
+                goalPositiveRate = goalTargets.mean().item()  # How often goals actually occur
+                goalPredPositiveRate = (torch.sigmoid(goalLogits) > 0.5).float().mean().item()
+
+            metrics["aux/goal_accuracy"] = goalAccuracy
+            metrics["aux/goal_positive_rate"] = goalPositiveRate  # Ground truth rate
+            metrics["aux/goal_pred_positive_rate"] = goalPredPositiveRate  # Predicted rate
+
+            # Distance prediction accuracy
+            with torch.no_grad():
+                distError = (puckGoalDistPred - puckGoalDist).abs().mean().item()
+                distActualMean = puckGoalDist.mean().item()
+                distPredMean = puckGoalDistPred.mean().item()
+
+            metrics["aux/puck_goal_dist_error"] = distError
+            metrics["aux/puck_goal_dist_actual_mean"] = distActualMean
+            metrics["aux/puck_goal_dist_pred_mean"] = distPredMean
+
+            # Shot quality prediction
+            with torch.no_grad():
+                shotQualityActualMean = shotQualityTarget.mean().item()
+                shotQualityPredMean = torch.sigmoid(shotQualityPred).mean().item()
+
+            metrics["aux/shot_quality_actual_mean"] = shotQualityActualMean
+            metrics["aux/shot_quality_pred_mean"] = shotQualityPredMean
 
         return fullStates.view(-1, self.fullStateSize).detach(), metrics
 
@@ -585,6 +715,12 @@ class Dreamer:
         if self.config.useContinuationPrediction:
             checkpoint['continuePredictor'] = self.continuePredictor.state_dict()
 
+        # Save auxiliary task heads
+        if self.useAuxiliaryTasks:
+            checkpoint['goalPredictor'] = self.goalPredictor.state_dict()
+            checkpoint['puckGoalDistPredictor'] = self.puckGoalDistPredictor.state_dict()
+            checkpoint['shotQualityPredictor'] = self.shotQualityPredictor.state_dict()
+
         torch.save(checkpoint, checkpointPath)
 
     def loadCheckpoint(self, checkpointPath):
@@ -612,3 +748,12 @@ class Dreamer:
 
         if self.config.useContinuationPrediction and 'continuePredictor' in checkpoint:
             self.continuePredictor.load_state_dict(checkpoint['continuePredictor'])
+
+        # Load auxiliary task heads
+        if self.useAuxiliaryTasks:
+            if 'goalPredictor' in checkpoint:
+                self.goalPredictor.load_state_dict(checkpoint['goalPredictor'])
+            if 'puckGoalDistPredictor' in checkpoint:
+                self.puckGoalDistPredictor.load_state_dict(checkpoint['puckGoalDistPredictor'])
+            if 'shotQualityPredictor' in checkpoint:
+                self.shotQualityPredictor.load_state_dict(checkpoint['shotQualityPredictor'])

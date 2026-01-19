@@ -6,7 +6,7 @@ This file was developed with assistance from Claude Code.
 
 Based on NaturalDreamer, adapted for hockey with:
 - 18-dim vector observations (MLP encoder/decoder)
-- PBRS reward shaping for dense exploration
+- Auxiliary tasks for world model representation learning
 - Opponent management (weak/strong/self-play)
 - W&B logging and metrics tracking
 - GIF recording for visualization
@@ -25,7 +25,6 @@ from hockey.hockey_env import BasicOpponent, Mode
 
 from dreamer import Dreamer
 from utils import loadConfig, seedEverything, ensureParentFolders, saveLossesToCSV, plotMetrics
-from rewards.pbrs import PBRSRewardShaper
 
 
 def get_device():
@@ -47,13 +46,12 @@ def create_opponent(opponent_type: str):
         raise ValueError(f"Unknown opponent type: {opponent_type}")
 
 
-def run_episode(env, agent, opponent, pbrs_shaper=None, training=True, seed=None, render=False):
+def run_episode(env, agent, opponent, training=True, seed=None, render=False):
     """
     Run single episode, collecting transitions.
 
     Returns:
         total_reward: Sparse game reward
-        shaped_reward: Total shaped reward (if PBRS enabled)
         steps: Number of steps
         outcome: 'win', 'loss', or 'draw'
         transitions: List of (obs, action, reward, next_obs, done) tuples
@@ -64,12 +62,8 @@ def run_episode(env, agent, opponent, pbrs_shaper=None, training=True, seed=None
     else:
         obs, _ = env.reset()
 
-    if pbrs_shaper is not None:
-        pbrs_shaper.reset()
-
     h, z = None, None  # Recurrent states
     total_reward = 0.0
-    shaped_reward_total = 0.0
     steps = 0
     transitions = []
     frames = []
@@ -93,17 +87,9 @@ def run_episode(env, agent, opponent, pbrs_shaper=None, training=True, seed=None
         next_obs, reward, done, truncated, info = env.step(np.hstack([action, action_opponent]))
         done = done or truncated
 
-        # Compute shaped reward if PBRS enabled
-        if pbrs_shaper is not None:
-            shaping = pbrs_shaper.shape(obs, next_obs, done)
-            reward_for_buffer = reward + shaping
-            shaped_reward_total += shaping
-        else:
-            reward_for_buffer = reward
-
         # Store transition for buffer
         if training:
-            transitions.append((obs, action, reward_for_buffer, next_obs, done))
+            transitions.append((obs, action, reward, next_obs, done))
 
         total_reward += reward
         obs = next_obs
@@ -117,7 +103,7 @@ def run_episode(env, agent, opponent, pbrs_shaper=None, training=True, seed=None
     else:
         outcome = 'draw'
 
-    return total_reward, shaped_reward_total, steps, outcome, transitions, frames
+    return total_reward, steps, outcome, transitions, frames
 
 
 def record_gif(env, agent, opponent, num_episodes=3, max_timesteps=250):
@@ -138,8 +124,8 @@ def record_gif(env, agent, opponent, num_episodes=3, max_timesteps=250):
     results = []
 
     for _ in range(num_episodes):
-        _, _, _, outcome, _, frames = run_episode(
-            env, agent, opponent, pbrs_shaper=None, training=False, render=True
+        _, _, outcome, _, frames = run_episode(
+            env, agent, opponent, training=False, render=True
         )
         all_episode_frames.append(frames)
         results.append(1 if outcome == 'win' else (-1 if outcome == 'loss' else 0))
@@ -265,13 +251,6 @@ def parse_args():
     # Buffer
     parser.add_argument("--buffer_capacity", type=int, default=None, help="Replay buffer capacity")
 
-    # PBRS reward shaping
-    parser.add_argument("--use_pbrs", action="store_true", default=None, help="Enable PBRS")
-    parser.add_argument("--no_pbrs", action="store_true", help="Disable PBRS")
-    parser.add_argument("--pbrs_scale", type=float, default=None, help="PBRS scale factor")
-    parser.add_argument("--pbrs_w_chase", type=float, default=None, help="PBRS chase weight")
-    parser.add_argument("--pbrs_w_attack", type=float, default=None, help="PBRS attack weight")
-
     # Checkpointing and evaluation
     parser.add_argument("--checkpoint_interval", type=int, default=None,
                         help="Checkpoint save interval (gradient steps)")
@@ -364,18 +343,6 @@ def main():
     if args.buffer_capacity is not None:
         config.dreamer.buffer.capacity = args.buffer_capacity
 
-    # PBRS overrides
-    if args.no_pbrs:
-        config.usePBRS = False
-    elif args.use_pbrs:
-        config.usePBRS = True
-    if args.pbrs_scale is not None:
-        config.pbrsScale = args.pbrs_scale
-    if args.pbrs_w_chase is not None:
-        config.pbrsWChase = args.pbrs_w_chase
-    if args.pbrs_w_attack is not None:
-        config.pbrsWAttack = args.pbrs_w_attack
-
     # Checkpoint/eval overrides
     if args.checkpoint_interval is not None:
         config.checkpointInterval = args.checkpoint_interval
@@ -441,9 +408,8 @@ def main():
                 "lambda": config.dreamer.lambda_,
                 "entropy_scale": config.dreamer.entropyScale,
                 "free_nats": config.dreamer.freeNats,
-                "pbrs_enabled": config.get('usePBRS', False),
-                "pbrs_scale": config.get('pbrsScale', 0.03),
                 "buffer_capacity": config.dreamer.buffer.capacity,
+                "use_auxiliary_tasks": config.get('useAuxiliaryTasks', True),
                 "gif_interval": config.gifInterval,
             }
         )
@@ -467,23 +433,6 @@ def main():
     # Create opponent
     opponent = create_opponent(config.opponent)
     print(f"Opponent: {config.opponent}")
-
-    # Create PBRS shaper if enabled
-    use_pbrs = getattr(config, 'usePBRS', False)
-    if use_pbrs:
-        pbrs_scale = getattr(config, 'pbrsScale', 0.03)
-        pbrs_w_chase = getattr(config, 'pbrsWChase', 0.5)
-        pbrs_w_attack = getattr(config, 'pbrsWAttack', 1.0)
-        pbrs_shaper = PBRSRewardShaper(
-            gamma=config.dreamer.discount,
-            scale=pbrs_scale,
-            w_chase=pbrs_w_chase,
-            w_attack=pbrs_w_attack,
-        )
-        print(f"PBRS enabled: scale={pbrs_scale}, w_chase={pbrs_w_chase}, w_attack={pbrs_w_attack}")
-    else:
-        pbrs_shaper = None
-        print("PBRS disabled")
 
     # Create agent
     agent = Dreamer(observationSize, actionSize, actionLow, actionHigh, device, config.dreamer)
@@ -510,8 +459,8 @@ def main():
     # === Warmup Phase ===
     print(f"=== Warmup: {config.episodesBeforeStart} episodes ===")
     for ep in range(config.episodesBeforeStart):
-        _, _, steps, outcome, transitions, _ = run_episode(
-            env, agent, opponent, pbrs_shaper, training=True, seed=config.seed + ep
+        _, steps, outcome, transitions, _ = run_episode(
+            env, agent, opponent, training=True, seed=config.seed + ep
         )
         for trans in transitions:
             agent.buffer.add(*trans)
@@ -526,11 +475,9 @@ def main():
     # Metrics tracking
     episode_rewards = []
     episode_lengths = []
-    episode_shaped_rewards = []
     episode_outcomes = {'win': 0, 'loss': 0, 'draw': 0}
     recent_wins = []
     recent_lengths = []
-    recent_shaped_rewards = []
     start_time = time.time()
 
     iterationsNum = config.gradientSteps // config.replayRatio
@@ -550,8 +497,8 @@ def main():
 
         # === Environment Interaction ===
         for _ in range(config.numInteractionEpisodes):
-            reward, shaped_reward, steps, outcome, transitions, _ = run_episode(
-                env, agent, opponent, pbrs_shaper, training=True
+            reward, steps, outcome, transitions, _ = run_episode(
+                env, agent, opponent, training=True
             )
 
             for trans in transitions:
@@ -560,24 +507,17 @@ def main():
             agent.totalEnvSteps += steps
             agent.totalEpisodes += 1
 
-            # Record outcome for reward hacking detection
-            if pbrs_shaper is not None:
-                pbrs_shaper.record_episode_outcome(reward, outcome)
-
             # Track episode metrics
             episode_rewards.append(reward)
             episode_lengths.append(steps)
-            episode_shaped_rewards.append(shaped_reward)
             episode_outcomes[outcome] += 1
 
             # Rolling windows for recent stats
             recent_wins.append(1 if outcome == 'win' else 0)
             recent_lengths.append(steps)
-            recent_shaped_rewards.append(shaped_reward)
             if len(recent_wins) > 100:
                 recent_wins.pop(0)
                 recent_lengths.pop(0)
-                recent_shaped_rewards.pop(0)
 
         # === Console Logging ===
         if iteration % args.log_interval == 0:
@@ -585,7 +525,6 @@ def main():
             win_rate = sum(recent_wins) / len(recent_wins) if recent_wins else 0
             mean_reward = np.mean(episode_rewards[-100:]) if episode_rewards else 0
             mean_length = np.mean(recent_lengths) if recent_lengths else 0
-            mean_shaped = np.mean(recent_shaped_rewards) if recent_shaped_rewards else 0
 
             # Get entropy from behavior metrics (handle renamed key)
             entropy_val = behaviorMetrics.get('behavior/entropy_mean', behaviorMetrics.get('behavior/entropy', 0))
@@ -620,7 +559,6 @@ def main():
                     "episode/length_max": max(recent_lengths) if recent_lengths else 0,
                     "episode/reward_mean": mean_reward,
                     "episode/reward_std": np.std(episode_rewards[-100:]) if len(episode_rewards) > 1 else 0,
-                    "episode/shaped_reward_mean": mean_shaped,
 
                     # Outcome rates (last 100 episodes)
                     "episode/win_rate_100": win_rate,
@@ -634,9 +572,6 @@ def main():
                 }
                 log_dict.update(worldModelMetrics)
                 log_dict.update(behaviorMetrics)
-
-                if pbrs_shaper is not None:
-                    log_dict.update(pbrs_shaper.get_episode_stats())
 
                 wandb.log(log_dict, step=agent.totalGradientSteps)
 
@@ -656,8 +591,8 @@ def main():
             eval_outcomes = {'win': 0, 'loss': 0, 'draw': 0}
 
             for _ in range(config.numEvaluationEpisodes):
-                reward, _, _, outcome, _, _ = run_episode(
-                    env, agent, opponent, pbrs_shaper=None, training=False
+                reward, _, outcome, _, _ = run_episode(
+                    env, agent, opponent, training=False
                 )
                 eval_rewards.append(reward)
                 eval_outcomes[outcome] += 1

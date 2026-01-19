@@ -215,12 +215,10 @@ Now let's see how these concepts map to our code. Our implementation is based on
 ```
 DreamerV3/
 ├── dreamer.py              # Main agent class (Dreamer)
-├── networks.py             # All neural network components
+├── networks.py             # All neural network components (incl. auxiliary task heads)
 ├── buffer.py               # Replay buffer for sequence sampling
-├── utils.py                # Helper functions (lambda returns, moments, etc.)
+├── utils.py                # Helper functions (lambda returns, moments, TwoHotSymlog)
 ├── train_hockey.py         # Training loop
-├── rewards/
-│   └── pbrs.py             # Potential-based reward shaping (optional)
 └── configs/
     └── hockey.yml          # Configuration file
 ```
@@ -1130,6 +1128,309 @@ This means the critic starts by predicting "value ≈ 0" for all states, which i
 
 ---
 
+## Part 5: Auxiliary Tasks – Replacing PBRS for World Model Learning
+
+This section explains auxiliary tasks, a DreamerV3-native approach to improve world model representations without corrupting the reward signal.
+
+### 5.1 The Problem with PBRS in DreamerV3
+
+**Potential-Based Reward Shaping (PBRS)** works well for model-free algorithms like TD3:
+- Adds dense reward signal to guide exploration
+- Mathematically proven to not change the optimal policy
+
+However, PBRS is problematic for world-model based algorithms like DreamerV3:
+
+```
+The fundamental issue:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ DreamerV3 trains its actor-critic ENTIRELY in imagination                   │
+│                                                                             │
+│ Real Environment → Collects data → Trains World Model → Predicts rewards   │
+│                                                                             │
+│ If PBRS corrupts rewards:                                                   │
+│   1. World model learns to predict PBRS-corrupted rewards                   │
+│   2. Policy optimizes for PBRS-corrupted rewards IN IMAGINATION             │
+│   3. Policy doesn't learn optimal behavior for TRUE sparse rewards          │
+│                                                                             │
+│ Unlike TD3 which eventually sees true rewards and adjusts,                  │
+│ DreamerV3's policy NEVER sees true rewards during training!                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Why PBRS fails for DreamerV3:**
+
+1. **Reward prediction learns wrong targets**: The reward head predicts PBRS-shaped rewards, not true game outcomes
+2. **No grounding**: Policy optimizes for a surrogate signal that doesn't represent actual winning/losing
+3. **Imagination mismatch**: When evaluating without PBRS, behavior is misaligned
+
+### 5.2 The Solution: Auxiliary Tasks
+
+Instead of corrupting the reward signal, we add **auxiliary prediction tasks** that help the world model learn goal-relevant representations:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         AUXILIARY TASKS                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  The key insight: We want the world model to understand goal-relevant       │
+│  features, but WITHOUT changing the reward signal.                          │
+│                                                                             │
+│  Solution: Add prediction heads that learn these features as EXTRA TASKS    │
+│                                                                             │
+│  World Model now predicts:                                                  │
+│    1. Observations (reconstruction) ← existing                              │
+│    2. Rewards (sparse, true values) ← existing, UNCHANGED                   │
+│    3. Continue probability ← existing                                       │
+│    4. Goal Prediction ← NEW auxiliary task                                  │
+│    5. Puck-Goal Distance ← NEW auxiliary task                               │
+│    6. Shot Quality ← NEW auxiliary task                                     │
+│                                                                             │
+│  The auxiliary tasks improve representations WITHOUT touching rewards!      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 5.3 Our Three Auxiliary Tasks
+
+**1. Goal Prediction (Binary Classification)**
+
+```python
+# networks.py
+class GoalPredictionHead(nn.Module):
+    """Predicts: Will a goal happen in the next K steps?"""
+
+    def forward(self, full_state):
+        logits = self.network(full_state)  # → (batch, 1)
+        return logits  # Binary: 0 = no goal, 1 = goal incoming
+```
+
+Labels are computed from actual rewards:
+- `y = 1` if any `|reward| > 1` in next `goal_horizon` steps (default: 15)
+- `y = 0` otherwise
+
+This teaches the world model to recognize "about to score" situations.
+
+**2. Puck-Goal Distance (Regression)**
+
+```python
+# networks.py
+class DistanceHead(nn.Module):
+    """Predicts distance from puck to opponent goal."""
+
+    def forward(self, full_state):
+        return self.network(full_state)  # → (batch, 1) normalized distance
+```
+
+Computed from observations:
+```python
+puck_pos = obs[..., 12:14]  # Puck x, y
+opponent_goal = [-1.0, 0.0]  # Left goal position
+distance = torch.norm(puck_pos - opponent_goal, dim=-1)
+```
+
+This teaches spatial awareness of offensive position.
+
+**3. Shot Quality (Regression)**
+
+```python
+# networks.py
+class ShotQualityHead(nn.Module):
+    """Predicts combined shooting opportunity quality."""
+
+    def forward(self, full_state):
+        return self.network(full_state)  # → (batch, 1) quality score
+```
+
+Combines position and momentum:
+```python
+# Shot quality = closeness to goal + positive x-velocity (toward goal)
+shot_quality = (1 - normalized_distance) * 0.5 + positive_vel_component * 0.5
+```
+
+This teaches the model to value attacking positions with good momentum.
+
+### 5.4 Integration into World Model Training
+
+```python
+# dreamer.py - worldModelTraining()
+
+def worldModelTraining(self, data):
+    # ... existing world model training ...
+
+    # Compute standard losses (UNCHANGED)
+    recon_loss = self.decoder.loss(full_states, data.observations)
+    reward_loss = self.twoHot.loss(reward_logits, data.rewards)  # TRUE rewards!
+    continue_loss = -continue_dist.log_prob(1 - data.dones).mean()
+    kl_loss = self.compute_kl_loss(prior_logits, posterior_logits)
+
+    # === AUXILIARY TASKS ===
+    if self.use_auxiliary_tasks:
+        # 1. Goal Prediction
+        goal_labels = self.compute_goal_labels(data.rewards, horizon=15)
+        goal_logits = self.goal_head(full_states)
+        goal_loss = F.binary_cross_entropy_with_logits(goal_logits, goal_labels)
+
+        # 2. Distance Prediction
+        true_distances = self.compute_puck_goal_distance(data.observations)
+        pred_distances = self.distance_head(full_states)
+        distance_loss = F.mse_loss(pred_distances, true_distances)
+
+        # 3. Shot Quality
+        true_quality = self.compute_shot_quality(data.observations)
+        pred_quality = self.shot_quality_head(full_states)
+        quality_loss = F.mse_loss(pred_quality, true_quality)
+
+        aux_loss = self.aux_scale * (goal_loss + distance_loss + quality_loss)
+    else:
+        aux_loss = 0
+
+    total_loss = recon_loss + reward_loss + continue_loss + kl_loss + aux_loss
+```
+
+**Critical difference from PBRS:**
+- Auxiliary losses train the ENCODER and LATENT SPACE
+- Reward prediction still trains on TRUE sparse rewards
+- Policy optimizes for TRUE rewards in imagination
+
+### 5.5 Why Auxiliary Tasks Work
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                 HOW AUXILIARY TASKS IMPROVE LEARNING                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  WITHOUT auxiliary tasks:                                                   │
+│    Latent space optimized for: reconstruction + reward + continue           │
+│    Problem: Reconstruction doesn't emphasize goal-relevant features         │
+│             Sparse rewards provide weak signal                              │
+│                                                                             │
+│  WITH auxiliary tasks:                                                      │
+│    Latent space optimized for: reconstruction + reward + continue           │
+│                                + goal prediction                            │
+│                                + distance awareness                         │
+│                                + shot quality                               │
+│                                                                             │
+│    Result: Latent space encodes "am I about to score?" information          │
+│            Reward predictor has BETTER FEATURES to work with                │
+│            Two-Hot Symlog can now predict sparse rewards accurately         │
+│            Policy gets useful gradients in imagination                      │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**The key insight:** Auxiliary tasks don't change WHAT the model predicts for rewards. They change HOW WELL the latent space represents goal-relevant information, which makes reward prediction more accurate.
+
+### 5.6 Inverse Frequency Weighting for Sparse Events
+
+Even with Two-Hot Symlog, sparse reward events (goals) are outnumbered by non-events ~100:1. We apply inverse frequency weighting:
+
+```python
+# dreamer.py - worldModelTraining()
+
+# Count sparse vs non-sparse samples
+sparse_mask = (rewards.abs() > 1.0).float()
+n_sparse = sparse_mask.sum()
+n_nonsparse = (1 - sparse_mask).sum()
+
+# Compute inverse frequency weights (capped at 100x)
+if n_sparse > 0 and n_nonsparse > 0:
+    sparse_weight = min(100.0, n_nonsparse / n_sparse)
+    nonsparse_weight = 1.0
+else:
+    sparse_weight = 1.0
+    nonsparse_weight = 1.0
+
+# Weight the reward loss
+weights = sparse_mask * sparse_weight + (1 - sparse_mask) * nonsparse_weight
+weighted_reward_loss = (reward_loss_per_sample * weights).mean()
+```
+
+This ensures goals contribute meaningfully to the gradient despite their rarity.
+
+### 5.7 Hyperparameters for Auxiliary Tasks
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `useAuxiliaryTasks` | True | Enable auxiliary task training |
+| `auxTaskScale` | 1.0 | Weight for auxiliary losses relative to world model losses |
+| `goalPredictionHorizon` | 15 | How many steps ahead to predict goal occurrence |
+| `auxHiddenSize` | 128 | Hidden layer size for auxiliary prediction heads |
+
+**Tuning guidance:**
+
+1. **`auxTaskScale`**: Start with 1.0. If auxiliary losses dominate (check W&B), reduce to 0.1-0.5
+2. **`goalPredictionHorizon`**: Match your `imagination_horizon`. Default 15 works well
+3. **`auxHiddenSize`**: 128 is sufficient. Larger values don't help much
+
+### 5.8 Critical: Entropy Scale with Auxiliary Tasks
+
+**This is the most important hyperparameter when using auxiliary tasks:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    ENTROPY COLLAPSE = AUXILIARY TASK FAILURE                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  If entropy_scale is too low (< 0.001):                                     │
+│    1. Policy becomes deterministic early                                    │
+│    2. Agent stops exploring diverse states                                  │
+│    3. Auxiliary tasks see repetitive/boring data                            │
+│    4. Goal prediction never sees "about to score" states                    │
+│    5. Auxiliary tasks learn nothing useful                                  │
+│    6. Latent space doesn't improve                                          │
+│                                                                             │
+│  RECOMMENDED: entropy_scale >= 0.003                                        │
+│                                                                             │
+│  Monitor: behavior/entropy should stay POSITIVE (> 0)                       │
+│           If it goes negative, policy has collapsed                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 5.9 Recommended Configuration
+
+For optimal auxiliary task training:
+
+```bash
+python train_hockey.py \
+    --opponent weak \
+    --seed 42 \
+    --gradient_steps 1000000 \
+    --batch_size 32 \
+    --batch_length 32 \
+    --imagination_horizon 15 \
+    --recurrent_size 256 \
+    --latent_length 16 \
+    --latent_classes 16 \
+    --lr_world 0.0003 \
+    --lr_actor 0.00008 \
+    --lr_critic 0.0001 \
+    --entropy_scale 0.003 \
+    --gradient_clip 100 \
+    --free_nats 1.0 \
+    --discount 0.997
+```
+
+**Key changes from PBRS-based training:**
+- Remove all `--use_pbrs`, `--pbrs_scale`, `--pbrs_w_*` arguments (they no longer exist)
+- Increase `--entropy_scale` to 0.003 (was often 0.0005 with PBRS)
+- Increase `--lr_world` to 0.0003 (faster auxiliary task learning)
+- Increase `--gradient_clip` to 100 (DreamerV3 default)
+
+### 5.10 Summary: PBRS vs Auxiliary Tasks
+
+| Aspect | PBRS | Auxiliary Tasks |
+|--------|------|-----------------|
+| **Modifies rewards** | Yes (corrupts signal) | No (preserves true rewards) |
+| **Policy training** | Optimizes shaped rewards | Optimizes true rewards |
+| **World model** | Learns wrong reward targets | Learns true rewards + extra features |
+| **Evaluation** | Behavior may differ without PBRS | Consistent behavior always |
+| **Implementation** | Modifies reward before storage | Adds extra prediction heads |
+| **Hyperparameters** | pbrs_scale, weights | aux_scale, entropy_scale |
+| **DreamerV3 compatible** | No (breaks imagination training) | Yes (native approach) |
+
+---
+
 ## Summary Table: TD3 vs. DreamerV3
 
 | Aspect | TD3 | DreamerV3 |
@@ -1144,7 +1445,7 @@ This means the critic starts by predicting "value ≈ 0" for all states, which i
 | **Computational cost** | Lower per step | Higher per step |
 | **Memory** | Simple replay buffer | Sequence buffer + models |
 | **Key components** | Actor, 2× Critic | World Model, Actor, Critic |
-| **Reward shaping** | Often needed (PBRS) | Optional (imagination helps) |
+| **Reward shaping** | Often needed (PBRS) | Not needed (uses auxiliary tasks) |
 
 ---
 

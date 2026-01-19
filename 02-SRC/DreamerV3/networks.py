@@ -233,3 +233,82 @@ class Critic(nn.Module):
     def forward(self, x):
         """Returns logits of shape (*, bins)."""
         return self.network(x)
+
+
+# =============================================================================
+# Auxiliary Task Heads
+# =============================================================================
+# These predict derived quantities that help the world model learn
+# representations useful for goal prediction, without corrupting the reward signal.
+# =============================================================================
+
+class GoalPredictionHead(nn.Module):
+    """
+    Predicts probability of a goal occurring in the next K steps.
+
+    This is the most directly relevant auxiliary task - it forces the latent
+    state to encode "goal-likelihood" features without modifying rewards.
+
+    Output: sigmoid probability (0 = no goal likely, 1 = goal imminent)
+    """
+
+    def __init__(self, inputSize, hiddenSize=128):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(inputSize, hiddenSize),
+            nn.ReLU(),
+            nn.Linear(hiddenSize, hiddenSize // 2),
+            nn.ReLU(),
+            nn.Linear(hiddenSize // 2, 1)
+        )
+
+    def forward(self, x):
+        """Returns logits for binary classification (use BCE with logits)."""
+        return self.network(x).squeeze(-1)
+
+
+class DistanceHead(nn.Module):
+    """
+    Predicts a scalar distance value (e.g., puck-to-goal, agent-to-puck).
+
+    These spatial relationships are critical for understanding scoring dynamics.
+
+    Output: predicted distance (regression, positive value)
+    """
+
+    def __init__(self, inputSize, hiddenSize=128):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(inputSize, hiddenSize),
+            nn.ReLU(),
+            nn.Linear(hiddenSize, 1)
+        )
+
+    def forward(self, x):
+        """Returns predicted distance (scalar)."""
+        return self.network(x).squeeze(-1)
+
+
+class ShotQualityHead(nn.Module):
+    """
+    Predicts a "shot quality" score combining position and velocity.
+
+    High quality = puck moving toward goal from close range with clear path.
+    This helps the model understand what makes a good scoring opportunity.
+
+    Output: quality score (higher = better scoring chance)
+    """
+
+    def __init__(self, inputSize, hiddenSize=128):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(inputSize, hiddenSize),
+            nn.ReLU(),
+            nn.Linear(hiddenSize, hiddenSize // 2),
+            nn.ReLU(),
+            nn.Linear(hiddenSize // 2, 1)
+        )
+
+    def forward(self, x):
+        """Returns shot quality score (scalar)."""
+        return self.network(x).squeeze(-1)

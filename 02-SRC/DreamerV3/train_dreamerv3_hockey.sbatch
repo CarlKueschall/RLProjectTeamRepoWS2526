@@ -31,20 +31,14 @@ export WANDB_API_KEY="cc059bf17f0dffb378947bc37398b00eea0d1944"
 # TRAINING STRATEGY:
 #   - World Model: RSSM with categorical latents
 #     - Reconstruction loss (Normal distribution)
-#     - Reward prediction (Normal distribution)
+#     - Reward prediction (Two-Hot Symlog with inverse frequency weighting)
 #     - Continue prediction (Bernoulli)
 #     - KL divergence (prior vs posterior with free nats)
+#     - Auxiliary tasks (goal prediction, distance, shot quality)
 #   - Actor-Critic: Trained entirely in imagination
 #     - Lambda returns (TD-lambda) for value targets
 #     - Percentile-based value normalization
 #     - Entropy regularization for exploration
-#
-# PBRS (Potential-Based Reward Shaping):
-#   - Policy-invariant (proven by Ng et al. 1999)
-#   - Two components:
-#     - phi_chase (W=0.5): Agent proximity to puck
-#     - phi_attack (W=1.0): Puck proximity to goal
-#   - Scale: 0.03 (keeps shaped << sparse rewards)
 #
 # KEY HYPERPARAMETERS:
 #   Batch: 32 sequences × 32 timesteps
@@ -92,11 +86,6 @@ singularity exec --nv ~/containers/hockey.sif python3 train_hockey.py \
     --entropy_scale 0.003 \
     --free_nats 1.0 \
     --gradient_clip 100 \
-    \
-    --use_pbrs \
-    --pbrs_scale 0.03 \
-    --pbrs_w_chase 0.5 \
-    --pbrs_w_attack 1.0 \
     \
     --buffer_capacity 100000 \
     \
