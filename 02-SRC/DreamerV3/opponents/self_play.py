@@ -1,6 +1,13 @@
 """
+Self-Play Manager for Hockey Training.
+
+Agent-agnostic implementation - works with any agent that provides:
+- state() method returning serializable state
+- restore_state(state) method
+
 AI Usage Declaration:
 This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+Updated with Claude Code assistance for DreamerV3 compatibility.
 """
 
 import os
@@ -8,8 +15,6 @@ import pathlib
 from collections import deque
 import numpy as np
 import torch
-from agents.td3_agent import TD3Agent
-from agents.model import Model
 
 
 class SelfPlayManager:
@@ -220,77 +225,63 @@ class SelfPlayManager:
             return np.random.choice(self.pool)
 
     def _load_opponent(self, path):
-        """Load opponent network from checkpoint."""
+        """
+        Load opponent checkpoint from path.
+
+        Note: This is now agent-agnostic. It loads the checkpoint but doesn't
+        create a specific agent type. The calling code should use
+        get_opponent_state() to get the loaded state and create the appropriate
+        agent type.
+        """
         if path == self.opponent_path:
             return  # Already loaded
 
         try:
-            checkpoint = torch.load(path, map_location=self.device)
+            checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
-            # Extract agent state tuple (Q1_state, Q2_state, policy_state)
+            # Extract agent state (format depends on how it was saved)
             if isinstance(checkpoint, dict) and 'agent_state' in checkpoint:
-                agent_state = checkpoint['agent_state']
-            elif isinstance(checkpoint, tuple):
-                agent_state = checkpoint
+                self.opponent_state = checkpoint['agent_state']
             else:
-                agent_state = checkpoint
-
-            if not isinstance(agent_state, tuple) or len(agent_state) < 3:
-                raise ValueError(f"Expected agent_state to be tuple of (Q1, Q2, policy), got {type(agent_state)}")
-
-            Q1_state, Q2_state, policy_state = agent_state[:3]
-
-            # Infer network architecture from checkpoint
-            critic_hidden_sizes = []
-            if isinstance(Q1_state, dict):
-                layer_idx = 0
-                while f'layers.{layer_idx}.weight' in Q1_state:
-                    layer_output_size = Q1_state[f'layers.{layer_idx}.weight'].shape[0]
-                    critic_hidden_sizes.append(layer_output_size)
-                    layer_idx += 1
-
-            actor_hidden_sizes = []
-            if isinstance(policy_state, dict):
-                layer_idx = 0
-                while f'layers.{layer_idx}.weight' in policy_state:
-                    layer_output_size = policy_state[f'layers.{layer_idx}.weight'].shape[0]
-                    actor_hidden_sizes.append(layer_output_size)
-                    layer_idx += 1
-
-            # Use inferred architecture, or defaults if inference failed
-            if not actor_hidden_sizes:
-                actor_hidden_sizes = [256, 256]
-            if not critic_hidden_sizes:
-                critic_hidden_sizes = [256, 256, 128]
-
-            if self.observation_space is None or self.action_space is None:
-                raise ValueError("observation_space and action_space must be provided")
-
-            self.opponent = TD3Agent(
-                self.observation_space,
-                self.action_space,
-                hidden_sizes_actor=actor_hidden_sizes,
-                hidden_sizes_critic=critic_hidden_sizes
-            )
-            self.opponent.policy.eval()
-            self.opponent.restore_state(agent_state)
-            self.opponent.policy.eval()
+                self.opponent_state = checkpoint
 
             self.opponent_path = path
             self.current_opponent_idx = self.pool.index(path)
             self.current_opponent_episode = self.opponent_episodes.get(path, 0)
+
+            # For backwards compatibility, set opponent to a marker
+            # The calling code should use get_opponent_state() instead
+            self.opponent = "loaded"
 
         except Exception as e:
             print(f"Failed to load self-play opponent: {e}")
             import traceback
             traceback.print_exc()
             self.opponent = None
+            self.opponent_state = None
+
+    def get_opponent_state(self):
+        """
+        Get the loaded opponent's state dict.
+
+        Returns:
+            The opponent's state (format depends on agent type) or None if not loaded.
+        """
+        return getattr(self, 'opponent_state', None)
 
     def get_action(self, obs):
-        """Get action from self-play opponent."""
-        if self.opponent is None:
-            return None
-        return self.opponent.act(obs, eps=0.0)
+        """
+        DEPRECATED: Use get_opponent_state() and create your own agent instead.
+
+        This method is kept for backwards compatibility but may not work
+        with all agent types.
+        """
+        # This method is now deprecated - the calling code should
+        # handle opponent action generation
+        raise NotImplementedError(
+            "get_action() is deprecated. Use get_opponent_state() to get the "
+            "opponent's state and create an appropriate agent to generate actions."
+        )
 
     def record_result(self, winner, use_weak):
         """Record game result against opponent for PFSP tracking."""

@@ -1,12 +1,17 @@
 """
+DreamerV3 Agent Components.
+
+Phase 1: Using external implementations (dreamer-pytorch or sheeprl)
+Phase 2: Custom implementation will be added here
+
 AI Usage Declaration:
-This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+This file was developed with assistance from Claude Code.
 """
 
-from .device import get_device
-from .noise import GaussianNoise
-from .td3_agent import TD3Agent
-from .model import Model
-from .memory import Memory
+# Phase 2: Custom DreamerV3 components will be imported here
+# from .world_model import RSSM
+# from .actor_critic import Actor, Critic
+# from .dreamer_agent import DreamerV3Agent
+# from .replay_buffer import SequenceReplayBuffer
 
-__all__ = ['get_device', 'GaussianNoise', 'TD3Agent', 'Model', 'Memory']
+__all__ = []

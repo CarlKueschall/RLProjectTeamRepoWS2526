@@ -1,8 +1,10 @@
 """
+DreamerV3 Configuration.
+
 AI Usage Declaration:
-This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+This file was developed with assistance from Claude Code.
 """
 
-from .parser import parse_args, get_mode, get_max_timesteps
+from .parser import parse_args, get_config_dict
 
-__all__ = ['parse_args', 'get_mode', 'get_max_timesteps']
+__all__ = ['parse_args', 'get_config_dict']
