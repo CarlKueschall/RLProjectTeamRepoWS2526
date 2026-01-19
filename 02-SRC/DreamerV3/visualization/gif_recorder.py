@@ -1,12 +1,146 @@
 """
+GIF recording utilities for DreamerV3 evaluation visualization.
+
 AI Usage Declaration:
-This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+This file was developed with assistance from Claude Code.
 """
 
 import os
 import tempfile
 
 import numpy as np
+
+
+def create_gif_dreamer(env, agent, num_episodes=3, max_timesteps=250):
+    """
+    Record multiple episodes and stitch them horizontally into a single GIF.
+
+    Designed for DreamerV3's HockeyEnvDreamer interface.
+
+    Args:
+        env: HockeyEnvDreamer environment (handles opponent internally)
+        agent: HockeyDreamer agent with act(obs, deterministic) interface
+        num_episodes: Number of episodes to record
+        max_timesteps: Maximum timesteps per episode
+
+    Returns:
+        gif_frames: List of horizontally stitched RGB frames
+        results: List of episode results (1=win, -1=loss, 0=draw)
+    """
+    from .frame_capture import record_episode_frames_dreamer
+
+    try:
+        from PIL import Image
+    except ImportError:
+        print("PIL not installed. GIF recording disabled. Install with: pip install Pillow")
+        return None, []
+
+    all_episode_frames = []
+    results = []
+
+    # Record each episode
+    for _ in range(num_episodes):
+        frames, winner = record_episode_frames_dreamer(env, agent, max_timesteps)
+        all_episode_frames.append(frames)
+        results.append(winner)
+
+    if not all_episode_frames or not all_episode_frames[0]:
+        return None, results
+
+    # Find the max number of frames across all episodes
+    max_frames = max(len(frames) for frames in all_episode_frames)
+
+    # Pad shorter episodes by repeating last frame
+    for frames in all_episode_frames:
+        if len(frames) < max_frames and len(frames) > 0:
+            last_frame = frames[-1]
+            while len(frames) < max_frames:
+                frames.append(last_frame)
+
+    # Stitch frames horizontally
+    stitched_frames = []
+    for frame_idx in range(max_frames):
+        episode_frames_at_idx = [
+            ep_frames[frame_idx]
+            for ep_frames in all_episode_frames
+            if frame_idx < len(ep_frames)
+        ]
+
+        if episode_frames_at_idx:
+            # Convert to PIL images and stitch horizontally
+            pil_images = [Image.fromarray(f) for f in episode_frames_at_idx]
+
+            total_width = sum(img.width for img in pil_images)
+            max_height = max(img.height for img in pil_images)
+
+            # Create stitched image
+            stitched = Image.new('RGB', (total_width, max_height))
+            x_offset = 0
+            for img in pil_images:
+                stitched.paste(img, (x_offset, 0))
+                x_offset += img.width
+
+            stitched_frames.append(np.array(stitched))
+
+    return stitched_frames, results
+
+
+def save_gif_dreamer(frames, results, step, opponent_name, metric_name="eval/gameplay_gif"):
+    """
+    Save GIF frames to W&B for DreamerV3 evaluation.
+
+    Args:
+        frames: List of RGB frames (stitched)
+        results: List of episode results
+        step: Current training step
+        opponent_name: Name of opponent (e.g., "weak", "strong")
+        metric_name: W&B metric name
+    """
+    if frames is None or len(frames) == 0:
+        return
+
+    try:
+        import imageio
+        import wandb
+    except ImportError as e:
+        print(f"GIF recording failed - missing dependency: {e}")
+        return
+
+    try:
+        # Create temp file for GIF
+        with tempfile.NamedTemporaryFile(suffix='.gif', delete=False) as tmp:
+            tmp_path = tmp.name
+
+        # Save as GIF (15 fps for smooth playback)
+        imageio.mimsave(tmp_path, frames, fps=15, loop=0)
+
+        # Create caption with results
+        result_strs = []
+        for i, r in enumerate(results):
+            if r == 1:
+                result_strs.append(f"Ep{i+1}:WIN")
+            elif r == -1:
+                result_strs.append(f"Ep{i+1}:LOSS")
+            else:
+                result_strs.append(f"Ep{i+1}:DRAW")
+
+        wins = sum(1 for r in results if r == 1)
+        caption = f"Step {step:,} vs {opponent_name} | {' | '.join(result_strs)} | {wins}/{len(results)} wins"
+
+        # Log to W&B
+        wandb.log({
+            f"{metric_name}_{opponent_name}": wandb.Video(tmp_path, fps=15, format="gif", caption=caption),
+            'step': step,
+        })
+
+        # Clean up temp file
+        os.unlink(tmp_path)
+
+        print(f"  GIF recorded vs {opponent_name}: {', '.join(result_strs)}")
+
+    except Exception as e:
+        print(f"GIF recording failed: {e}")
+
 
 def create_gif_for_wandb(env, agent, opponent, mode, max_timesteps, num_episodes=3, eps=0.0,
                          self_play_opponent=None):

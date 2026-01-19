@@ -1,18 +1,26 @@
 """
 DreamerV3 Rewards.
 
-NOTE: DreamerV3 uses SPARSE REWARDS ONLY.
-No reward shaping is needed - the world model handles credit assignment.
+Reward Shaping for DreamerV3:
+- PBRS (Potential-Based Reward Shaping) provides dense reward signal
+- Mathematically guaranteed to preserve optimal policy (Ng et al., 1999)
+- Enables world model to learn meaningful reward dynamics
+- Solves the sparse reward bootstrapping problem
 
-The hockey_wrapper.py provides sparse rewards:
+Base rewards from hockey environment:
 - Win: +1.0
 - Loss: -1.0
-- Fault: -0.33 (optional)
+- Draw: 0.0
 
 AI Usage Declaration:
 This file was developed with assistance from Claude Code.
 """
 
-# No reward shaping modules - sparse rewards handled in environment wrapper
+from .pbrs import PBRSRewardShaper, compute_pbrs, compute_potential, get_potential_components
 
-__all__ = []
+__all__ = [
+    'PBRSRewardShaper',
+    'compute_pbrs',
+    'compute_potential',
+    'get_potential_components',
+]

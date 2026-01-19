@@ -239,7 +239,8 @@ def test_hockey_dreamer():
         obs_dim=18,
         action_dim=4,
         hidden_size=64,
-        latent_size=32,
+        num_categories=8,  # Small for testing
+        num_classes=8,     # Small for testing
         recurrent_size=64,
         embed_dim=64,
         horizon=10,
@@ -291,7 +292,8 @@ def test_with_environment():
             obs_dim=18,
             action_dim=4,
             hidden_size=64,
-            latent_size=32,
+            num_categories=8,  # Small for testing
+            num_classes=8,     # Small for testing
             recurrent_size=64,
             horizon=10,
             device='cpu',

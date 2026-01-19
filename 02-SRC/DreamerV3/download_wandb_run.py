@@ -59,11 +59,11 @@ def plot_dreamer_metrics(history, run_name, output_path):
         print("Warning: matplotlib not installed, skipping plots")
         return
 
-    # Set up the figure with subplots
-    fig = plt.figure(figsize=(20, 16))
+    # Set up the figure with subplots (5 rows for more metrics)
+    fig = plt.figure(figsize=(20, 20))
     fig.suptitle(f'DreamerV3 Training: {run_name}', fontsize=14, fontweight='bold')
 
-    gs = gridspec.GridSpec(4, 3, figure=fig, hspace=0.3, wspace=0.25)
+    gs = gridspec.GridSpec(5, 3, figure=fig, hspace=0.3, wspace=0.25)
 
     # Helper to plot with smoothing
     def plot_metric(ax, data, label, color, smooth_window=10):
@@ -130,12 +130,15 @@ def plot_dreamer_metrics(history, run_name, output_path):
     recon_loss = get_metric('world/recon_loss')
     reward_loss = get_metric('world/reward_loss')
     kl_loss = get_metric('world/kl_loss')
+    continue_loss = get_metric('world/continue_loss')
     if recon_loss is not None:
         plot_metric(ax5, recon_loss, 'Recon', 'blue')
     if reward_loss is not None:
         plot_metric(ax5, reward_loss, 'Reward', 'green')
     if kl_loss is not None:
         plot_metric(ax5, kl_loss, 'KL', 'orange')
+    if continue_loss is not None:
+        plot_metric(ax5, continue_loss, 'Continue', 'purple')
     ax5.set_title('World Model Components')
     ax5.set_xlabel('Episode')
     ax5.set_ylabel('Loss')
@@ -222,6 +225,49 @@ def plot_dreamer_metrics(history, run_name, output_path):
     ax12.set_ylabel('Reward', color='blue')
     ax12.tick_params(axis='y', labelcolor='blue')
 
+    # 13. Terminal Reward Prediction (CRITICAL for sparse reward learning)
+    ax13 = fig.add_subplot(gs[4, 0])
+    terminal_pred = get_metric('world/terminal_pred_mean')
+    terminal_target = get_metric('world/terminal_target_mean')
+    if terminal_pred is not None:
+        plot_metric(ax13, terminal_pred, 'Predicted', 'blue')
+    if terminal_target is not None:
+        plot_metric(ax13, terminal_target, 'Target', 'green')
+    ax13.set_title('Terminal Reward Prediction')
+    ax13.set_xlabel('Episode')
+    ax13.set_ylabel('Reward')
+    ax13.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+    ax13.legend()
+
+    # 14. Terminal Count per Batch
+    ax14 = fig.add_subplot(gs[4, 1])
+    terminal_count = get_metric('world/terminal_count')
+    if terminal_count is not None:
+        ax14.bar(range(len(terminal_count)), terminal_count, alpha=0.7, color='purple')
+        ax14.axhline(y=np.mean(terminal_count) if terminal_count is not None and len(terminal_count) > 0 else 0,
+                     color='red', linestyle='--', label=f'Mean: {np.mean(terminal_count):.1f}')
+    ax14.set_title('Terminal Samples per Batch')
+    ax14.set_xlabel('Episode')
+    ax14.set_ylabel('Count')
+    ax14.legend()
+
+    # 15. Advantage Distribution
+    ax15 = fig.add_subplot(gs[4, 2])
+    advantage = get_metric('behavior/advantage_mean')
+    policy_loss = get_metric('behavior/policy_loss')
+    if advantage is not None:
+        plot_metric(ax15, advantage, 'Advantage', 'blue')
+    if policy_loss is not None:
+        ax15_twin = ax15.twinx()
+        plot_metric(ax15_twin, policy_loss, 'Policy Loss', 'red')
+        ax15_twin.set_ylabel('Policy Loss', color='red')
+        ax15_twin.tick_params(axis='y', labelcolor='red')
+    ax15.set_title('Advantage & Policy Loss')
+    ax15.set_xlabel('Episode')
+    ax15.set_ylabel('Advantage', color='blue')
+    ax15.tick_params(axis='y', labelcolor='blue')
+    ax15.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
@@ -263,7 +309,8 @@ def get_all_metrics():
     DreamerV3 metric categories:
     - episode/: reward, length, outcome, time, train_time
     - stats/: win_rate, total_steps, buffer_size, buffer_episodes
-    - world/: loss, recon_loss, reward_loss, continue_loss, kl_loss, kl_value
+    - world/: loss, recon_loss, reward_loss, continue_loss, kl_loss, kl_value,
+              terminal_count, terminal_pred_mean, terminal_target_mean
     - behavior/: actor_loss, critic_loss, policy_loss, entropy, value_mean, target_mean, advantage_mean
     - grad/: world, actor, critic
     - imagine/: reward_mean, reward_std, continue_mean

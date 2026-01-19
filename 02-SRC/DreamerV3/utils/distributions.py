@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 from torch import distributions as D
 import numpy as np
-
+from torch.nn import functional as F
 
 class TanhNormal:
     """
@@ -168,3 +168,96 @@ class GaussianDist:
 def build_normal_dist(mean: torch.Tensor, std: torch.Tensor) -> GaussianDist:
     """Factory function for Gaussian distributions."""
     return GaussianDist(mean, std)
+
+
+class CategoricalDist:
+    """
+    Categorical distribution with unimix for DreamerV3 latent states.
+
+    Uses multiple independent categorical variables to represent the
+    stochastic component of the world model state.
+
+    Key features:
+    - Unimix: Mixes logits with uniform to prevent collapse (paper default: 1%)
+    - Straight-through gradients for discrete sampling
+    - Flattens one-hot vectors for feature representation
+    """
+
+    def __init__(
+        self,
+        logits: torch.Tensor,
+        num_classes: int = 32,
+        unimix: float = 0.01,
+    ):
+        """
+        Args:
+            logits: Raw logits (batch, num_classes * num_categories)
+            num_classes: Number of classes per categorical variable
+            unimix: Probability of uniform mixing (default 1%)
+        """
+        self.num_classes = num_classes
+        self.unimix = unimix
+
+        # Reshape to (batch, num_categories, num_classes)
+        batch_shape = logits.shape[:-1]
+        self.num_categories = logits.shape[-1] // num_classes
+        self.logits = logits.reshape(*batch_shape, self.num_categories, num_classes)
+
+        # Apply unimix: mix with uniform distribution
+        if unimix > 0:
+            uniform = torch.ones_like(self.logits) / num_classes
+            probs = F.softmax(self.logits, dim=-1)
+            probs = (1 - unimix) * probs + unimix * uniform
+            self.logits = torch.log(probs + 1e-8)
+
+        self.probs = F.softmax(self.logits, dim=-1)
+
+    def sample(self) -> torch.Tensor:
+        """
+        Sample using straight-through Gumbel-softmax.
+
+        Returns flattened one-hot representation.
+        """
+        # Gumbel-softmax with straight-through gradient
+        # Hard sample in forward, soft gradient in backward
+        hard = F.gumbel_softmax(self.logits, tau=1.0, hard=True, dim=-1)
+
+        # Flatten: (batch, num_categories, num_classes) -> (batch, num_categories * num_classes)
+        return hard.flatten(start_dim=-2)
+
+    def rsample(self) -> torch.Tensor:
+        """Alias for sample()."""
+        return self.sample()
+
+    @property
+    def mode(self) -> torch.Tensor:
+        """Most likely state (argmax, one-hot encoded)."""
+        indices = self.logits.argmax(dim=-1)
+        one_hot = F.one_hot(indices, self.num_classes).float()
+        return one_hot.flatten(start_dim=-2)
+
+    def log_prob(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Log probability of sampled state.
+
+        Args:
+            x: Flattened one-hot samples (batch, num_categories * num_classes)
+        """
+        # Reshape back to (batch, num_categories, num_classes)
+        batch_shape = x.shape[:-1]
+        x = x.reshape(*batch_shape, self.num_categories, self.num_classes)
+
+        # Log probability: sum of log probs for each categorical
+        log_probs = (x * torch.log(self.probs + 1e-8)).sum(dim=-1)
+        return log_probs.sum(dim=-1)
+
+    def entropy(self) -> torch.Tensor:
+        """Entropy of the categorical distribution."""
+        # Entropy per categorical variable, summed
+        ent = -(self.probs * torch.log(self.probs + 1e-8)).sum(dim=-1)
+        return ent.sum(dim=-1)
+
+    def kl_divergence(self, other: 'CategoricalDist') -> torch.Tensor:
+        """KL divergence from self to other: KL(self || other)."""
+        kl = (self.probs * (torch.log(self.probs + 1e-8) - torch.log(other.probs + 1e-8))).sum(dim=-1)
+        return kl.sum(dim=-1)
