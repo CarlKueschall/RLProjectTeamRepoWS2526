@@ -73,6 +73,10 @@ def parse_args():
                         help='Disable reward shaping (use only sparse rewards)')
     parser.add_argument('--pbrs_scale', type=float, default=0.02,
                         help='PBRS magnitude scaling factor (default: 0.02). Mathematically derived: ensures episode shaping < sparse reward')
+    parser.add_argument('--pbrs_chase_strength', type=float, default=1.0,
+                        help='Chase strength multiplier K (default: 1.0). Controls W_CHASE=0.5*K, W_ATTACK=0.5*(K+1). '
+                             'Higher K = stronger chase incentive while maintaining shooting incentive. '
+                             'K=1: W_CHASE=0.5, W_ATTACK=1.0 (current). K=2: W_CHASE=1.0, W_ATTACK=1.5. K=4: W_CHASE=2.0, W_ATTACK=2.5.')
 
     # Reward scaling (fixes Q-explosion from sparse rewards)
     parser.add_argument('--reward_scale', type=float, default=0.1,
@@ -96,10 +100,6 @@ def parse_args():
     parser.add_argument('--pbrs_min_weight', type=float, default=0.1,
                         help='Minimum PBRS weight after annealing (default: 0.1). '
                              'Retains attack incentive to prevent shooting backward exploit.')
-    parser.add_argument('--pbrs_cross_weight', type=float, default=0.4,
-                        help='Weight for cross-court bonus component (default: 0.4). '
-                             'Rewards shooting away from opponent position to encourage alternating shots. '
-                             'Set to 0 to disable cross-court bonus.')
     parser.add_argument('--pbrs_clip', type=float, default=1.0,
                         help='Max absolute value for per-step PBRS reward (default: 1.0). '
                              'Prevents reward signal inconsistencies from large potential changes. '

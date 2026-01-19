@@ -154,6 +154,7 @@ def train(args):
                 "pfsp_mode": args.pfsp_mode if args.use_pfsp else None,
                 "episode_block_size": args.episode_block_size,
                 "pbrs_scale": args.pbrs_scale if args.reward_shaping else 0.0,
+                "pbrs_chase_strength": args.pbrs_chase_strength if args.reward_shaping else 1.0,
                 "pbrs_anneal_start": args.pbrs_anneal_start,
                 "pbrs_anneal_episodes": args.pbrs_anneal_episodes,
                 "pbrs_min_weight": args.pbrs_min_weight,
@@ -315,14 +316,14 @@ def train(args):
         np.random.seed(args.seed + 1)
 
     #########################################################
-    # Initialize reward shaper (PBRS V3.2 - with cross-court bonus)
+    # Initialize reward shaper (PBRS V3.3 - Dense Path to Goal)
     #########################################################
     pbrs_clip = args.pbrs_clip if args.pbrs_clip > 0 else None  # 0 = disable clipping
     pbrs_shaper = PBRSReward(
         gamma=args.gamma,
         pbrs_scale=args.pbrs_scale,
-        w_cross=args.pbrs_cross_weight,  # Cross-court bonus weight
         pbrs_clip=pbrs_clip,  # Per-step PBRS clipping
+        chase_strength=args.pbrs_chase_strength,  # K parameter for weight balance
         # Independent annealing (preferred)
         anneal_start=args.pbrs_anneal_start,
         anneal_episodes=args.pbrs_anneal_episodes,
@@ -392,8 +393,10 @@ def train(args):
     print(f"Buffer size: {args.buffer_size:,} transitions")
     if args.episode_block_size > 1:
         print(f"Episode blocking: {args.episode_block_size} episodes per opponent")
-    if args.reward_shaping and args.pbrs_scale != 1.0:
-        print(f"PBRS magnitude: SCALED by {args.pbrs_scale}x")
+    if args.reward_shaping:
+        w_chase = 0.5 * args.pbrs_chase_strength
+        w_attack = 0.5 * (args.pbrs_chase_strength + 1)
+        print(f"PBRS: scale={args.pbrs_scale}, K={args.pbrs_chase_strength} (W_CHASE={w_chase}, W_ATTACK={w_attack})")
     print("###############################")
 
     if args.self_play_start > 0:
