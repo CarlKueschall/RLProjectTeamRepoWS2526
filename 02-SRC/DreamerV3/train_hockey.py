@@ -1,581 +1,709 @@
 """
-DreamerV3 Training Script for Hockey Environment.
-
-DreamerV3 with PBRS (Potential-Based Reward Shaping):
-- PBRS provides dense reward signal during data collection
-- Mathematically proven to preserve optimal policy (Ng et al., 1999)
-- World model learns from shaped rewards, enabling meaningful imagination
-- Self-play with PFSP for generalization
-
-Based on:
-- DreamerV3 paper (Hafner et al., 2023)
-- Robot Air Hockey Challenge 2023 (Orsula et al., 2024)
-- PBRS theory (Ng et al., 1999)
+DreamerV3 Training Script for Hockey.
 
 AI Usage Declaration:
 This file was developed with assistance from Claude Code.
+
+Based on NaturalDreamer, adapted for hockey with:
+- 18-dim vector observations (MLP encoder/decoder)
+- PBRS reward shaping for dense exploration
+- Opponent management (weak/strong/self-play)
+- W&B logging and metrics tracking
+- GIF recording for visualization
 """
 
+import argparse
 import os
-import sys
 import time
-import random
-from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import torch
+import wandb
+import hockey.hockey_env as h_env
+from hockey.hockey_env import BasicOpponent, Mode
 
-# Local imports
-from config.parser import parse_args, get_config_dict
-from envs.hockey_wrapper import HockeyEnvDreamer
-from agents.hockey_dreamer import HockeyDreamer
-from utils.buffer import EpisodeBuffer
-from opponents.self_play import SelfPlayManager
-from visualization.gif_recorder import create_gif_dreamer, save_gif_dreamer
+from dreamer import Dreamer
+from utils import loadConfig, seedEverything, ensureParentFolders, saveLossesToCSV, plotMetrics
 from rewards.pbrs import PBRSRewardShaper
 
 
-def get_device(device_arg: str) -> torch.device:
-    """Get the appropriate device for training."""
-    if device_arg == 'auto':
-        if torch.cuda.is_available():
-            return torch.device('cuda')
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            return torch.device('mps')
-        else:
-            return torch.device('cpu')
-    return torch.device(device_arg)
-
-
-def set_seed(seed: int):
-    """Set random seeds for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+def get_device():
+    """Get best available device."""
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+        return torch.device("cuda")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
-def run_episode(env, agent, buffer, reward_shaper=None, explore: bool = True):
+def create_opponent(opponent_type: str):
+    """Create opponent based on type."""
+    if opponent_type == "weak":
+        return BasicOpponent(weak=True)
+    elif opponent_type == "strong":
+        return BasicOpponent(weak=False)
+    else:
+        raise ValueError(f"Unknown opponent type: {opponent_type}")
+
+
+def run_episode(env, agent, opponent, pbrs_shaper=None, training=True, seed=None, render=False):
     """
-    Run one episode and collect experience.
-
-    Args:
-        env: Hockey environment
-        agent: DreamerV3 agent
-        buffer: Episode buffer
-        reward_shaper: Optional PBRS reward shaper
-        explore: Whether to use exploration
+    Run single episode, collecting transitions.
 
     Returns:
-        episode_reward: Total sparse reward (before shaping)
-        episode_shaped_reward: Total shaped reward (stored in buffer)
-        episode_length: Number of steps
-        info: Final step info
-        pbrs_stats: PBRS statistics if shaper provided, else None
+        total_reward: Sparse game reward
+        shaped_reward: Total shaped reward (if PBRS enabled)
+        steps: Number of steps
+        outcome: 'win', 'loss', or 'draw'
+        transitions: List of (obs, action, reward, next_obs, done) tuples
+        frames: List of RGB frames if render=True
     """
-    obs, _ = env.reset()
-    agent.reset()
-    if reward_shaper is not None:
-        reward_shaper.reset()
+    if seed is not None:
+        obs, info = env.reset(seed=seed)
+    else:
+        obs, _ = env.reset()
 
-    episode_reward = 0.0  # Sparse reward only
-    episode_shaped_reward = 0.0  # Reward stored in buffer
-    episode_length = 0
+    if pbrs_shaper is not None:
+        pbrs_shaper.reset()
+
+    h, z = None, None  # Recurrent states
+    total_reward = 0.0
+    shaped_reward_total = 0.0
+    steps = 0
+    transitions = []
+    frames = []
     done = False
-    is_first = True
 
     while not done:
-        # Get action
-        action = agent.act(obs, deterministic=not explore)
+        # Capture frame if rendering
+        if render:
+            frame = env.render(mode='rgb_array')
+            if frame is not None:
+                frames.append(frame)
+
+        # Get agent action
+        action, h, z = agent.act(obs, h, z)
+
+        # Get opponent action
+        obs_opponent = env.obs_agent_two()
+        action_opponent = opponent.act(obs_opponent)
 
         # Step environment
-        next_obs, sparse_reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
+        next_obs, reward, done, truncated, info = env.step(np.hstack([action, action_opponent]))
+        done = done or truncated
 
-        # Compute shaped reward for buffer
-        if reward_shaper is not None:
-            shaping = reward_shaper.shape(obs, next_obs, done)
-            shaped_reward = sparse_reward + shaping
+        # Compute shaped reward if PBRS enabled
+        if pbrs_shaper is not None:
+            shaping = pbrs_shaper.shape(obs, next_obs, done)
+            reward_for_buffer = reward + shaping
+            shaped_reward_total += shaping
         else:
-            shaped_reward = sparse_reward
+            reward_for_buffer = reward
 
-        # Store transition with shaped reward
-        buffer.add(obs, action, shaped_reward, done, is_first)
-        is_first = False
+        # Store transition for buffer
+        if training:
+            transitions.append((obs, action, reward_for_buffer, next_obs, done))
 
-        # Update
+        total_reward += reward
         obs = next_obs
-        episode_reward += sparse_reward
-        episode_shaped_reward += shaped_reward
-        episode_length += 1
+        steps += 1
 
-    # Get PBRS stats if shaper is active
-    pbrs_stats = reward_shaper.get_episode_stats() if reward_shaper is not None else None
+    # Determine outcome
+    if info.get('winner', 0) == 1:
+        outcome = 'win'
+    elif info.get('winner', 0) == -1:
+        outcome = 'loss'
+    else:
+        outcome = 'draw'
 
-    return episode_reward, episode_shaped_reward, episode_length, info, pbrs_stats
+    return total_reward, shaped_reward_total, steps, outcome, transitions, frames
 
 
-def evaluate(env, agent, num_episodes: int = 50, prefix: str = 'eval') -> dict:
+def record_gif(env, agent, opponent, num_episodes=3, max_timesteps=250):
     """
-    Evaluate agent without exploration.
-
-    Args:
-        env: Evaluation environment
-        agent: Agent to evaluate
-        num_episodes: Number of evaluation episodes
-        prefix: Prefix for metric names
+    Record GIF of evaluation episodes.
 
     Returns:
-        Dictionary with evaluation metrics
+        frames: List of stitched RGB frames
+        results: List of outcomes
     """
-    wins = 0
-    losses = 0
-    draws = 0
-    total_reward = 0
-    total_length = 0
-    goals_scored = 0
-    goals_conceded = 0
+    try:
+        from PIL import Image
+    except ImportError:
+        print("PIL not installed. GIF recording disabled.")
+        return None, []
+
+    all_episode_frames = []
+    results = []
 
     for _ in range(num_episodes):
-        obs, _ = env.reset()
-        agent.reset()
-        done = False
-        episode_reward = 0
-        episode_length = 0
+        _, _, _, outcome, _, frames = run_episode(
+            env, agent, opponent, pbrs_shaper=None, training=False, render=True
+        )
+        all_episode_frames.append(frames)
+        results.append(1 if outcome == 'win' else (-1 if outcome == 'loss' else 0))
 
-        while not done:
-            action = agent.act(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            episode_reward += reward
-            episode_length += 1
+    if not all_episode_frames or not all_episode_frames[0]:
+        return None, results
 
-        total_reward += episode_reward
-        total_length += episode_length
+    # Find max frames and pad shorter episodes
+    max_frames = max(len(f) for f in all_episode_frames)
+    for frames in all_episode_frames:
+        if len(frames) < max_frames and len(frames) > 0:
+            while len(frames) < max_frames:
+                frames.append(frames[-1])
 
-        winner = info.get('winner', 0)
-        if winner == 1:
-            wins += 1
-            goals_scored += 1
-        elif winner == -1:
-            losses += 1
-            goals_conceded += 1
-        else:
-            draws += 1
+    # Stitch frames horizontally
+    stitched_frames = []
+    for frame_idx in range(max_frames):
+        episode_frames = [ep[frame_idx] for ep in all_episode_frames if frame_idx < len(ep)]
+        if episode_frames:
+            pil_images = [Image.fromarray(f) for f in episode_frames]
+            total_width = sum(img.width for img in pil_images)
+            max_height = max(img.height for img in pil_images)
+            stitched = Image.new('RGB', (total_width, max_height))
+            x_offset = 0
+            for img in pil_images:
+                stitched.paste(img, (x_offset, 0))
+                x_offset += img.width
+            stitched_frames.append(np.array(stitched))
 
-    return {
-        f'{prefix}/win_rate': wins / num_episodes,
-        f'{prefix}/loss_rate': losses / num_episodes,
-        f'{prefix}/draw_rate': draws / num_episodes,
-        f'{prefix}/mean_reward': total_reward / num_episodes,
-        f'{prefix}/mean_length': total_length / num_episodes,
-        f'{prefix}/goals_scored': goals_scored,
-        f'{prefix}/goals_conceded': goals_conceded,
-    }
+    return stitched_frames, results
+
+
+def save_gif_to_wandb(frames, results, step, opponent_name):
+    """Save GIF to W&B."""
+    if frames is None or len(frames) == 0:
+        return
+
+    try:
+        import imageio
+        import tempfile
+    except ImportError:
+        return
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.gif', delete=False) as tmp:
+            tmp_path = tmp.name
+
+        imageio.mimsave(tmp_path, frames, fps=15, loop=0)
+
+        result_strs = []
+        for i, r in enumerate(results):
+            if r == 1:
+                result_strs.append(f"Ep{i+1}:WIN")
+            elif r == -1:
+                result_strs.append(f"Ep{i+1}:LOSS")
+            else:
+                result_strs.append(f"Ep{i+1}:DRAW")
+
+        wins = sum(1 for r in results if r == 1)
+        caption = f"Step {step:,} vs {opponent_name} | {' | '.join(result_strs)} | {wins}/{len(results)} wins"
+
+        wandb.log({
+            f"eval/gif_{opponent_name}": wandb.Video(tmp_path, fps=15, format="gif", caption=caption),
+        }, step=step)
+
+        os.unlink(tmp_path)
+        print(f"  GIF recorded vs {opponent_name}: {', '.join(result_strs)}")
+
+    except Exception as e:
+        print(f"GIF recording failed: {e}")
+
+
+def parse_args():
+    """Parse command line arguments with all config overrides."""
+    parser = argparse.ArgumentParser(description="DreamerV3 Hockey Training")
+
+    # Config file
+    parser.add_argument("--config", type=str, default="hockey.yml", help="Config file")
+
+    # Basic settings
+    parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    parser.add_argument("--device", type=str, default=None, help="Device (cuda/mps/cpu)")
+    parser.add_argument("--run_name", type=str, default=None, help="Run name for logging")
+
+    # Environment
+    parser.add_argument("--opponent", type=str, default=None, choices=["weak", "strong"],
+                        help="Opponent type")
+    parser.add_argument("--mode", type=str, default="NORMAL",
+                        choices=["NORMAL", "TRAIN_SHOOTING", "TRAIN_DEFENSE"],
+                        help="Environment mode")
+
+    # Training schedule
+    parser.add_argument("--gradient_steps", type=int, default=None, help="Total gradient steps")
+    parser.add_argument("--replay_ratio", type=int, default=None,
+                        help="Gradient steps per environment step")
+    parser.add_argument("--warmup_episodes", type=int, default=None, help="Warmup episodes")
+    parser.add_argument("--interaction_episodes", type=int, default=None,
+                        help="Episodes between training batches")
+
+    # DreamerV3 hyperparameters
+    parser.add_argument("--batch_size", type=int, default=None, help="Batch size")
+    parser.add_argument("--batch_length", type=int, default=None, help="Sequence length")
+    parser.add_argument("--imagination_horizon", type=int, default=None, help="Imagination horizon")
+    parser.add_argument("--recurrent_size", type=int, default=None, help="GRU hidden size")
+    parser.add_argument("--latent_length", type=int, default=None, help="Number of latent vars")
+    parser.add_argument("--latent_classes", type=int, default=None, help="Classes per latent var")
+    parser.add_argument("--encoded_obs_size", type=int, default=None, help="Encoded observation size")
+
+    # Learning rates
+    parser.add_argument("--lr_world", type=float, default=None, help="World model LR")
+    parser.add_argument("--lr_actor", type=float, default=None, help="Actor LR")
+    parser.add_argument("--lr_critic", type=float, default=None, help="Critic LR")
+
+    # Training settings
+    parser.add_argument("--discount", type=float, default=None, help="Discount factor gamma")
+    parser.add_argument("--lambda_", type=float, default=None, help="Lambda for TD(lambda)")
+    parser.add_argument("--entropy_scale", type=float, default=None, help="Entropy bonus scale")
+    parser.add_argument("--free_nats", type=float, default=None, help="KL free nats threshold")
+    parser.add_argument("--beta_prior", type=float, default=None, help="Prior KL weight")
+    parser.add_argument("--beta_posterior", type=float, default=None, help="Posterior KL weight")
+    parser.add_argument("--gradient_clip", type=float, default=None, help="Gradient clipping")
+
+    # Buffer
+    parser.add_argument("--buffer_capacity", type=int, default=None, help="Replay buffer capacity")
+
+    # PBRS reward shaping
+    parser.add_argument("--use_pbrs", action="store_true", default=None, help="Enable PBRS")
+    parser.add_argument("--no_pbrs", action="store_true", help="Disable PBRS")
+    parser.add_argument("--pbrs_scale", type=float, default=None, help="PBRS scale factor")
+    parser.add_argument("--pbrs_w_chase", type=float, default=None, help="PBRS chase weight")
+    parser.add_argument("--pbrs_w_attack", type=float, default=None, help="PBRS attack weight")
+
+    # Checkpointing and evaluation
+    parser.add_argument("--checkpoint_interval", type=int, default=None,
+                        help="Checkpoint save interval (gradient steps)")
+    parser.add_argument("--eval_interval", type=int, default=None,
+                        help="Evaluation interval (gradient steps)")
+    parser.add_argument("--eval_episodes", type=int, default=None, help="Episodes per evaluation")
+
+    # GIF recording
+    parser.add_argument("--gif_interval", type=int, default=None,
+                        help="GIF recording interval (gradient steps, 0=disabled)")
+    parser.add_argument("--gif_episodes", type=int, default=3, help="Episodes per GIF")
+
+    # Logging
+    parser.add_argument("--no_wandb", action="store_true", help="Disable W&B logging")
+    parser.add_argument("--wandb_project", type=str, default=None, help="W&B project name")
+    parser.add_argument("--wandb_entity", type=str, default=None, help="W&B entity")
+    parser.add_argument("--log_interval", type=int, default=10, help="Console log interval")
+
+    # Resume
+    parser.add_argument("--resume", type=str, default=None, help="Checkpoint path to resume from")
+
+    return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
-    # Print configuration
-    print("=" * 60)
-    print("DreamerV3 Hockey Training (Simplified)")
-    print("=" * 60)
-    print(f"Mode: {args.mode}")
-    print(f"Opponent: {args.opponent}")
-    print(f"Max steps: {args.max_steps:,}")
-    print(f"Seed: {args.seed}")
-    print(f"Device: {args.device}")
-    print("=" * 60)
+    # Load config
+    config = loadConfig(args.config)
 
-    # Setup
-    set_seed(args.seed)
-    device = get_device(args.device)
-    print(f"\nUsing device: {device}")
+    # Apply CLI overrides to config
+    if args.seed is not None:
+        config.seed = args.seed
+    if args.opponent is not None:
+        config.opponent = args.opponent
+    if args.run_name is not None:
+        config.runName = args.run_name
 
-    # Create directories
-    save_dir = Path(args.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir = save_dir / "checkpoints"
-    checkpoint_dir.mkdir(exist_ok=True)
+    # Training schedule overrides
+    if args.gradient_steps is not None:
+        config.gradientSteps = args.gradient_steps
+    if args.replay_ratio is not None:
+        config.replayRatio = args.replay_ratio
+    if args.warmup_episodes is not None:
+        config.episodesBeforeStart = args.warmup_episodes
+    if args.interaction_episodes is not None:
+        config.numInteractionEpisodes = args.interaction_episodes
+
+    # DreamerV3 hyperparameter overrides
+    if args.batch_size is not None:
+        config.dreamer.batchSize = args.batch_size
+    if args.batch_length is not None:
+        config.dreamer.batchLength = args.batch_length
+    if args.imagination_horizon is not None:
+        config.dreamer.imaginationHorizon = args.imagination_horizon
+    if args.recurrent_size is not None:
+        config.dreamer.recurrentSize = args.recurrent_size
+    if args.latent_length is not None:
+        config.dreamer.latentLength = args.latent_length
+    if args.latent_classes is not None:
+        config.dreamer.latentClasses = args.latent_classes
+    if args.encoded_obs_size is not None:
+        config.dreamer.encodedObsSize = args.encoded_obs_size
+
+    # Learning rate overrides
+    if args.lr_world is not None:
+        config.dreamer.worldModelLR = args.lr_world
+    if args.lr_actor is not None:
+        config.dreamer.actorLR = args.lr_actor
+    if args.lr_critic is not None:
+        config.dreamer.criticLR = args.lr_critic
+
+    # Training settings overrides
+    if args.discount is not None:
+        config.dreamer.discount = args.discount
+    if args.lambda_ is not None:
+        config.dreamer.lambda_ = args.lambda_
+    if args.entropy_scale is not None:
+        config.dreamer.entropyScale = args.entropy_scale
+    if args.free_nats is not None:
+        config.dreamer.freeNats = args.free_nats
+    if args.beta_prior is not None:
+        config.dreamer.betaPrior = args.beta_prior
+    if args.beta_posterior is not None:
+        config.dreamer.betaPosterior = args.beta_posterior
+    if args.gradient_clip is not None:
+        config.dreamer.gradientClip = args.gradient_clip
+
+    # Buffer override
+    if args.buffer_capacity is not None:
+        config.dreamer.buffer.capacity = args.buffer_capacity
+
+    # PBRS overrides
+    if args.no_pbrs:
+        config.usePBRS = False
+    elif args.use_pbrs:
+        config.usePBRS = True
+    if args.pbrs_scale is not None:
+        config.pbrsScale = args.pbrs_scale
+    if args.pbrs_w_chase is not None:
+        config.pbrsWChase = args.pbrs_w_chase
+    if args.pbrs_w_attack is not None:
+        config.pbrsWAttack = args.pbrs_w_attack
+
+    # Checkpoint/eval overrides
+    if args.checkpoint_interval is not None:
+        config.checkpointInterval = args.checkpoint_interval
+    if args.eval_interval is not None:
+        config.evalInterval = args.eval_interval
+    if args.eval_episodes is not None:
+        config.numEvaluationEpisodes = args.eval_episodes
+
+    # GIF overrides
+    if args.gif_interval is not None:
+        config.gifInterval = args.gif_interval
+    else:
+        config.gifInterval = config.get('gifInterval', 10000)  # Default 10k
+    config.gifEpisodes = args.gif_episodes
+
+    # W&B overrides
+    if args.wandb_project is not None:
+        config.wandbProject = args.wandb_project
+    if args.wandb_entity is not None:
+        config.wandbEntity = args.wandb_entity
+
+    # Set seed
+    seedEverything(config.seed)
+
+    # Device
+    if args.device is not None:
+        device = torch.device(args.device)
+    else:
+        device = get_device()
+    print(f"Using device: {device}")
+
+    # Create run name
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    runName = f"{config.runName}_{config.opponent}_seed{config.seed}_{timestamp}"
+
+    # Setup paths
+    checkpointFilenameBase = os.path.join(config.folderNames.checkpointsFolder, runName)
+    metricsFilename = os.path.join(config.folderNames.metricsFolder, runName)
+    plotFilename = os.path.join(config.folderNames.plotsFolder, runName)
+    ensureParentFolders(checkpointFilenameBase, metricsFilename, plotFilename)
+
+    # Initialize W&B
+    use_wandb = config.get('useWandB', True) and not args.no_wandb
+    if use_wandb:
+        wandb.init(
+            project=config.get('wandbProject', 'rl-hockey'),
+            entity=config.get('wandbEntity', None),
+            name=runName,
+            config={
+                "algorithm": "DreamerV3",
+                "seed": config.seed,
+                "opponent": config.opponent,
+                "batch_size": config.dreamer.batchSize,
+                "batch_length": config.dreamer.batchLength,
+                "imagination_horizon": config.dreamer.imaginationHorizon,
+                "recurrent_size": config.dreamer.recurrentSize,
+                "latent_length": config.dreamer.latentLength,
+                "latent_classes": config.dreamer.latentClasses,
+                "actor_lr": config.dreamer.actorLR,
+                "critic_lr": config.dreamer.criticLR,
+                "world_model_lr": config.dreamer.worldModelLR,
+                "discount": config.dreamer.discount,
+                "lambda": config.dreamer.lambda_,
+                "entropy_scale": config.dreamer.entropyScale,
+                "free_nats": config.dreamer.freeNats,
+                "pbrs_enabled": config.get('usePBRS', False),
+                "pbrs_scale": config.get('pbrsScale', 0.03),
+                "buffer_capacity": config.dreamer.buffer.capacity,
+                "gif_interval": config.gifInterval,
+            }
+        )
 
     # Create environment
-    env = HockeyEnvDreamer(
-        mode=args.mode,
-        opponent=args.opponent if args.opponent != 'self' else 'weak',
-        include_fault_penalty=args.include_fault_penalty,
-        fault_penalty=args.fault_penalty,
-        seed=args.seed,
-    )
+    mode_map = {
+        'NORMAL': Mode.NORMAL,
+        'TRAIN_SHOOTING': Mode.TRAIN_SHOOTING,
+        'TRAIN_DEFENSE': Mode.TRAIN_DEFENSE,
+    }
+    env_mode = mode_map.get(args.mode, Mode.NORMAL)
+    env = h_env.HockeyEnv(mode=env_mode)
+    observationSize = env.observation_space.shape[0]
+    actionSize = env.action_space.shape[0] // 2  # Only agent's actions (4)
+    actionLow = env.action_space.low[:actionSize].tolist()
+    actionHigh = env.action_space.high[:actionSize].tolist()
 
-    obs_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.shape[0]
-    print(f"Observation dim: {obs_dim}, Action dim: {action_dim}")
+    print(f"Hockey environment: obs={observationSize}, action={actionSize}, mode={args.mode}")
+    print(f"Action bounds: low={actionLow}, high={actionHigh}")
+
+    # Create opponent
+    opponent = create_opponent(config.opponent)
+    print(f"Opponent: {config.opponent}")
+
+    # Create PBRS shaper if enabled
+    use_pbrs = getattr(config, 'usePBRS', False)
+    if use_pbrs:
+        pbrs_scale = getattr(config, 'pbrsScale', 0.03)
+        pbrs_w_chase = getattr(config, 'pbrsWChase', 0.5)
+        pbrs_w_attack = getattr(config, 'pbrsWAttack', 1.0)
+        pbrs_shaper = PBRSRewardShaper(
+            gamma=config.dreamer.discount,
+            scale=pbrs_scale,
+            w_chase=pbrs_w_chase,
+            w_attack=pbrs_w_attack,
+        )
+        print(f"PBRS enabled: scale={pbrs_scale}, w_chase={pbrs_w_chase}, w_attack={pbrs_w_attack}")
+    else:
+        pbrs_shaper = None
+        print("PBRS disabled")
 
     # Create agent
-    config = get_config_dict(args)
-    agent = HockeyDreamer(
-        obs_dim=obs_dim,
-        action_dim=action_dim,
-        hidden_size=config['hidden_size'],
-        num_categories=config.get('num_categories', 32),
-        num_classes=config.get('num_classes', 32),
-        recurrent_size=config.get('deter_size', 256),
-        embed_dim=config.get('hidden_size', 256),
-        horizon=config['imagination_horizon'],
-        imagine_batch_size=config.get('imagine_batch_size', 256),
-        gamma=config['gamma'],
-        lambda_gae=config['lambda_gae'],
-        kl_free=config.get('free_nats', 1.0),
-        unimix=config.get('unimix', 0.01),
-        entropy_scale=config.get('entropy_scale', 3e-4),
-        lr_world=config['lr_world'],
-        lr_actor=config['lr_actor'],
-        lr_critic=config['lr_critic'],
-        grad_clip=config['grad_clip'],
-        use_agc=config.get('use_agc', True),
-        agc_clip=config.get('agc_clip', 0.3),
-        terminal_reward_weight=config.get('terminal_reward_weight', 100.0),
-        device=str(device),
-    )
-    latent_size = config.get('num_categories', 32) * config.get('num_classes', 32)
-    print(f"\nCreated HockeyDreamer agent")
-    print(f"  Model size: {config.get('model_size', 'custom')} (deter={config['deter_size']}, hidden={config['hidden_size']})")
-    print(f"  Categorical latent: {config.get('num_categories', 32)} categories × {config.get('num_classes', 32)} classes = {latent_size}")
-    print(f"  Gradient clipping: {'AGC(' + str(config.get('agc_clip', 0.3)) + ')' if config.get('use_agc', True) else 'norm(' + str(config['grad_clip']) + ')'}")
-    print(f"  Imagination: horizon={config['imagination_horizon']}, batch={config.get('imagine_batch_size', 256)}")
+    agent = Dreamer(observationSize, actionSize, actionLow, actionHigh, device, config.dreamer)
 
-    # Create PBRS reward shaper if enabled
-    reward_shaper = None
-    if config.get('use_pbrs', True):
-        reward_shaper = PBRSRewardShaper(
-            gamma=config['gamma'],
-            scale=config.get('pbrs_scale', 0.03),
-            w_chase=config.get('pbrs_w_chase', 0.5),
-            w_attack=config.get('pbrs_w_attack', 1.0),
-            clip=config.get('pbrs_clip', None),
+    # Resume if requested
+    if args.resume:
+        if os.path.exists(args.resume) or os.path.exists(args.resume + '.pth'):
+            agent.loadCheckpoint(args.resume)
+            print(f"Resumed from: {args.resume}")
+        else:
+            print(f"Warning: Checkpoint not found: {args.resume}")
+
+    # Print config summary
+    print(f"\n=== Configuration ===")
+    print(f"Gradient steps: {config.gradientSteps}")
+    print(f"Replay ratio: {config.replayRatio}")
+    print(f"Batch: {config.dreamer.batchSize} x {config.dreamer.batchLength}")
+    print(f"Imagination horizon: {config.dreamer.imaginationHorizon}")
+    print(f"LR: world={config.dreamer.worldModelLR}, actor={config.dreamer.actorLR}, critic={config.dreamer.criticLR}")
+    print(f"Entropy scale: {config.dreamer.entropyScale}")
+    print(f"GIF interval: {config.gifInterval}")
+    print()
+
+    # === Warmup Phase ===
+    print(f"=== Warmup: {config.episodesBeforeStart} episodes ===")
+    for ep in range(config.episodesBeforeStart):
+        _, _, steps, outcome, transitions, _ = run_episode(
+            env, agent, opponent, pbrs_shaper, training=True, seed=config.seed + ep
         )
-        print(f"\nPBRS enabled:")
-        print(f"  scale={config.get('pbrs_scale', 0.03)}, w_chase={config.get('pbrs_w_chase', 0.5)}, w_attack={config.get('pbrs_w_attack', 1.0)}")
-    else:
-        print(f"\nPBRS disabled - using sparse rewards only")
+        for trans in transitions:
+            agent.buffer.add(*trans)
+        print(f"Warmup {ep+1}/{config.episodesBeforeStart}: {steps} steps, {outcome}")
+        agent.totalEpisodes += 1
 
-    # Create replay buffer
-    buffer = EpisodeBuffer(
-        capacity=args.buffer_size,
-        obs_shape=(obs_dim,),
-        action_shape=(action_dim,),
-    )
+    print(f"Buffer size after warmup: {len(agent.buffer)}")
 
-    # Self-play setup
-    self_play_manager = None
-    if args.self_play_start > 0:
-        self_play_manager = SelfPlayManager(
-            pool_size=args.self_play_pool_size,
-            save_interval=args.self_play_save_interval,
-            use_pfsp=args.use_pfsp,
-            pfsp_mode=args.pfsp_mode,
-        )
-        print(f"Self-play enabled at step {args.self_play_start:,}")
+    # === Main Training Loop ===
+    print(f"\n=== Training: {config.gradientSteps} gradient steps ===")
 
-    # W&B setup
-    if not args.no_wandb:
-        try:
-            import wandb
-            run_name = args.run_name or f"DreamerV3-{args.mode}-{args.opponent}-seed{args.seed}"
-
-            # Comprehensive config for W&B
-            wandb_config = {
-                # Environment
-                'env/mode': args.mode,
-                'env/opponent': args.opponent,
-                'env/obs_dim': obs_dim,
-                'env/action_dim': action_dim,
-
-                # Architecture
-                'arch/hidden_size': config['hidden_size'],
-                'arch/latent_size': config.get('latent_size', 64),
-                'arch/recurrent_size': config.get('deter_size', 256),
-
-                # Imagination
-                'imagination/horizon': config['imagination_horizon'],
-                'imagination/batch_size': config.get('imagine_batch_size', 256),
-
-                # Training
-                'train/batch_size': args.batch_size,
-                'train/batch_length': args.batch_length,
-                'train/lr_world': config['lr_world'],
-                'train/lr_actor': config['lr_actor'],
-                'train/lr_critic': config['lr_critic'],
-                'train/gamma': config['gamma'],
-                'train/lambda_gae': config['lambda_gae'],
-                'train/grad_clip': config['grad_clip'],
-
-                # DreamerV3 specific
-                'dreamer/kl_free': config.get('free_nats', 1.0),
-                'dreamer/entropy_scale': config.get('entropy_scale', 3e-4),
-                'dreamer/terminal_reward_weight': config.get('terminal_reward_weight', 200.0),
-
-                # PBRS
-                'pbrs/enabled': config.get('use_pbrs', True),
-                'pbrs/scale': config.get('pbrs_scale', 0.03),
-                'pbrs/w_chase': config.get('pbrs_w_chase', 0.5),
-                'pbrs/w_attack': config.get('pbrs_w_attack', 1.0),
-                'pbrs/clip': config.get('pbrs_clip', None),
-
-                # Buffer
-                'buffer/capacity': args.buffer_size,
-                'buffer/min_size': args.min_buffer_size,
-
-                # Logging
-                'logging/eval_frequency': args.eval_frequency,
-                'logging/eval_episodes': args.eval_episodes,
-                'logging/gif_frequency': args.gif_frequency,
-                'logging/gif_episodes': args.gif_episodes,
-                'logging/save_frequency': args.save_frequency,
-
-                # Meta
-                'seed': args.seed,
-                'max_steps': args.max_steps,
-                'device': str(device),
-            }
-
-            wandb.init(
-                project=args.wandb_project,
-                entity=args.wandb_entity,
-                name=run_name,
-                config=wandb_config,
-                tags=['dreamerv3', args.mode, args.opponent],
-            )
-            print(f"W&B run: {run_name}")
-        except ImportError:
-            print("W&B not installed, logging disabled")
-            args.no_wandb = True
-
-    # Training loop
-    total_steps = 0
-    episode_count = 0
-    best_eval_winrate = 0.0
-    wins, losses, draws = 0, 0, 0
-    train_metrics = {}
-    last_log_time = time.time()
-
-    print("\nStarting training...")
-    print("Legend: W=Win, L=Loss, D=Draw | Training starts after buffer fills\n")
+    # Metrics tracking
+    episode_rewards = []
+    episode_lengths = []
+    episode_shaped_rewards = []
+    episode_outcomes = {'win': 0, 'loss': 0, 'draw': 0}
+    recent_wins = []
+    recent_lengths = []
+    recent_shaped_rewards = []
     start_time = time.time()
 
-    while total_steps < args.max_steps:
-        episode_start = time.time()
+    iterationsNum = config.gradientSteps // config.replayRatio
+    for iteration in range(iterationsNum):
+        # === Gradient Updates ===
+        worldModelMetrics = {}
+        behaviorMetrics = {}
 
-        # Run episode
-        episode_reward, episode_shaped_reward, episode_length, info, pbrs_stats = run_episode(
-            env, agent, buffer, reward_shaper=reward_shaper, explore=True
-        )
-        episode_time = time.time() - episode_start
+        for _ in range(config.replayRatio):
+            sampledData = agent.buffer.sample(agent.config.batchSize, agent.config.batchLength)
+            initialStates, wmMetrics = agent.worldModelTraining(sampledData)
+            bhMetrics = agent.behaviorTraining(initialStates)
+            agent.totalGradientSteps += 1
 
-        total_steps += episode_length
-        episode_count += 1
+            worldModelMetrics = wmMetrics
+            behaviorMetrics = bhMetrics
 
-        # Track outcomes
-        winner = info.get('winner', 0)
-        if winner == 1:
-            wins += 1
-            outcome = 'W'
-        elif winner == -1:
-            losses += 1
-            outcome = 'L'
-        else:
-            draws += 1
-            outcome = 'D'
+        # === Environment Interaction ===
+        for _ in range(config.numInteractionEpisodes):
+            reward, shaped_reward, steps, outcome, transitions, _ = run_episode(
+                env, agent, opponent, pbrs_shaper, training=True
+            )
 
-        # Train agent
-        train_time = 0
-        training_active = len(buffer) >= args.min_buffer_size
-        if training_active:
-            train_start = time.time()
-            batch = buffer.sample(args.batch_size, args.batch_length)
-            if batch is not None:
-                train_metrics = agent.train_step(batch)
-            train_time = time.time() - train_start
+            for trans in transitions:
+                agent.buffer.add(*trans)
 
-        # Brief per-episode logging (console)
-        elapsed = time.time() - start_time
-        win_rate = wins / episode_count if episode_count > 0 else 0
+            agent.totalEnvSteps += steps
+            agent.totalEpisodes += 1
 
-        if training_active:
-            pbrs_str = f" | pbrs: {pbrs_stats['pbrs/episode_total']:+.2f}" if pbrs_stats else ""
-            print(f"Ep {episode_count:4d} [{outcome}] | "
-                  f"steps: {episode_length:3d} | "
-                  f"r: {episode_reward:+.1f} | "
-                  f"shaped: {episode_shaped_reward:+.2f}{pbrs_str} | "
-                  f"world_loss: {train_metrics.get('world/loss', 0):.3f}")
-        else:
-            # Before training starts, show buffer fill progress
-            fill_pct = 100 * len(buffer) / args.min_buffer_size
-            print(f"Ep {episode_count:4d} [{outcome}] | "
-                  f"steps: {episode_length:3d} | "
-                  f"r: {episode_reward:+.1f} | "
-                  f"buffer: {len(buffer):,}/{args.min_buffer_size:,} ({fill_pct:.0f}%)")
+            # Record outcome for reward hacking detection
+            if pbrs_shaper is not None:
+                pbrs_shaper.record_episode_outcome(reward, outcome)
 
-        # W&B logging every episode (for smooth graphs)
-        if not args.no_wandb and training_active:
-            import wandb
+            # Track episode metrics
+            episode_rewards.append(reward)
+            episode_lengths.append(steps)
+            episode_shaped_rewards.append(shaped_reward)
+            episode_outcomes[outcome] += 1
 
-            # Build log dict
-            log_dict = {
-                # Episode metrics
-                'episode/reward': episode_reward,
-                'episode/shaped_reward': episode_shaped_reward,
-                'episode/length': episode_length,
-                'episode/outcome': {'W': 1, 'L': -1, 'D': 0}[outcome],
-                'episode/time': episode_time,
-                'episode/train_time': train_time,
+            # Rolling windows for recent stats
+            recent_wins.append(1 if outcome == 'win' else 0)
+            recent_lengths.append(steps)
+            recent_shaped_rewards.append(shaped_reward)
+            if len(recent_wins) > 100:
+                recent_wins.pop(0)
+                recent_lengths.pop(0)
+                recent_shaped_rewards.pop(0)
 
-                # Running stats
-                'stats/win_rate': win_rate,
-                'stats/total_steps': total_steps,
-                'stats/buffer_size': len(buffer),
-                'stats/buffer_episodes': buffer.num_episodes,
+        # === Console Logging ===
+        if iteration % args.log_interval == 0:
+            elapsed = time.time() - start_time
+            win_rate = sum(recent_wins) / len(recent_wins) if recent_wins else 0
+            mean_reward = np.mean(episode_rewards[-100:]) if episode_rewards else 0
+            mean_length = np.mean(recent_lengths) if recent_lengths else 0
+            mean_shaped = np.mean(recent_shaped_rewards) if recent_shaped_rewards else 0
 
-                # All training metrics (world model + behavior)
-                **train_metrics,
+            # Get entropy from behavior metrics (handle renamed key)
+            entropy_val = behaviorMetrics.get('behavior/entropy_mean', behaviorMetrics.get('behavior/entropy', 0))
 
-                # Step for x-axis
-                'step': total_steps,
-                'episode': episode_count,
-            }
+            print(f"[{agent.totalGradientSteps:>7}] "
+                  f"Ep={agent.totalEpisodes:>5} | "
+                  f"Steps={agent.totalEnvSteps:>7} | "
+                  f"Win={win_rate:.1%} | "
+                  f"R={mean_reward:>6.2f} | "
+                  f"WM={worldModelMetrics.get('world/loss', 0):.3f} | "
+                  f"Act={behaviorMetrics.get('behavior/actor_loss', 0):.3f} | "
+                  f"Crit={behaviorMetrics.get('behavior/critic_loss', 0):.3f} | "
+                  f"Ent={entropy_val:.2f}")
 
-            # Add PBRS stats if available
-            if pbrs_stats is not None:
-                log_dict.update(pbrs_stats)
+            if use_wandb:
+                log_dict = {
+                    # Core stats
+                    "stats/gradient_steps": agent.totalGradientSteps,
+                    "stats/env_steps": agent.totalEnvSteps,
+                    "stats/episodes": agent.totalEpisodes,
+                    "stats/win_rate": win_rate,
+                    "stats/mean_reward": mean_reward,
+                    "stats/wins": episode_outcomes['win'],
+                    "stats/losses": episode_outcomes['loss'],
+                    "stats/draws": episode_outcomes['draw'],
+                    "stats/buffer_size": len(agent.buffer),
 
-            wandb.log(log_dict)
+                    # Episode-level stats
+                    "episode/length_mean": mean_length,
+                    "episode/length_std": np.std(recent_lengths) if len(recent_lengths) > 1 else 0,
+                    "episode/length_min": min(recent_lengths) if recent_lengths else 0,
+                    "episode/length_max": max(recent_lengths) if recent_lengths else 0,
+                    "episode/reward_mean": mean_reward,
+                    "episode/reward_std": np.std(episode_rewards[-100:]) if len(episode_rewards) > 1 else 0,
+                    "episode/shaped_reward_mean": mean_shaped,
 
-        # Self-play opponent switching
-        if self_play_manager is not None and total_steps >= args.self_play_start:
-            # Save to pool periodically
-            if total_steps % args.self_play_save_interval == 0:
-                self_play_manager.update_pool(
-                    episode_count, agent, checkpoint_dir
+                    # Outcome rates (last 100 episodes)
+                    "episode/win_rate_100": win_rate,
+                    "episode/draw_rate_100": recent_lengths.count(250) / len(recent_lengths) if recent_lengths else 0,  # Max length = draw
+
+                    # Timing
+                    "time/elapsed_hours": elapsed / 3600,
+                    "time/steps_per_second": agent.totalEnvSteps / elapsed if elapsed > 0 else 0,
+                    "time/episodes_per_hour": agent.totalEpisodes / (elapsed / 3600) if elapsed > 0 else 0,
+                    "time/gradient_steps_per_second": agent.totalGradientSteps / elapsed if elapsed > 0 else 0,
+                }
+                log_dict.update(worldModelMetrics)
+                log_dict.update(behaviorMetrics)
+
+                if pbrs_shaper is not None:
+                    log_dict.update(pbrs_shaper.get_episode_stats())
+
+                wandb.log(log_dict, step=agent.totalGradientSteps)
+
+        # === Checkpointing ===
+        if agent.totalGradientSteps % config.checkpointInterval == 0 and config.saveCheckpoints:
+            suffix = f"{agent.totalGradientSteps // 1000}k"
+            checkpoint_path = f"{checkpointFilenameBase}_{suffix}"
+            agent.saveCheckpoint(checkpoint_path)
+            print(f"Saved checkpoint: {checkpoint_path}")
+
+            if use_wandb:
+                wandb.save(checkpoint_path + '.pth')
+
+        # === Evaluation ===
+        if agent.totalGradientSteps % config.get('evalInterval', 1000) == 0:
+            eval_rewards = []
+            eval_outcomes = {'win': 0, 'loss': 0, 'draw': 0}
+
+            for _ in range(config.numEvaluationEpisodes):
+                reward, _, _, outcome, _, _ = run_episode(
+                    env, agent, opponent, pbrs_shaper=None, training=False
                 )
+                eval_rewards.append(reward)
+                eval_outcomes[outcome] += 1
 
-        # Detailed summary every 10 episodes (console only)
-        if episode_count % 10 == 0:
-            steps_per_sec = total_steps / elapsed if elapsed > 0 else 0
+            eval_win_rate = eval_outcomes['win'] / config.numEvaluationEpisodes
+            eval_mean_reward = np.mean(eval_rewards)
 
-            print(f"\n{'─'*60}")
-            print(f"Summary at Episode {episode_count} | Step {total_steps:,}")
-            print(f"  Win Rate: {win_rate:.1%} (W:{wins} L:{losses} D:{draws})")
-            print(f"  Buffer: {len(buffer):,} transitions | {buffer.num_episodes} episodes")
-            print(f"  Speed: {steps_per_sec:.1f} steps/sec | Elapsed: {elapsed/60:.1f} min")
-            if train_metrics:
-                print(f"  Losses: world={train_metrics.get('world/loss', 0):.3f} "
-                      f"actor={train_metrics.get('behavior/actor_loss', 0):.3f} "
-                      f"critic={train_metrics.get('behavior/critic_loss', 0):.3f}")
-            print(f"{'─'*60}\n")
+            print(f"  EVAL: Win={eval_win_rate:.1%}, R={eval_mean_reward:.2f}")
 
-        # Evaluation
-        if episode_count % args.eval_frequency == 0 and episode_count > 0:
-            print(f"\n{'='*60}")
-            print(f"EVALUATION at episode {episode_count:,} (step {total_steps:,})")
-            print(f"{'='*60}")
-
-            # Evaluate vs weak opponent
-            eval_env_weak = HockeyEnvDreamer(
-                mode=args.mode,
-                opponent='weak',
-                seed=args.seed + 1000
-            )
-            eval_weak = evaluate(eval_env_weak, agent, args.eval_episodes, prefix='eval_weak')
-            eval_env_weak.close()
-            print(f"  vs Weak:   {eval_weak['eval_weak/win_rate']:.1%} win | "
-                  f"{eval_weak['eval_weak/draw_rate']:.1%} draw | "
-                  f"{eval_weak['eval_weak/loss_rate']:.1%} loss")
-
-            # Evaluate vs strong opponent
-            eval_env_strong = HockeyEnvDreamer(
-                mode=args.mode,
-                opponent='strong',
-                seed=args.seed + 2000
-            )
-            eval_strong = evaluate(eval_env_strong, agent, args.eval_episodes, prefix='eval_strong')
-            eval_env_strong.close()
-            print(f"  vs Strong: {eval_strong['eval_strong/win_rate']:.1%} win | "
-                  f"{eval_strong['eval_strong/draw_rate']:.1%} draw | "
-                  f"{eval_strong['eval_strong/loss_rate']:.1%} loss")
-
-            print(f"{'='*60}\n")
-
-            # W&B logging for evaluation
-            if not args.no_wandb:
-                import wandb
+            if use_wandb:
                 wandb.log({
-                    **eval_weak,
-                    **eval_strong,
-                    'eval/step': total_steps,
-                })
+                    "eval/win_rate": eval_win_rate,
+                    "eval/mean_reward": eval_mean_reward,
+                    "eval/wins": eval_outcomes['win'],
+                    "eval/losses": eval_outcomes['loss'],
+                    "eval/draws": eval_outcomes['draw'],
+                }, step=agent.totalGradientSteps)
 
-            # Save best model (based on weak opponent performance)
-            if eval_weak['eval_weak/win_rate'] > best_eval_winrate:
-                best_eval_winrate = eval_weak['eval_weak/win_rate']
-                agent.save(checkpoint_dir / 'best_model.pth')
-                print(f"New best model saved! Win rate vs weak: {best_eval_winrate:.1%}\n")
+        # === GIF Recording ===
+        if config.gifInterval > 0 and agent.totalGradientSteps % config.gifInterval == 0 and use_wandb:
+            frames, results = record_gif(env, agent, opponent, num_episodes=config.gifEpisodes)
+            save_gif_to_wandb(frames, results, agent.totalGradientSteps, config.opponent)
 
-        # GIF recording (independent of main evaluation - runs more frequently)
-        if not args.no_wandb and episode_count % args.gif_frequency == 0 and episode_count > 0:
-            print(f"\n{'─'*60}")
-            print(f"GIF RECORDING at episode {episode_count:,}")
-            print(f"{'─'*60}")
+        # === Save Metrics ===
+        if config.saveMetrics and iteration % 100 == 0:
+            metricsBase = {
+                "envSteps": agent.totalEnvSteps,
+                "gradientSteps": agent.totalGradientSteps,
+                "episodes": agent.totalEpisodes,
+                "winRate": sum(recent_wins) / len(recent_wins) if recent_wins else 0,
+                "meanReward": np.mean(episode_rewards[-100:]) if episode_rewards else 0,
+            }
+            saveLossesToCSV(metricsFilename, metricsBase | worldModelMetrics | behaviorMetrics)
 
-            # Record GIF vs weak opponent
-            gif_env_weak = HockeyEnvDreamer(
-                mode=args.mode,
-                opponent='weak',
-                seed=args.seed + 3000
-            )
-            frames_weak, results_weak = create_gif_dreamer(
-                gif_env_weak, agent,
-                num_episodes=args.gif_episodes,
-                max_timesteps=250
-            )
-            gif_env_weak.close()
-            save_gif_dreamer(frames_weak, results_weak, episode_count, 'weak')
+    # === Final Save ===
+    final_path = f"{checkpointFilenameBase}_final"
+    agent.saveCheckpoint(final_path)
+    print(f"\nTraining complete. Final checkpoint: {final_path}")
 
-            # Record GIF vs strong opponent
-            gif_env_strong = HockeyEnvDreamer(
-                mode=args.mode,
-                opponent='strong',
-                seed=args.seed + 4000
-            )
-            frames_strong, results_strong = create_gif_dreamer(
-                gif_env_strong, agent,
-                num_episodes=args.gif_episodes,
-                max_timesteps=250
-            )
-            gif_env_strong.close()
-            save_gif_dreamer(frames_strong, results_strong, episode_count, 'strong')
-            print(f"{'─'*60}\n")
+    if config.saveMetrics:
+        plotMetrics(metricsFilename, savePath=plotFilename, title=f"DreamerV3 Hockey - {runName}")
 
-        # Periodic checkpoint
-        if episode_count % args.save_frequency == 0:
-            agent.save(checkpoint_dir / f'checkpoint_ep{episode_count}.pth')
-
-    # Final summary
-    print("\n" + "=" * 60)
-    print("Training Complete!")
-    print("=" * 60)
-    print(f"Total steps: {total_steps:,}")
-    print(f"Total episodes: {episode_count}")
-    print(f"Final win rate: {wins/episode_count:.1%}")
-    print(f"Best eval win rate: {best_eval_winrate:.1%}")
-    print(f"Time elapsed: {(time.time() - start_time)/3600:.2f} hours")
-
-    # Cleanup
-    env.close()
-    if not args.no_wandb:
-        import wandb
+    if use_wandb:
         wandb.finish()
+
+    env.close()
 
 
 if __name__ == "__main__":

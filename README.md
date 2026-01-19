@@ -233,6 +233,125 @@ Training logs to Weights & Biases:
 - Goal scored/conceded metrics
 - Model checkpoints (best and periodic)
 
+---
+
+## DreamerV3 Agent
+
+World-model based RL agent that learns entirely in imagination. Based on NaturalDreamer, simplified for hockey with MLP encoder/decoder.
+
+### Quick Start
+
+```bash
+cd 02-SRC/DreamerV3
+
+# Basic training against weak opponent
+python train_hockey.py --opponent weak --seed 42
+
+# Training with PBRS disabled
+python train_hockey.py --opponent weak --no_pbrs
+
+# Training with custom hyperparameters
+python train_hockey.py \
+    --opponent weak \
+    --seed 42 \
+    --lr_world 3e-4 \
+    --lr_actor 8e-5 \
+    --lr_critic 1e-4 \
+    --entropy_scale 0.003 \
+    --imagination_horizon 15 \
+    --batch_size 32 \
+    --batch_length 32
+
+# Full configuration example
+python train_hockey.py \
+    --opponent weak \
+    --seed 42 \
+    --gradient_steps 1000000 \
+    --replay_ratio 32 \
+    --warmup_episodes 10 \
+    --batch_size 32 \
+    --batch_length 32 \
+    --imagination_horizon 15 \
+    --recurrent_size 256 \
+    --latent_length 16 \
+    --latent_classes 16 \
+    --lr_world 0.0003 \
+    --lr_actor 0.00008 \
+    --lr_critic 0.0001 \
+    --discount 0.997 \
+    --entropy_scale 0.003 \
+    --use_pbrs \
+    --pbrs_scale 0.03 \
+    --checkpoint_interval 5000 \
+    --eval_interval 1000 \
+    --gif_interval 10000 \
+    --wandb_project rl-hockey
+```
+
+### Key Features
+
+- **World Model**: RSSM with categorical latents (16x16 = 256 dim stochastic state)
+- **Imagination Training**: Actor-critic trained entirely in latent space rollouts
+- **MLP Architecture**: Simple encoder/decoder for 18-dim observations
+- **PBRS Integration**: Optional dense reward shaping for faster exploration
+- **GIF Recording**: Periodic gameplay GIFs logged to W&B
+
+### File Structure
+
+```
+02-SRC/DreamerV3/
+├── train_hockey.py          # Main training script
+├── dreamer.py               # Dreamer agent (world model + behavior)
+├── networks.py              # Neural network components
+├── buffer.py                # Replay buffer for sequences
+├── utils.py                 # Helpers (lambda returns, moments, etc.)
+├── configs/
+│   └── hockey.yml           # Default configuration
+├── rewards/
+│   └── pbrs.py              # Potential-Based Reward Shaping
+└── visualization/
+    ├── gif_recorder.py      # GIF recording for W&B
+    └── frame_capture.py     # Frame capture utilities
+```
+
+### Architecture Overview
+
+**World Model (RSSM)**:
+- **Encoder**: MLP mapping 18-dim observations to embeddings
+- **Recurrent Model**: GRU for deterministic state evolution
+- **Prior/Posterior**: Categorical latent prediction (16 vars × 16 classes)
+- **Decoder**: MLP reconstructing observations from full state
+- **Reward Model**: Normal distribution for reward prediction
+- **Continue Model**: Bernoulli for episode termination
+
+**Behavior (Actor-Critic)**:
+- **Actor**: Tanh-squashed Gaussian policy
+- **Critic**: Normal distribution for value estimation
+- **Training**: Lambda returns with value normalization
+
+### Key Hyperparameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--imagination_horizon` | 15 | Steps to imagine for actor-critic training |
+| `--batch_size` | 32 | Sequences per batch |
+| `--batch_length` | 32 | Timesteps per sequence |
+| `--entropy_scale` | 0.003 | Entropy bonus for exploration |
+| `--lr_world` | 3e-4 | World model learning rate |
+| `--lr_actor` | 8e-5 | Actor learning rate |
+| `--lr_critic` | 1e-4 | Critic learning rate |
+| `--discount` | 0.997 | Discount factor γ |
+| `--free_nats` | 1.0 | KL free nats threshold |
+| `--gif_interval` | 10000 | GIF recording interval (0=disabled) |
+
+### W&B Metrics
+
+Training logs to Weights & Biases with:
+- **World Model**: reconstruction loss, reward loss, KL divergence
+- **Behavior**: actor loss, critic loss, entropy, advantages
+- **Stats**: win rate, episode rewards, buffer size
+- **Visualization**: Periodic gameplay GIFs
+
 ## SAC Agent - Serhat Alpay
 
 #TODO

@@ -59,7 +59,7 @@ Real Observation (18 dims)
     [ENCODER]
         │
         ↓
-Latent State (much smaller, cleaner)
+Latent State (compressed, cleaner)
         │
         ↓
     [DECODER]
@@ -82,9 +82,22 @@ Together, they form the complete latent state:
 ```
 [h, z] = latent state
    │
-   ├── h: "I remember the puck was moving left"
-   └── z: "The opponent might be at position X±uncertainty"
+   ├── h: "I remember the puck was moving left" (deterministic, 256-dim)
+   └── z: "The game state is likely X, Y, or Z" (stochastic, 256-dim categorical)
 ```
+
+**DreamerV3's Key Innovation: Categorical Latents**
+
+Unlike DreamerV1/V2 which used Gaussian stochastic states, DreamerV3 uses **categorical distributions**:
+- Instead of `z ~ N(mean, std)` (continuous)
+- We have `z ~ Categorical(logits)` (discrete)
+- Specifically: 16 categorical variables, each with 16 classes
+- Total stochastic state = 16 × 16 = 256 one-hot values flattened
+
+Why categorical?
+1. **Better representation capacity** - discrete choices can represent multimodal distributions
+2. **More stable gradients** - straight-through estimator works well
+3. **Uniform mixing** - can inject 1% uniform distribution to prevent latent collapse
 
 ### 1.5 Prior vs. Posterior: Two Ways to Predict
 
@@ -114,6 +127,8 @@ The training objective is to make the prior match the posterior. When they match
                 └─────────────────┘
 ```
 
+**Free Nats Threshold**: KL divergence below a threshold (e.g., 1.0 nats) is not penalized. This prevents the posterior from collapsing to exactly match a weak prior, preserving useful information in the stochastic state.
+
 ### 1.6 Learning in Imagination
 
 Once the world model is trained, the magic happens:
@@ -137,23 +152,25 @@ DreamerV3 handles this through **imagination horizon**:
 ```
 Real trajectory: [...no reward...no reward...no reward...WIN!]
 
-Imagination (50-step horizon):
-  Start: step 150 → Imagine 50 steps → See win at step 200 → Credit actions!
-  Start: step 140 → Imagine 50 steps → See win at step 190 → Credit actions!
-  Start: step 130 → Imagine 50 steps → See win at step 180 → Credit actions!
+Imagination (15-step horizon):
+  Start: step 235 → Imagine 15 steps → See win at step 250 → Credit actions!
+  Start: step 230 → Imagine 15 steps → See potential win → Credit actions!
+  Start: step 225 → Imagine 15 steps → Moving toward goal → Credit actions!
 ```
 
-By imagining long into the future, DreamerV3 can "see" the eventual reward and propagate credit backward through its imagined trajectory. The world model provides the missing information about what leads to what.
+By imagining into the future, DreamerV3 can "see" the eventual reward and propagate credit backward through its imagined trajectory. The world model provides the missing information about what leads to what.
 
 ### 1.8 The Actor-Critic in Latent Space
 
 DreamerV3 uses actor-critic, but entirely in the latent space:
 
-**Actor (Policy):** Maps latent state [h, z] → action distribution
+**Actor (Policy):** Maps latent state [h, z] → action distribution (TanhNormal)
 
-**Critic (Value):** Maps latent state [h, z] → expected future reward
+**Critic (Value):** Maps latent state [h, z] → expected future reward distribution (Normal)
 
 Neither ever sees the raw observation during training. They operate purely on the compressed latent representations. This is more efficient and more robust – they learn from the essential features, not the noise.
+
+**Value Normalization**: DreamerV3 normalizes advantages using percentile-based scaling (5th to 95th percentile). This makes the actor gradient scale-invariant, enabling the same hyperparameters to work across different reward scales.
 
 ### 1.9 Summary: The Three Learning Loops
 
@@ -191,327 +208,377 @@ DreamerV3 has three interleaved learning processes:
 
 ## Part 2: Our Implementation
 
-Now let's see how these concepts map to our code.
+Now let's see how these concepts map to our code. Our implementation is based on NaturalDreamer, simplified for low-dimensional observations like hockey's 18-dim state vector.
 
 ### 2.1 File Structure Overview
 
 ```
 DreamerV3/
-├── agents/
-│   └── hockey_dreamer.py    # Main agent (orchestrates everything)
-├── models/
-│   ├── sequence_model.py    # RSSM (the dreaming core)
-│   ├── world_model.py       # Complete world model
-│   └── behavior.py          # Actor-Critic
-├── utils/
-│   ├── math_ops.py          # symlog, lambda_returns
-│   ├── distributions.py     # TanhNormal, GaussianDist
-│   └── buffer.py            # Episode replay buffer
-└── train_hockey.py          # Training loop
+├── dreamer.py              # Main agent class (Dreamer)
+├── networks.py             # All neural network components
+├── buffer.py               # Replay buffer for sequence sampling
+├── utils.py                # Helper functions (lambda returns, moments, etc.)
+├── train_hockey.py         # Training loop
+├── rewards/
+│   └── pbrs.py             # Potential-based reward shaping (optional)
+└── configs/
+    └── hockey.yml          # Configuration file
 ```
 
-### 2.2 The SequenceModel (RSSM) – `models/sequence_model.py`
+### 2.2 The Networks – `networks.py`
 
-This is the **dreaming core** – implements the RSSM from Section 1.4.
+All neural network components are defined here, built from simple MLPs.
 
-**State Representation:**
+**RecurrentModel (GRU-based dynamics):**
 ```python
-state = {
-    'h': tensor,    # Deterministic state (GRU hidden), shape: (batch, 256)
-    'z': tensor,    # Stochastic state (sampled), shape: (batch, 64)
-    'mean': tensor, # Mean of z distribution
-    'std': tensor,  # Std of z distribution
-}
+class RecurrentModel(nn.Module):
+    """GRU-based recurrent model for RSSM dynamics."""
+
+    def forward(self, recurrentState, latentState, action):
+        # Combine latent state and action
+        x = torch.cat((latentState, action), -1)
+        x = self.activation(self.linear(x))
+        # Update recurrent state with GRU
+        return self.recurrent(x, recurrentState)  # h_next
 ```
 
-**Key Components:**
-
+**PriorNet & PosteriorNet (Categorical distributions):**
 ```python
-# Process (previous_z, action) into GRU input
-self.input_net = build_mlp(latent_size + action_dim, hidden_size, ...)
+class PriorNet(nn.Module):
+    """Prior network: predicts latent state from recurrent state only."""
 
-# Recurrent core - accumulates history into h
-self.gru = nn.GRUCell(hidden_size, recurrent_size)
+    def forward(self, h):
+        rawLogits = self.network(h)
+        # Reshape to (batch, latentLength, latentClasses)
+        probabilities = rawLogits.view(-1, 16, 16).softmax(-1)
 
-# Prior: predict z from h only (for imagination)
-self.prior_net = build_mlp(recurrent_size, latent_size * 2, ...)
+        # Mix with 1% uniform distribution to prevent collapse
+        uniform = torch.ones_like(probabilities) / 16
+        finalProbabilities = 0.99 * probabilities + 0.01 * uniform
 
-# Posterior: infer z from h AND observation (for training)
-self.posterior_net = build_mlp(recurrent_size + embed_dim, latent_size * 2, ...)
+        # Sample with straight-through gradient
+        logits = probs_to_logits(finalProbabilities)
+        sample = OneHotCategoricalStraightThrough(logits=logits).rsample()
+        return sample.view(-1, 256), logits  # z and logits
 ```
 
-**The Two Step Functions:**
+The posterior network is identical but takes `concat(h, embed)` as input – it has access to the encoded observation.
 
-`prior_step()` – Used during imagination (no observation available):
+**Actor (TanhNormal for bounded actions):**
 ```python
-def prior_step(self, state, action):
-    # Update deterministic state
-    x = input_net(concat(state['z'], action))
-    h_next = self.gru(x, state['h'])
+class Actor(nn.Module):
+    """Actor network: outputs actions with tanh squashing."""
 
-    # Predict z using ONLY h (no observation)
-    mean, std = self.prior_net(h_next)
-    z_next = mean + std * noise  # Sample from predicted distribution
+    def forward(self, fullState, training=False):
+        mean, logStd = self.network(fullState).chunk(2, dim=-1)
+        # Bound log_std to [-5, 2]
+        logStd = -5 + 7/2 * (torch.tanh(logStd) + 1)
+        std = torch.exp(logStd)
 
-    return {'h': h_next, 'z': z_next, 'mean': mean, 'std': std}
+        distribution = Normal(mean, std)
+        sample = distribution.sample()
+        action = torch.tanh(sample) * actionScale + actionBias  # Bounded
+
+        if training:
+            # Jacobian correction for tanh
+            logprobs = distribution.log_prob(sample)
+            logprobs -= torch.log(actionScale * (1 - tanh(sample)^2) + 1e-6)
+            return action, logprobs.sum(-1), entropy.sum(-1)
+        else:
+            return action
 ```
 
-`posterior_step()` – Used during training (observation available):
+**Critic & Reward Model (Normal distributions):**
 ```python
-def posterior_step(self, state, action, embed):
-    # Update deterministic state (same as prior)
-    h_next = self.gru(...)
+class Critic(nn.Module):
+    """Critic network: outputs Normal distribution for value."""
 
-    # Prior prediction (for KL loss)
-    prior_mean, prior_std = self.prior_net(h_next)
-
-    # Posterior inference (using observation)
-    post_mean, post_std = self.posterior_net(concat(h_next, embed))
-    z_post = post_mean + post_std * noise
-
-    return posterior_state, prior_state  # Both, for KL computation
+    def forward(self, fullState):
+        mean, logStd = self.network(fullState).chunk(2, dim=-1)
+        return Normal(mean.squeeze(-1), torch.exp(logStd).squeeze(-1))
 ```
 
-**imagine_sequence()** – The dreaming function:
+Both output distributions rather than point estimates, enabling probabilistic predictions.
+
+### 2.3 The Dreamer Agent – `dreamer.py`
+
+The main agent class orchestrating all components.
+
+**Initialization:**
 ```python
-def imagine_sequence(self, policy, start_state, horizon):
-    """Imagine H steps into the future."""
-    state = start_state
-    for _ in range(horizon):
-        features = concat(state['h'], state['z'])
-        action = policy(features).sample()
-        state = self.prior_step(state, action)  # No observation!
-        # Collect states and actions
-    return states, actions
+class Dreamer:
+    def __init__(self, observationSize, actionSize, actionLow, actionHigh, device, config):
+        # State dimensions
+        self.recurrentSize = 256                    # h dimension
+        self.latentSize = 16 * 16 = 256             # z dimension (16 vars × 16 classes)
+        self.fullStateSize = 256 + 256 = 512        # [h, z] concatenated
+
+        # World model components
+        self.encoder = EncoderMLP(18, 256, ...)     # obs → embedding
+        self.decoder = DecoderMLP(512, 18, ...)     # fullState → obs
+        self.recurrentModel = RecurrentModel(...)    # GRU dynamics
+        self.priorNet = PriorNet(...)               # h → z (imagination)
+        self.posteriorNet = PosteriorNet(...)       # [h, embed] → z (reality)
+        self.rewardPredictor = RewardModel(...)     # fullState → reward
+        self.continuePredictor = ContinueModel(...) # fullState → continue prob
+
+        # Behavior model
+        self.actor = Actor(512, 4, ...)             # fullState → action
+        self.critic = Critic(512, ...)              # fullState → value
 ```
 
-This is where learning happens without real experience. The policy proposes actions, the prior predicts what happens, and we unroll this for `horizon` steps.
-
-### 2.3 The WorldModel – `models/world_model.py`
-
-The world model wraps the RSSM and adds prediction heads.
-
-**Components:**
+**World Model Training (`worldModelTraining`):**
 ```python
-# Encoder: raw observation → latent embedding
-self.encoder = build_mlp(obs_dim, embed_dim, ...)
+def worldModelTraining(self, data):
+    """Train world model on a batch of sequences."""
+    # data.observations: (batchSize=32, batchLength=32, obsSize=18)
 
-# RSSM dynamics
-self.dynamics = SequenceModel(...)
+    # Encode all observations
+    encodedObs = self.encoder(data.observations)  # (32, 32, 256)
 
-# Decoder: latent state → predicted observation
-self.obs_decoder = build_mlp(feature_dim, obs_dim, ...)
+    # Initialize states
+    h = torch.zeros(32, 256)  # deterministic
+    z = torch.zeros(32, 256)  # stochastic
 
-# Prediction heads
-self.reward_head = build_mlp(feature_dim, 1, ...)    # Predict reward
-self.continue_head = build_mlp(feature_dim, 1, ...)  # Predict if episode continues
+    # Process sequence step by step
+    for t in range(1, 32):
+        # Step recurrent model
+        h = self.recurrentModel(h, z, data.actions[:, t-1])
+
+        # Get prior (from h only) and posterior (from h + observation)
+        _, priorLogits = self.priorNet(h)
+        z, posteriorLogits = self.posteriorNet(concat(h, encodedObs[:, t]))
+
+        # Collect states and logits
+
+    # === Losses ===
+    fullStates = concat(recurrentStates, posteriors)  # (32, 31, 512)
+
+    # Reconstruction loss
+    decodedObs = self.decoder(fullStates)
+    reconLoss = -Normal(decodedObs, 1).log_prob(data.observations[:, 1:]).mean()
+
+    # Reward prediction loss
+    rewardDist = self.rewardPredictor(fullStates)
+    rewardLoss = -rewardDist.log_prob(data.rewards[:, 1:]).mean()
+
+    # KL loss (with free nats threshold)
+    priorDist = OneHotCategorical(logits=priorsLogits)
+    posteriorDist = OneHotCategorical(logits=posteriorsLogits)
+
+    # Prior loss: train prior to match posterior
+    priorLoss = kl_divergence(posteriorDist.detach(), priorDist)
+    # Posterior loss: train posterior to match prior
+    posteriorLoss = kl_divergence(posteriorDist, priorDist.detach())
+
+    # Free nats: only penalize KL above threshold
+    priorLoss = max(priorLoss, freeNats=1.0) * betaPrior
+    posteriorLoss = max(posteriorLoss, freeNats) * betaPosterior
+
+    # Continue prediction loss
+    continueDist = self.continuePredictor(fullStates)
+    continueLoss = -continueDist.log_prob(1 - data.dones[:, 1:]).mean()
+
+    totalLoss = reconLoss + rewardLoss + priorLoss + posteriorLoss + continueLoss
+
+    return fullStates.detach(), metrics
 ```
 
-**The Encoding Flow (Reality):**
-```
-Raw Observation (18 dims)
-        │
-        ↓ symlog (compress large values)
-        ↓ encoder MLP
-        │
-Embedding (256 dims)
-        │
-        ↓ posterior_step (with GRU + posterior_net)
-        │
-Latent State [h, z]
-```
-
-**compute_loss()** – Train the world model:
+**Behavior Training (`behaviorTraining`):**
 ```python
-def compute_loss(self, batch):
-    # 1. Encode observations
-    embeds = self.encode(batch['obs'])
+def behaviorTraining(self, fullState):
+    """Train actor and critic entirely in imagination."""
+    # fullState: (B*T, 512) starting states from world model training
 
-    # 2. Run through RSSM to get posterior and prior states
-    posteriors, priors = self.dynamics.observe_sequence(embeds, actions, is_first)
+    h, z = fullState.split([256, 256], dim=-1)
 
-    # 3. Reconstruction loss - can we decode back to observation?
-    features = concat(posteriors['h'], posteriors['z'])
-    obs_pred = self.obs_decoder(features)
-    recon_loss = MSE(obs_pred, obs_target)
+    # Imagine trajectories (no observations!)
+    for _ in range(imaginationHorizon=15):
+        # Get action from actor
+        action, logprob, entropy = self.actor(fullState.detach(), training=True)
 
-    # 4. Reward prediction loss
-    reward_pred = self.reward_head(features)
-    reward_loss = MSE(reward_pred, actual_rewards)
+        # Step world model using PRIOR (no observation available)
+        h = self.recurrentModel(h, z, action)
+        z, _ = self.priorNet(h)  # Prior only!
 
-    # 5. Continue prediction loss
-    continue_pred = self.continue_head(features)
-    continue_loss = BCE(continue_pred, actual_continues)
+        fullState = concat(h, z)
+        # Collect states, logprobs, entropies
 
-    # 6. KL loss - make prior match posterior
-    kl_loss = self.dynamics.kl_loss(posteriors, priors)
+    # Get predictions for imagined trajectory
+    predictedRewards = self.rewardPredictor(fullStates[:, :-1]).mean
+    values = self.critic(fullStates).mean
+    continues = self.continuePredictor(fullStates).mean  # or fixed discount
 
-    return recon_loss + reward_loss + continue_loss + kl_loss
+    # Compute lambda returns (TD(λ) targets)
+    lambdaValues = computeLambdaValues(predictedRewards, values, continues, lambda_=0.95)
+
+    # Normalize advantages using percentiles
+    _, inverseScale = self.valueMoments(lambdaValues)  # 5th-95th percentile range
+    advantages = (lambdaValues - values[:, :-1]) / inverseScale
+
+    # Actor loss: maximize advantage-weighted log probability + entropy
+    actorLoss = -mean(advantages.detach() * logprobs + entropyScale * entropies)
+
+    # Critic loss: predict lambda returns
+    valueDist = self.critic(fullStates[:, :-1].detach())
+    criticLoss = -mean(valueDist.log_prob(lambdaValues.detach()))
+
+    return metrics
 ```
 
-**imagine()** – Generate training data for actor-critic:
+**Acting in Real Environment:**
 ```python
-def imagine(self, policy, start_state, horizon):
-    # Use RSSM to imagine forward
-    states, actions = self.dynamics.imagine_sequence(policy, start_state, horizon)
+def act(self, observation, h=None, z=None):
+    """Select action for a single observation."""
+    if h is None:
+        h = torch.zeros(1, 256)
+        z = torch.zeros(1, 256)
 
-    # Predict rewards and continues for imagined states
-    features = concat(states['h'], states['z'])
-    rewards = self.reward_head(features)
-    continues = self.continue_head(features)
+    # Encode observation
+    obs_t = torch.from_numpy(observation).float().unsqueeze(0)
+    encodedObs = self.encoder(obs_t)
 
-    return states, actions, rewards, continues
+    # Update recurrent state (using dummy action for first step)
+    h = self.recurrentModel(h, z, action_dummy)
+
+    # Get POSTERIOR (we have observation in reality)
+    z, _ = self.posteriorNet(concat(h, encodedObs))
+
+    # Get action from actor
+    fullState = concat(h, z)
+    action = self.actor(fullState, training=False)
+
+    return action.numpy(), h, z
 ```
 
-### 2.4 The Behavior Model – `models/behavior.py`
+### 2.4 Lambda Returns – `utils.py`
 
-The actor-critic that learns entirely in imagination.
-
-**Policy (Actor):**
-```python
-class Policy(nn.Module):
-    def forward(self, features):
-        # features = [h, z] from RSSM
-        out = self.net(features)
-        mean, std = split(out)
-        return TanhNormal(mean, std)  # Bounded actions in [-1, 1]
-```
-
-**ValueNetwork (Critic):**
-```python
-class ValueNetwork(nn.Module):
-    def forward(self, features):
-        # features = [h, z] from RSSM
-        return self.net(features)  # Scalar value estimate
-```
-
-**train_step()** – Learning from imagination:
-```python
-def train_step(self, states, actions, rewards, continues):
-    # states, actions, rewards, continues all come from imagination!
-
-    features = concat(states['h'], states['z'])
-
-    # 1. Compute TD(λ) return targets
-    values = self.value_target(features)
-    targets = lambda_returns(rewards, values, continues, bootstrap)
-
-    # 2. Critic loss - predict the targets
-    values_pred = self.value(features)
-    critic_loss = MSE(values_pred, targets)
-
-    # 3. Actor loss - maximize advantage-weighted log probability
-    advantages = targets - values_pred
-    action_dists = self.policy(features)
-    log_probs = action_dists.log_prob(actions)
-    actor_loss = -(log_probs * advantages).mean()
-
-    # 4. Entropy bonus - encourage exploration
-    entropy_loss = -entropy_scale * action_dists.entropy().mean()
-
-    return actor_loss + entropy_loss, critic_loss
-```
-
-### 2.5 The HockeyDreamer Agent – `agents/hockey_dreamer.py`
-
-Orchestrates everything into a clean interface.
-
-**Acting (in real environment):**
-```python
-def act(self, obs, deterministic=False):
-    # 1. Encode observation
-    embed = self.world_model.encode(obs)
-
-    # 2. Update internal state using POSTERIOR (we have real observation)
-    self._state = self.world_model.dynamics.posterior_step(
-        self._state, self._last_action, embed
-    )
-
-    # 3. Get action from policy
-    features = concat(self._state['h'], self._state['z'])
-    action = self.behavior.act(features, deterministic)
-
-    return action
-```
-
-**Training (the three loops from Section 1.9):**
-```python
-def train_step(self, batch):
-    # LOOP 2: Train World Model
-    world_loss = self.world_model.compute_loss(batch)
-    world_loss.backward()
-    self.world_opt.step()
-
-    # LOOP 3: Train Actor-Critic in Imagination
-    # Get starting states from real batch
-    start_states = self.world_model.get_start_states(batch)
-
-    # Imagine forward
-    states, actions, rewards, continues = self.world_model.imagine(
-        policy=self.behavior.policy,
-        start_state=start_states,
-        horizon=self.horizon,  # 15 steps into future
-    )
-
-    # Train critic
-    _, critic_loss, _ = self.behavior.train_step(states, actions, rewards, continues)
-    critic_loss.backward()
-    self.critic_opt.step()
-
-    # Train actor (re-imagine to get gradients through policy)
-    states, actions, rewards, continues = self.world_model.imagine(...)
-    actor_loss, _, _ = self.behavior.train_step(...)
-    actor_loss.backward()
-    self.actor_opt.step()
-```
-
-### 2.6 The Training Loop – `train_hockey.py`
-
-Puts it all together:
+TD(λ) return computation for value targets:
 
 ```python
-while total_steps < max_steps:
-    # LOOP 1: Collect real experience
-    episode_reward, episode_length, info = run_episode(env, agent, buffer)
+def computeLambdaValues(rewards, values, continues, lambda_=0.95):
+    """
+    Compute TD(λ) returns.
 
-    # LOOPS 2 & 3: Train (world model + actor-critic in imagination)
-    if len(buffer) >= min_buffer_size:
-        batch = buffer.sample(batch_size, sequence_length)
-        metrics = agent.train_step(batch)
+    G_t = r_t + γ_t * [(1-λ) * V_{t+1} + λ * G_{t+1}]
 
-    # Periodically evaluate
-    if total_steps % eval_interval == 0:
-        eval_metrics = evaluate(eval_env, agent)
+    where γ_t = discount * continue_prob_t
+    """
+    returns = torch.zeros_like(rewards)
+    bootstrap = values[:, -1]  # Final value estimate
+
+    for i in reversed(range(rewards.shape[-1])):
+        returns[:, i] = rewards[:, i] + continues[:, i] * (
+            (1 - lambda_) * values[:, i] + lambda_ * bootstrap
+        )
+        bootstrap = returns[:, i]
+
+    return returns
 ```
 
-### 2.7 Key Implementation Details
+Lambda interpolates between:
+- λ=0: One-step TD (high bias, low variance)
+- λ=1: Monte Carlo (low bias, high variance)
+- λ=0.95: Good balance for most tasks
 
-**Symlog Transformation** (`utils/math_ops.py`):
+### 2.5 Value Normalization – `utils.py`
+
+Percentile-based normalization for stable actor training:
+
 ```python
-def symlog(x):
-    return sign(x) * log(|x| + 1)
-```
-Compresses large values while preserving sign. Allows the network to handle rewards/observations across many orders of magnitude.
+class Moments(nn.Module):
+    """Exponential moving average of percentiles for return normalization."""
 
-**Lambda Returns** (`utils/math_ops.py`):
+    def __init__(self, device, decay=0.99, percentileLow=0.05, percentileHigh=0.95):
+        self.low = torch.zeros(())   # 5th percentile
+        self.high = torch.zeros(())  # 95th percentile
+
+    def forward(self, x):
+        # Update EMA of percentiles
+        low = torch.quantile(x, 0.05)
+        high = torch.quantile(x, 0.95)
+        self.low = 0.99 * self.low + 0.01 * low
+        self.high = 0.99 * self.high + 0.01 * high
+
+        # Scale is the range (minimum 1.0)
+        inverseScale = max(1.0, self.high - self.low)
+        return self.low, inverseScale
+```
+
+This makes actor gradients independent of reward scale.
+
+### 2.6 Replay Buffer – `buffer.py`
+
+Stores transitions and samples contiguous sequences:
+
 ```python
-def lambda_returns(rewards, values, continues, bootstrap, gamma, lambda_):
-    """TD(λ) for value targets."""
-    # G_t = r_t + γ * [(1-λ)*V_{t+1} + λ*G_{t+1}]
-```
-Balances between one-step TD (λ=0) and Monte Carlo (λ=1). We use λ=0.95 for good bias-variance tradeoff.
+class ReplayBuffer:
+    def __init__(self, observationSize, actionSize, config, device):
+        self.capacity = 100000
+        self.observations = np.empty((capacity, 18), dtype=np.float32)
+        self.actions = np.empty((capacity, 4), dtype=np.float32)
+        self.rewards = np.empty((capacity, 1), dtype=np.float32)
+        self.dones = np.empty((capacity, 1), dtype=np.float32)
 
-**TanhNormal Distribution** (`utils/distributions.py`):
+    def add(self, observation, action, reward, nextObservation, done):
+        """Add single transition (FIFO rotation)."""
+        self.observations[self.bufferIndex] = observation
+        # ... store all fields
+        self.bufferIndex = (self.bufferIndex + 1) % self.capacity
+
+    def sample(self, batchSize, sequenceSize):
+        """Sample batch of contiguous sequences."""
+        # Sample random starting indices
+        sampleIndex = np.random.randint(0, maxIdx, batchSize)
+        # Get sequences of length 32
+        sequenceOffset = np.arange(sequenceSize)
+        sampleIndex = (sampleIndex.reshape(-1, 1) + sequenceOffset) % self.capacity
+
+        # Return as batch object
+        return Batch(observations, actions, rewards, dones)
+```
+
+### 2.7 The Training Loop – `train_hockey.py`
+
+Orchestrates the three learning loops:
+
 ```python
-class TanhNormal:
-    """Squashed Gaussian for bounded actions."""
-    def sample(self):
-        gaussian_sample = self.mean + self.std * noise
-        return tanh(gaussian_sample)  # Bounded to [-1, 1]
-```
+# Main training loop
+for gradient_step in range(total_gradient_steps):
 
-**Episode Buffer** (`utils/buffer.py`):
-Stores complete episodes and samples contiguous sequences. This preserves temporal structure needed for training the RSSM.
+    # === LOOP 1: Collect Real Experience ===
+    if should_collect_experience():
+        obs, _ = env.reset()
+        h, z = None, None
+
+        while not done:
+            action, h, z = dreamer.act(obs, h, z)
+            next_obs, reward, done, info = env.step(action)
+
+            # Add PBRS if enabled
+            if use_pbrs:
+                reward += pbrs_shaper.shape(obs, next_obs, done)
+
+            dreamer.buffer.add(obs, action, reward, next_obs, done)
+            obs = next_obs
+
+    # === LOOPS 2 & 3: Train World Model and Behavior ===
+    if len(dreamer.buffer) >= min_buffer_size:
+        # Sample sequence batch
+        batch = dreamer.buffer.sample(batchSize=32, sequenceSize=32)
+
+        # Train world model (returns starting states)
+        fullStates, world_metrics = dreamer.worldModelTraining(batch)
+
+        # Train actor-critic in imagination
+        behavior_metrics = dreamer.behaviorTraining(fullStates)
+
+        dreamer.totalGradientSteps += 1
+
+    # Periodic evaluation
+    if gradient_step % eval_interval == 0:
+        win_rate = evaluate(env, dreamer, num_episodes=10)
+```
 
 ### 2.8 The Complete Data Flow
 
@@ -524,7 +591,7 @@ Stores complete episodes and samples contiguous sequences. This preserves tempor
 │                    │                                                    │
 │                    ↓                                                    │
 │              ┌─────────┐                                                │
-│              │ Encoder │ (symlog → MLP)                                 │
+│              │ Encoder │ (MLP: 18 → 256)                                │
 │              └────┬────┘                                                │
 │                   │                                                     │
 │                   ↓                                                     │
@@ -533,15 +600,15 @@ Stores complete episodes and samples contiguous sequences. This preserves tempor
 │                   ↓                                                     │
 │           ┌──────────────┐                                              │
 │           │   RSSM       │                                              │
-│           │ (posterior)  │ ← uses real observation                      │
+│           │ (POSTERIOR)  │ ← uses real observation                      │
 │           └──────┬───────┘                                              │
 │                  │                                                      │
 │                  ↓                                                      │
-│        Latent State [h, z]                                              │
+│        Latent State [h=256, z=256]                                      │
 │                  │                                                      │
 │                  ↓                                                      │
 │           ┌──────────┐                                                  │
-│           │  Policy  │                                                  │
+│           │  Actor   │                                                  │
 │           └────┬─────┘                                                  │
 │                │                                                        │
 │                ↓                                                        │
@@ -555,7 +622,7 @@ Stores complete episodes and samples contiguous sequences. This preserves tempor
 │                         WORLD MODEL TRAINING                            │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│  Replay Buffer → Sample sequence (B, T, dims)                          │
+│  Replay Buffer → Sample sequences (32 × 32 timesteps)                  │
 │                        │                                                │
 │                        ↓                                                │
 │                 ┌──────────────┐                                        │
@@ -565,25 +632,32 @@ Stores complete episodes and samples contiguous sequences. This preserves tempor
 │                        ↓                                                │
 │                ┌───────────────┐                                        │
 │                │     RSSM      │                                        │
-│                │  (posterior   │                                        │
-│                │   + prior)    │                                        │
+│                │ (process seq) │                                        │
+│                │               │                                        │
+│                │ t=1: h₁ = GRU(h₀, z₀, a₀)                             │
+│                │      z₁_prior ~ PriorNet(h₁)                          │
+│                │      z₁_post ~ PosteriorNet(h₁, embed₁)               │
+│                │ ...repeat for t=2..31                                  │
 │                └───────┬───────┘                                        │
 │                        │                                                │
 │              ┌─────────┴─────────┐                                      │
 │              │                   │                                      │
 │              ↓                   ↓                                      │
-│        ┌──────────┐       ┌───────────┐                                │
-│        │ Decoder  │       │  Reward   │                                │
-│        │          │       │   Head    │                                │
-│        └────┬─────┘       └─────┬─────┘                                │
-│             │                   │                                      │
-│             ↓                   ↓                                      │
-│        Recon Loss          Reward Loss                                 │
+│    ┌───────────────┐     ┌───────────────┐                             │
+│    │    Decoder    │     │ Reward Head   │                             │
+│    │   (→ obs)     │     │   (→ R)       │                             │
+│    └───────┬───────┘     └───────┬───────┘                             │
+│            │                     │                                      │
+│            ↓                     ↓                                      │
+│       Recon Loss            Reward Loss                                 │
 │                                                                         │
-│  + KL Loss (prior ↔ posterior) + Continue Loss                         │
+│  + KL Loss (prior ↔ posterior) with free nats                          │
+│  + Continue Loss (Bernoulli)                                            │
 │                        │                                                │
 │                        ↓                                                │
 │                   Total Loss → Backprop → Update World Model            │
+│                                                                         │
+│  Output: fullStates (32 × 31 × 512) detached for behavior training     │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 
@@ -591,42 +665,60 @@ Stores complete episodes and samples contiguous sequences. This preserves tempor
 │                     ACTOR-CRITIC TRAINING (IMAGINATION)                 │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
-│  Real Sequence → get_start_states() → Starting [h, z]                  │
+│  fullStates from world model → Starting [h, z] (flattened)             │
 │                                            │                            │
 │                                            ↓                            │
 │                  ┌─────────────────────────────────────────┐            │
 │                  │           IMAGINATION LOOP              │            │
 │                  │                                         │            │
-│                  │  for t in range(horizon):               │            │
-│                  │      features = [h_t, z_t]              │            │
-│                  │      action = policy(features).sample() │            │
-│                  │      [h_{t+1}, z_{t+1}] = RSSM.prior()  │  ← No obs! │
-│                  │      reward_t = reward_head(features)   │            │
-│                  │      continue_t = continue_head(...)    │            │
+│                  │  for t in range(horizon=15):            │            │
+│                  │      fullState_t = [h_t, z_t]           │            │
+│                  │      action, logprob, entropy = Actor() │            │
+│                  │                                         │            │
+│                  │      h_{t+1} = RecurrentModel(h, z, a)  │            │
+│                  │      z_{t+1} ~ PRIOR(h_{t+1})           │ ← No obs!  │
+│                  │                                         │            │
+│                  │      (using prior, not posterior!)      │            │
 │                  │                                         │            │
 │                  └────────────────┬────────────────────────┘            │
 │                                   │                                     │
 │                                   ↓                                     │
-│            Imagined: states, actions, rewards, continues                │
+│       Imagined trajectory: fullStates, logprobs, entropies             │
 │                                   │                                     │
 │                    ┌──────────────┴──────────────┐                      │
 │                    │                             │                      │
 │                    ↓                             ↓                      │
-│             ┌────────────┐               ┌────────────┐                 │
-│             │   Critic   │               │   Actor    │                 │
-│             │  Training  │               │  Training  │                 │
-│             └──────┬─────┘               └──────┬─────┘                 │
-│                    │                            │                       │
-│                    ↓                            ↓                       │
-│           TD(λ) targets              Policy gradient                    │
-│           MSE(V, targets)            -(log_prob × advantage)           │
-│                    │                            │                       │
-│                    ↓                            ↓                       │
-│              Critic Loss                  Actor Loss                    │
-│                    │                            │                       │
-│                    └──────────┬─────────────────┘                       │
-│                               ↓                                         │
-│                         Backprop → Update Actor & Critic                │
+│           ┌────────────────┐           ┌────────────────┐               │
+│           │ Reward Head    │           │ Continue Head  │               │
+│           │ (predict R)    │           │ (predict γ)    │               │
+│           └───────┬────────┘           └───────┬────────┘               │
+│                   │                            │                        │
+│                   └──────────┬─────────────────┘                        │
+│                              ↓                                          │
+│                   ┌───────────────────┐                                 │
+│                   │  Lambda Returns   │                                 │
+│                   │  TD(λ) targets    │                                 │
+│                   └─────────┬─────────┘                                 │
+│                             │                                           │
+│                             ↓                                           │
+│               ┌─────────────┴─────────────┐                             │
+│               │                           │                             │
+│               ↓                           ↓                             │
+│        ┌────────────┐              ┌────────────┐                       │
+│        │   Critic   │              │   Actor    │                       │
+│        │  Training  │              │  Training  │                       │
+│        │            │              │            │                       │
+│        │ V(s) → λ   │              │ -logπ × A  │                       │
+│        │ returns    │              │ + entropy  │                       │
+│        └──────┬─────┘              └──────┬─────┘                       │
+│               │                           │                             │
+│               ↓                           ↓                             │
+│          Critic Loss               Actor Loss                           │
+│          -log_prob(λ)              -advantage×logπ - η×entropy          │
+│               │                           │                             │
+│               └──────────┬────────────────┘                             │
+│                          ↓                                              │
+│                    Backprop → Update Actor & Critic                     │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -653,6 +745,389 @@ DreamerV3 asks: "What will happen if I do X?" (world model) and then "Given what
 
 By separating "understanding the world" from "choosing actions," DreamerV3 can learn both more efficiently. The world model provides rich supervision (reconstruction, reward prediction, dynamics) even when rewards are sparse. The actor-critic then leverages this understanding to make better decisions.
 
+### Key Hyperparameters and Their Effects
+
+| Parameter | Value | Effect |
+|-----------|-------|--------|
+| `recurrentSize` | 256 | GRU hidden state size (temporal memory) |
+| `latentLength × latentClasses` | 16 × 16 | Stochastic state capacity (256-dim) |
+| `imaginationHorizon` | 15 | How far to look ahead in imagination |
+| `lambda_` | 0.95 | TD(λ) bias-variance tradeoff |
+| `discount` | 0.997 | Future reward importance |
+| `entropyScale` | 0.003 | Exploration vs. exploitation |
+| `freeNats` | 1.0 | KL threshold to prevent collapse |
+| `replayRatio` | 32 | Gradient steps per environment step |
+
+### Common Issues and Solutions
+
+1. **Entropy Collapse (policy becomes deterministic)**
+   - Symptom: `behavior/entropy` goes to 0 or negative
+   - Solution: Increase `entropyScale` (try 3e-3 or higher)
+
+2. **World Model Not Learning**
+   - Symptom: `world/recon_loss` stays high
+   - Solution: Check encoder/decoder architecture, learning rate
+
+3. **Slow Training**
+   - Symptom: Many seconds per gradient step
+   - Solution: Reduce `imaginationHorizon` (try 10), reduce `replayRatio` (try 8)
+
+4. **Memory Issues**
+   - Symptom: OOM on GPU/MPS
+   - Solution: Reduce `batchSize` or `batchLength`
+
+---
+
+## Part 4: Two-Hot Symlog Encoding – Fixing Sparse Reward Prediction
+
+This section explains the Two-Hot Symlog encoding, a critical DreamerV3 innovation that enables accurate prediction of sparse rewards.
+
+### 4.1 The Problem: Normal Distributions Can't Handle Sparse Rewards
+
+In hockey, rewards are **multi-modal**:
+- 99% of timesteps: reward = 0 (nothing happened)
+- ~1% of timesteps: reward = ±10 (goal scored or conceded)
+
+Our original implementation used **Normal distributions** to predict rewards:
+
+```python
+# Old approach: predict mean and std, return Normal distribution
+mean, std = reward_network(latent_state)
+reward_dist = Normal(mean, std)
+loss = -reward_dist.log_prob(actual_reward).mean()
+```
+
+**Why this fails catastrophically:**
+
+A Normal distribution is unimodal – it has a single peak. When trained on data that's mostly 0 with occasional ±10:
+
+```
+Actual reward distribution:      What Normal learns:
+
+     ↑  ↑                              ╱╲
+     │  │                             ╱  ╲
+     │  │                            ╱    ╲
+─────┼──┼────────────              ═╱══════╲═══
+   -10  0  +10                      0 (mean)
+
+Multi-modal                      Unimodal (compromises)
+```
+
+The Normal distribution **regresses to the mean**. It learns to predict ~0 for everything because that minimizes average error. It cannot represent "this state usually gives 0, but might give +10."
+
+**Empirical evidence from our training:**
+```
+sparse_vs_nonsparse_error_ratio: 100-300x
+sparse_pred_error: ~10 (error equals the reward magnitude!)
+sparse_pred_mean: ~0 (predicts 0 even for goals)
+imagination/reward_significant_frac: 0.0 (imagination NEVER predicts goals)
+```
+
+The world model was blind to sparse rewards. Even when goals occurred, the reward predictor said "probably 0."
+
+### 4.2 The Solution: Discretize with Two-Hot Encoding
+
+Instead of predicting a continuous value, DreamerV3 **discretizes** the prediction into bins and predicts a **categorical distribution**:
+
+```
+Instead of:  network → (mean, std) → Normal distribution
+We use:      network → 255 logits → Categorical distribution over bins
+```
+
+The bins span the reward range in **symlog space** (more on this below):
+
+```
+Bin index:    0    63   127   191   254
+              │     │     │     │     │
+Symlog val: -20   -10    0    +10   +20
+              │     │     │     │     │
+Real val:  -485M  -22k   0   +22k  +485M
+```
+
+**Why categorical works for multi-modal distributions:**
+
+A categorical distribution can assign probability mass to **multiple bins simultaneously**:
+
+```
+Predicted distribution for "might score soon" state:
+
+Probability
+    ↑
+0.6 │           ████
+0.4 │           ████
+0.2 │    ██     ████     ██
+    └────────────────────────→ bins
+        -10      0       +10
+
+"Probably 0, but 20% chance of ±10"
+```
+
+This is impossible with a unimodal Normal distribution but trivial with a categorical.
+
+### 4.3 The "Two-Hot" Encoding
+
+Standard one-hot encoding puts all probability mass on a single bin. But what if the target value falls **between** bins?
+
+**Two-hot encoding** spreads probability between the two adjacent bins:
+
+```
+Target reward: 7.5
+Bin 190 center: 7.0
+Bin 191 center: 8.0
+
+Target distribution (two-hot):
+bin 190: 50% (closer to 7.0)
+bin 191: 50% (closer to 8.0)
+all other bins: 0%
+```
+
+More precisely, if target value falls between bins k and k+1:
+
+```
+α = (target - bin_k_center) / (bin_{k+1}_center - bin_k_center)
+P(bin k) = 1 - α
+P(bin k+1) = α
+```
+
+**Training loss:** Cross-entropy between predicted logits and two-hot target
+
+```python
+# Two-hot cross-entropy loss
+log_probs = F.log_softmax(logits, dim=-1)
+loss = -((1 - alpha) * log_probs[k] + alpha * log_probs[k+1])
+```
+
+This gives **smooth gradients** even when the target falls between bins.
+
+### 4.4 Symlog Transform: Handling Large Value Ranges
+
+Raw rewards range from -10 to +10, but **value estimates** can be much larger (cumulative discounted rewards over an episode). We need bins to cover a wide range without wasting resolution on unlikely values.
+
+**Symlog** (symmetric logarithm) compresses large values while preserving behavior near zero:
+
+```
+symlog(x) = sign(x) * ln(|x| + 1)
+
+Examples:
+  symlog(0)     = 0
+  symlog(1)     = 0.69
+  symlog(10)    = 2.40   ← sparse rewards
+  symlog(100)   = 4.62
+  symlog(1000)  = 6.91
+  symlog(-10)   = -2.40
+```
+
+Properties:
+- **symlog(0) = 0** – zero stays zero
+- **Symmetric** – negative values mirror positive
+- **Gradient near 0 ≈ 1** – well-behaved for small values
+- **Compresses large values** – 1000 maps to only 6.91
+
+The inverse, **symexp**, converts back:
+
+```
+symexp(x) = sign(x) * (exp(|x|) - 1)
+```
+
+### 4.5 The Complete Two-Hot Symlog Pipeline
+
+**Encoding a target value (for training):**
+
+```
+                    symlog              find bins           compute weights
+Target (10.0) ──────────────→ 2.40 ──────────────→ k=190, k+1=191 ──────────→ P(190)=0.3, P(191)=0.7
+```
+
+**Decoding a prediction (for inference):**
+
+```
+                    softmax              weighted sum         symexp
+255 logits ──────────────→ probabilities ──────────────→ ~2.40 ──────────────→ ~10.0
+```
+
+**Our implementation in `utils.py`:**
+
+```python
+class TwoHotSymlog(nn.Module):
+    def __init__(self, bins=255, min_val=-20.0, max_val=20.0):
+        # 255 bins from -20 to +20 in symlog space
+        self.bin_centers = torch.linspace(min_val, max_val, bins)
+        self.step = (max_val - min_val) / (bins - 1)  # ~0.157
+
+    def loss(self, logits, target):
+        """Two-hot cross-entropy loss."""
+        # Transform target to symlog space
+        y = symlog(target)
+        y = torch.clamp(y, -20, 20)
+
+        # Find bin indices
+        continuous_idx = (y - self.min_val) / self.step
+        k = continuous_idx.long().clamp(0, 253)  # Lower bin
+        k_plus_1 = k + 1                          # Upper bin
+
+        # Compute two-hot weights
+        alpha = (continuous_idx - k.float()).clamp(0, 1)
+
+        # Cross-entropy loss
+        log_probs = F.log_softmax(logits, dim=-1)
+        loss = -((1 - alpha) * log_probs.gather(-1, k)
+                 + alpha * log_probs.gather(-1, k_plus_1))
+        return loss
+
+    def decode(self, logits):
+        """Decode logits to scalar value."""
+        probs = F.softmax(logits, dim=-1)
+        y_hat = (probs * self.bin_centers).sum(dim=-1)  # Expected value in symlog space
+        return symexp(y_hat)  # Convert back to original scale
+```
+
+### 4.6 Where Two-Hot Is Applied
+
+In DreamerV3, two-hot symlog is used for:
+
+1. **Reward Prediction** (world model):
+   ```python
+   # networks.py
+   class RewardModel(nn.Module):
+       def forward(self, latent_state):
+           return self.network(latent_state)  # → (batch, 255) logits
+
+   # dreamer.py - worldModelTraining
+   reward_logits = self.rewardPredictor(full_states)  # (B, T, 255)
+   reward_loss = self.twoHot.loss(reward_logits, actual_rewards).mean()
+   ```
+
+2. **Value Prediction** (critic):
+   ```python
+   # networks.py
+   class Critic(nn.Module):
+       def forward(self, latent_state):
+           return self.network(latent_state)  # → (batch, 255) logits
+
+   # dreamer.py - behaviorTraining
+   value_logits = self.critic(full_states)  # (B, H, 255)
+   values = self.twoHot.decode(value_logits)  # → scalar values
+   critic_loss = self.twoHot.loss(value_logits, lambda_returns).mean()
+   ```
+
+3. **Observation Preprocessing** (symlog only, not two-hot):
+   ```python
+   # dreamer.py - worldModelTraining
+   obs_symlog = symlog(data.observations)  # Compress velocity spikes
+   encoded_obs = self.encoder(obs_symlog)
+   ```
+
+### 4.7 Why This Fixes Our Sparse Reward Problem
+
+**Before Two-Hot (Normal distribution):**
+
+```
+State near goal → Reward predictor → Normal(mean=0.1, std=0.5)
+                                     ↓
+                                 Predicts: ~0.1
+                                 Actual: +10 or 0
+                                 Error on +10: 9.9
+```
+
+The model learned to hedge by predicting near zero, which minimized average error but gave zero gradient signal for sparse events.
+
+**After Two-Hot (Categorical distribution):**
+
+```
+State near goal → Reward predictor → 255 logits
+                                     ↓
+                                 softmax → [0, ..., 0.7 at bin_0, ..., 0.3 at bin_+10, ...]
+                                 Decoded: weighted average ≈ 3.0
+
+If +10 occurs: loss increases for bin_+10, model learns!
+If 0 occurs: loss increases for bin_0, model learns!
+```
+
+The model can represent "probably 0, but maybe +10" and gets **gradient signal regardless of which outcome occurs**.
+
+**Expected metrics after fix:**
+
+| Metric | Before | After (Expected) |
+|--------|--------|------------------|
+| `sparse_vs_nonsparse_error_ratio` | 100-300x | <10x |
+| `sparse_pred_error` | ~10 | <3 |
+| `sparse_sign_accuracy` | ~0.5 | >0.8 |
+| `imagination/reward_significant_frac` | 0.0 | >0.01 |
+
+### 4.8 Critic Initialization: Why Zeros Matter
+
+The critic output layer is initialized to zeros:
+
+```python
+class Critic(nn.Module):
+    def __init__(self, ...):
+        # ... build network ...
+        # Initialize output layer to zeros
+        with torch.no_grad():
+            self.network[-1].weight.zero_()
+            self.network[-1].bias.zero_()
+```
+
+**Why?** Zero logits → uniform distribution over bins → expected value ≈ 0.
+
+This means the critic starts by predicting "value ≈ 0" for all states, which is a reasonable prior. The actor then explores without strong biases from an untrained critic.
+
+### 4.9 Summary: The Complete Picture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    TWO-HOT SYMLOG ENCODING PIPELINE                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ENCODING (Training):                                                       │
+│                                                                             │
+│  Target value (e.g., +10)                                                   │
+│         │                                                                   │
+│         ↓  symlog                                                           │
+│  Compressed value (e.g., 2.40)                                              │
+│         │                                                                   │
+│         ↓  find adjacent bins                                               │
+│  Bin k=190, k+1=191                                                         │
+│         │                                                                   │
+│         ↓  compute weights (α = 0.7)                                        │
+│  Two-hot: P(190)=0.3, P(191)=0.7                                            │
+│         │                                                                   │
+│         ↓  cross-entropy with network logits                                │
+│  Loss = -(0.3 × log_prob[190] + 0.7 × log_prob[191])                        │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  DECODING (Inference):                                                      │
+│                                                                             │
+│  Network output: 255 logits                                                 │
+│         │                                                                   │
+│         ↓  softmax                                                          │
+│  Probabilities: [p₀, p₁, ..., p₂₅₄]                                         │
+│         │                                                                   │
+│         ↓  weighted sum of bin centers                                      │
+│  Expected symlog value: Σ pᵢ × bin_centerᵢ ≈ 2.40                           │
+│         │                                                                   │
+│         ↓  symexp                                                           │
+│  Decoded value: ≈ 10.0                                                      │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  WHY IT WORKS:                                                              │
+│                                                                             │
+│  • Categorical distributions can be multi-modal                             │
+│  • Each bin gets its own gradient signal                                    │
+│  • Sparse events (+10) update bins around +10                               │
+│  • Common events (0) update bins around 0                                   │
+│  • No "regression to mean" problem                                          │
+│                                                                             │
+│  • Symlog compresses large values into finite range                         │
+│  • 255 bins from -20 to +20 in symlog space                                 │
+│  • Covers rewards from -485M to +485M in original scale                     │
+│  • But most resolution where it matters (near 0, ±10)                       │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## Summary Table: TD3 vs. DreamerV3
@@ -663,11 +1138,13 @@ By separating "understanding the world" from "choosing actions," DreamerV3 can l
 | **World model** | None | Full (RSSM + heads) |
 | **Policy training** | On real transitions | In imagination |
 | **State representation** | Raw observations | Learned latent [h, z] |
+| **Stochastic state** | N/A | Categorical (16×16) |
 | **Sparse rewards** | Struggles | Handles via long horizon |
 | **Sample efficiency** | Lower | Higher |
 | **Computational cost** | Lower per step | Higher per step |
-| **Memory** | Simple replay buffer | Episode buffer + models |
-| **Key components** | Actor, Critic | World Model, Actor, Critic |
+| **Memory** | Simple replay buffer | Sequence buffer + models |
+| **Key components** | Actor, 2× Critic | World Model, Actor, Critic |
+| **Reward shaping** | Often needed (PBRS) | Optional (imagination helps) |
 
 ---
 

@@ -2,37 +2,192 @@
 AI Usage Declaration:
 This file was developed with assistance from Claude Code.
 
-W&B Run Data Downloader and Visualizer
+W&B Run Data Downloader for DreamerV3 Hockey
 
-Downloads complete run data from W&B and creates visualization plots.
-Supports both TD3 and DreamerV3 runs with automatic metric detection.
+Downloads complete run data from W&B for analysis.
+Outputs a text file that can be shared for debugging.
 
 Usage:
-    python download_wandb_run.py --run_name "DreamerV3-NORMAL-weak-seed42"
+    python download_wandb_run.py --run_name "DreamerV3-small-weak-seed43"
     python download_wandb_run.py --run_id "abc123xyz"
     python download_wandb_run.py --run_name "..." --max_chars 50000
 """
 
 import argparse
-import json
-import wandb
 import numpy as np
+import wandb
 from pathlib import Path
 from collections import defaultdict
 
-try:
-    import matplotlib.pyplot as plt
-    import matplotlib.gridspec as gridspec
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
+
+# =============================================================================
+# METRIC CATEGORIES - Comprehensive DreamerV3 Metrics
+# =============================================================================
+#
+# These are all the metrics logged by our DreamerV3 implementation.
+# Organized by category for easy analysis.
+#
+# -----------------------------------------------------------------------------
+# TRAINING PROGRESS (what you check first)
+# -----------------------------------------------------------------------------
+# stats/
+#   gradient_steps       - Total gradient updates
+#   env_steps            - Total environment steps
+#   episodes             - Total episodes completed
+#   win_rate             - Rolling win rate (last 100)
+#   mean_reward          - Rolling mean reward (last 100)
+#   wins, losses, draws  - Cumulative counts
+#   buffer_size          - Replay buffer size
+#
+# episode/
+#   length_mean/std/min/max    - Episode duration stats
+#   reward_mean/std            - Sparse reward stats
+#   shaped_reward_mean         - PBRS contribution
+#   win_rate_100               - Win rate last 100 episodes
+#   draw_rate_100              - Timeout rate
+#
+# time/
+#   elapsed_hours              - Training time
+#   steps_per_second           - Env throughput
+#   episodes_per_hour          - Episode throughput
+#   gradient_steps_per_second  - Training speed
+#
+# eval/
+#   win_rate, mean_reward      - Evaluation performance
+#   wins, losses, draws        - Eval outcome counts
+#
+# -----------------------------------------------------------------------------
+# WORLD MODEL (is the model learning the environment?)
+# -----------------------------------------------------------------------------
+# world/
+#   loss                 - Total world model loss
+#   recon_loss           - Observation reconstruction loss
+#   reward_loss          - Reward prediction loss
+#   kl_loss              - KL divergence loss
+#   continue_loss        - Episode termination prediction loss
+#
+#   recon_error_mean/std/max   - Reconstruction quality distribution
+#   reward_pred_error_mean/std - Reward prediction accuracy
+#   reward_pred_mean           - Predicted reward mean
+#   reward_actual_mean         - Actual reward mean
+#
+#   latent_entropy             - Diversity of latent space (higher=better)
+#   prior_posterior_kl         - World model uncertainty
+#
+#   continue_pred_mean         - Predicted continue probability
+#   continue_actual_mean       - Actual continue rate
+#
+# -----------------------------------------------------------------------------
+# BEHAVIOR / ACTOR-CRITIC (is the policy learning?)
+# -----------------------------------------------------------------------------
+# behavior/
+#   actor_loss                 - Policy loss
+#   critic_loss                - Value function loss
+#
+#   entropy_mean/std/min/max   - Policy entropy distribution
+#   logprobs_mean/std          - Action log probabilities
+#
+#   advantages_mean/std/min/max      - Policy gradient signal
+#   advantages_abs_mean              - Signal magnitude
+#
+# values/
+#   mean/std/min/max           - Critic value predictions
+#   lambda_returns_mean/std/min/max  - TD(λ) targets
+#   norm_low/high/scale        - Value normalization stats
+#
+# -----------------------------------------------------------------------------
+# IMAGINATION (what does the agent "see" when imagining?)
+# -----------------------------------------------------------------------------
+# imagination/
+#   reward_mean/std/min/max    - Predicted rewards in imagination
+#   reward_abs_mean            - Reward magnitude
+#   reward_nonzero_frac        - Fraction with any reward signal
+#   reward_significant_frac    - Fraction with sparse-level rewards
+#   continue_mean/min          - Episode continuation in imagination
+#
+# -----------------------------------------------------------------------------
+# ACTIONS (what is the policy outputting?)
+# -----------------------------------------------------------------------------
+# actions/
+#   mean/std/min/max           - Action distribution stats
+#   abs_mean                   - Action magnitude
+#   dim0/1/2/3_mean            - Per-dimension action means
+#
+# -----------------------------------------------------------------------------
+# GRADIENTS (is training stable?)
+# -----------------------------------------------------------------------------
+# gradients/
+#   world_model_norm           - World model gradient norm
+#   actor_norm                 - Actor gradient norm
+#   critic_norm                - Critic gradient norm
+#
+# -----------------------------------------------------------------------------
+# SPARSE REWARD SIGNAL (is the agent learning from sparse rewards?)
+# -----------------------------------------------------------------------------
+# sparse_signal/
+#   event_rate_in_batch        - How often sparse rewards appear in training
+#   num_sparse_events          - Count of sparse events per batch
+#   reward_variance            - Reward variance (should be >0)
+#   reward_min/max/range       - Reward range in batch
+#
+#   sparse_pred_error          - Prediction error ON sparse rewards
+#   sparse_pred_mean           - What model predicts for sparse rewards
+#   sparse_actual_mean         - Actual sparse reward values
+#   sparse_sign_accuracy       - Does model predict correct sign? (critical!)
+#   nonsparse_pred_error       - Prediction error on dense rewards
+#   sparse_vs_nonsparse_error_ratio - Is sparse harder to predict?
+#
+#   lambda_return_abs_mean     - Lambda return magnitude (should be >0)
+#   lambda_return_nonzero_frac - Fraction with signal
+#   lambda_return_significant_frac - Fraction with strong signal
+#
+#   value_lambda_gap_mean      - How much imagination adds to values
+#   value_lambda_gap_abs_mean  - Gap magnitude
+#
+#   advantage_nonzero_frac     - Fraction of meaningful advantages
+#   advantage_significant_frac - Fraction of strong advantages
+#
+# -----------------------------------------------------------------------------
+# PBRS COMPONENTS (reward shaping breakdown)
+# -----------------------------------------------------------------------------
+# pbrs/
+#   episode_total              - Total PBRS reward per episode
+#   episode_mean               - Mean PBRS per step
+#   chase_total                - Chase component contribution
+#   attack_total               - Attack component contribution
+#   chase_ratio                - Fraction from chase
+#   attack_ratio               - Fraction from attack
+#
+# -----------------------------------------------------------------------------
+# REWARD COMPOSITION (balance between sparse and shaped)
+# -----------------------------------------------------------------------------
+# reward_composition/
+#   sparse_fraction            - % of total from sparse (should be >0.5)
+#   pbrs_fraction              - % of total from PBRS (should be <0.5)
+#   sparse_mean                - Avg sparse reward
+#   pbrs_mean                  - Avg PBRS reward
+#   total_mean                 - Avg total reward
+#   pbrs_to_sparse_ratio       - |PBRS|/|sparse| (should be <1)
+#
+# -----------------------------------------------------------------------------
+# REWARD HACKING DETECTION (is the agent gaming PBRS?)
+# -----------------------------------------------------------------------------
+# reward_hacking/
+#   pbrs_std                   - PBRS variance
+#   sparse_std                 - Sparse reward variance
+#   pbrs_winrate_correlation   - PBRS-win correlation (should be >0)
+#   pbrs_when_win              - Avg PBRS in winning episodes
+#   pbrs_when_loss             - Avg PBRS in losing episodes
+#   loss_pbrs_minus_win_pbrs   - Should be <0 (more PBRS when winning)
+#
+# =============================================================================
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Download W&B run data for analysis')
 
     parser.add_argument('--run_name', type=str, default=None,
-                        help='Run name (e.g., "TD3-Hockey-NORMAL-weak-lr0.0003-seed42")')
+                        help='Run name (e.g., "DreamerV3-small-weak-seed43")')
     parser.add_argument('--run_id', type=str, default=None,
                         help='Run ID (alternative to run_name)')
     parser.add_argument('--project', type=str, default='rl-hockey',
@@ -42,236 +197,11 @@ def parse_args():
     parser.add_argument('--max_chars', type=int, default=100000,
                         help='Maximum characters in output (default: 100000)')
     parser.add_argument('--output', type=str, default=None,
-                        help='Output file path (default: ./wandb_run_data.txt)')
+                        help='Output file path (default: ./wandb_run_<name>.txt)')
     parser.add_argument('--include_metrics', type=str, nargs='+', default=None,
-                        help='Specific metrics to include (default: ALL metrics - no filtering)')
-    parser.add_argument('--plot', action='store_true',
-                        help='Generate visualization plots')
-    parser.add_argument('--plot_output', type=str, default=None,
-                        help='Output path for plot (default: ./wandb_run_<name>.png)')
+                        help='Specific metrics to include (default: ALL metrics)')
 
     return parser.parse_args()
-
-
-def plot_dreamer_metrics(history, run_name, output_path):
-    """Generate comprehensive DreamerV3 training visualization."""
-    if not HAS_MATPLOTLIB:
-        print("Warning: matplotlib not installed, skipping plots")
-        return
-
-    # Set up the figure with subplots (5 rows for more metrics)
-    fig = plt.figure(figsize=(20, 20))
-    fig.suptitle(f'DreamerV3 Training: {run_name}', fontsize=14, fontweight='bold')
-
-    gs = gridspec.GridSpec(5, 3, figure=fig, hspace=0.3, wspace=0.25)
-
-    # Helper to plot with smoothing
-    def plot_metric(ax, data, label, color, smooth_window=10):
-        if data is None or len(data) == 0:
-            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
-            return
-        x = np.arange(len(data))
-        ax.plot(x, data, alpha=0.3, color=color)
-        if len(data) > smooth_window:
-            smoothed = np.convolve(data, np.ones(smooth_window)/smooth_window, mode='valid')
-            ax.plot(np.arange(len(smoothed)) + smooth_window//2, smoothed, color=color, label=label)
-        else:
-            ax.plot(x, data, color=color, label=label)
-
-    def get_metric(name):
-        if name in history.columns:
-            return history[name].dropna().values
-        return None
-
-    # 1. Episode Reward
-    ax1 = fig.add_subplot(gs[0, 0])
-    reward_data = get_metric('episode/reward')
-    plot_metric(ax1, reward_data, 'Reward', 'blue')
-    ax1.set_title('Episode Reward')
-    ax1.set_xlabel('Episode')
-    ax1.set_ylabel('Reward')
-    ax1.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
-    ax1.legend()
-
-    # 2. Win Rate
-    ax2 = fig.add_subplot(gs[0, 1])
-    win_rate = get_metric('stats/win_rate')
-    if win_rate is not None:
-        ax2.plot(win_rate, color='green', label='Win Rate')
-        ax2.fill_between(range(len(win_rate)), win_rate, alpha=0.3, color='green')
-    ax2.set_title('Win Rate')
-    ax2.set_xlabel('Episode')
-    ax2.set_ylabel('Win Rate')
-    ax2.set_ylim(0, 1)
-    ax2.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
-    ax2.legend()
-
-    # 3. Episode Length
-    ax3 = fig.add_subplot(gs[0, 2])
-    length_data = get_metric('episode/length')
-    plot_metric(ax3, length_data, 'Length', 'purple')
-    ax3.set_title('Episode Length')
-    ax3.set_xlabel('Episode')
-    ax3.set_ylabel('Steps')
-    ax3.legend()
-
-    # 4. World Model Loss
-    ax4 = fig.add_subplot(gs[1, 0])
-    world_loss = get_metric('world/loss')
-    plot_metric(ax4, world_loss, 'Total', 'red')
-    ax4.set_title('World Model Loss')
-    ax4.set_xlabel('Episode')
-    ax4.set_ylabel('Loss')
-    ax4.set_yscale('log')
-    ax4.legend()
-
-    # 5. World Model Loss Components
-    ax5 = fig.add_subplot(gs[1, 1])
-    recon_loss = get_metric('world/recon_loss')
-    reward_loss = get_metric('world/reward_loss')
-    kl_loss = get_metric('world/kl_loss')
-    continue_loss = get_metric('world/continue_loss')
-    if recon_loss is not None:
-        plot_metric(ax5, recon_loss, 'Recon', 'blue')
-    if reward_loss is not None:
-        plot_metric(ax5, reward_loss, 'Reward', 'green')
-    if kl_loss is not None:
-        plot_metric(ax5, kl_loss, 'KL', 'orange')
-    if continue_loss is not None:
-        plot_metric(ax5, continue_loss, 'Continue', 'purple')
-    ax5.set_title('World Model Components')
-    ax5.set_xlabel('Episode')
-    ax5.set_ylabel('Loss')
-    ax5.legend()
-
-    # 6. KL Divergence
-    ax6 = fig.add_subplot(gs[1, 2])
-    kl_value = get_metric('world/kl_value')
-    plot_metric(ax6, kl_value, 'KL Value', 'orange')
-    ax6.set_title('KL Divergence (Prior vs Posterior)')
-    ax6.set_xlabel('Episode')
-    ax6.set_ylabel('KL')
-    ax6.legend()
-
-    # 7. Actor Loss
-    ax7 = fig.add_subplot(gs[2, 0])
-    actor_loss = get_metric('behavior/actor_loss')
-    plot_metric(ax7, actor_loss, 'Actor Loss', 'blue')
-    ax7.set_title('Actor Loss')
-    ax7.set_xlabel('Episode')
-    ax7.set_ylabel('Loss')
-    ax7.legend()
-
-    # 8. Critic Loss
-    ax8 = fig.add_subplot(gs[2, 1])
-    critic_loss = get_metric('behavior/critic_loss')
-    plot_metric(ax8, critic_loss, 'Critic Loss', 'red')
-    ax8.set_title('Critic Loss')
-    ax8.set_xlabel('Episode')
-    ax8.set_ylabel('Loss')
-    ax8.legend()
-
-    # 9. Policy Entropy
-    ax9 = fig.add_subplot(gs[2, 2])
-    entropy = get_metric('behavior/entropy')
-    plot_metric(ax9, entropy, 'Entropy', 'purple')
-    ax9.set_title('Policy Entropy')
-    ax9.set_xlabel('Episode')
-    ax9.set_ylabel('Entropy')
-    ax9.legend()
-
-    # 10. Gradient Norms
-    ax10 = fig.add_subplot(gs[3, 0])
-    grad_world = get_metric('grad/world')
-    grad_actor = get_metric('grad/actor')
-    grad_critic = get_metric('grad/critic')
-    if grad_world is not None:
-        plot_metric(ax10, grad_world, 'World', 'red')
-    if grad_actor is not None:
-        plot_metric(ax10, grad_actor, 'Actor', 'blue')
-    if grad_critic is not None:
-        plot_metric(ax10, grad_critic, 'Critic', 'green')
-    ax10.set_title('Gradient Norms')
-    ax10.set_xlabel('Episode')
-    ax10.set_ylabel('Norm')
-    ax10.legend()
-
-    # 11. Value Estimates
-    ax11 = fig.add_subplot(gs[3, 1])
-    value_mean = get_metric('behavior/value_mean')
-    target_mean = get_metric('behavior/target_mean')
-    if value_mean is not None:
-        plot_metric(ax11, value_mean, 'Value', 'blue')
-    if target_mean is not None:
-        plot_metric(ax11, target_mean, 'Target', 'green')
-    ax11.set_title('Value Estimates')
-    ax11.set_xlabel('Episode')
-    ax11.set_ylabel('Value')
-    ax11.legend()
-
-    # 12. Imagined Rewards
-    ax12 = fig.add_subplot(gs[3, 2])
-    imagine_reward = get_metric('imagine/reward_mean')
-    imagine_continue = get_metric('imagine/continue_mean')
-    if imagine_reward is not None:
-        ax12_twin = ax12.twinx()
-        plot_metric(ax12, imagine_reward, 'Reward Mean', 'blue')
-        if imagine_continue is not None:
-            plot_metric(ax12_twin, imagine_continue, 'Continue Prob', 'orange')
-            ax12_twin.set_ylabel('Continue Prob', color='orange')
-            ax12_twin.tick_params(axis='y', labelcolor='orange')
-    ax12.set_title('Imagination Stats')
-    ax12.set_xlabel('Episode')
-    ax12.set_ylabel('Reward', color='blue')
-    ax12.tick_params(axis='y', labelcolor='blue')
-
-    # 13. Terminal Reward Prediction (CRITICAL for sparse reward learning)
-    ax13 = fig.add_subplot(gs[4, 0])
-    terminal_pred = get_metric('world/terminal_pred_mean')
-    terminal_target = get_metric('world/terminal_target_mean')
-    if terminal_pred is not None:
-        plot_metric(ax13, terminal_pred, 'Predicted', 'blue')
-    if terminal_target is not None:
-        plot_metric(ax13, terminal_target, 'Target', 'green')
-    ax13.set_title('Terminal Reward Prediction')
-    ax13.set_xlabel('Episode')
-    ax13.set_ylabel('Reward')
-    ax13.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
-    ax13.legend()
-
-    # 14. Terminal Count per Batch
-    ax14 = fig.add_subplot(gs[4, 1])
-    terminal_count = get_metric('world/terminal_count')
-    if terminal_count is not None:
-        ax14.bar(range(len(terminal_count)), terminal_count, alpha=0.7, color='purple')
-        ax14.axhline(y=np.mean(terminal_count) if terminal_count is not None and len(terminal_count) > 0 else 0,
-                     color='red', linestyle='--', label=f'Mean: {np.mean(terminal_count):.1f}')
-    ax14.set_title('Terminal Samples per Batch')
-    ax14.set_xlabel('Episode')
-    ax14.set_ylabel('Count')
-    ax14.legend()
-
-    # 15. Advantage Distribution
-    ax15 = fig.add_subplot(gs[4, 2])
-    advantage = get_metric('behavior/advantage_mean')
-    policy_loss = get_metric('behavior/policy_loss')
-    if advantage is not None:
-        plot_metric(ax15, advantage, 'Advantage', 'blue')
-    if policy_loss is not None:
-        ax15_twin = ax15.twinx()
-        plot_metric(ax15_twin, policy_loss, 'Policy Loss', 'red')
-        ax15_twin.set_ylabel('Policy Loss', color='red')
-        ax15_twin.tick_params(axis='y', labelcolor='red')
-    ax15.set_title('Advantage & Policy Loss')
-    ax15.set_xlabel('Episode')
-    ax15.set_ylabel('Advantage', color='blue')
-    ax15.tick_params(axis='y', labelcolor='blue')
-    ax15.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
-
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"✓ Plot saved to: {output_path}")
 
 
 def get_run(entity, project, run_name=None, run_id=None):
@@ -281,7 +211,6 @@ def get_run(entity, project, run_name=None, run_id=None):
     if run_id:
         run = api.run(f"{entity}/{project}/{run_id}")
     elif run_name:
-        # Search for run by name
         runs = api.runs(f"{entity}/{project}", filters={"display_name": run_name})
         runs_list = list(runs)
 
@@ -299,299 +228,194 @@ def get_run(entity, project, run_name=None, run_id=None):
     return run
 
 
-def get_all_metrics():
-    """
-    Return None to indicate we want ALL metrics from the run.
-
-    The script will automatically fetch all W&B metrics (those with "/" in name).
-    This ensures we never miss any logged metrics.
-
-    DreamerV3 metric categories:
-    - episode/: reward, length, outcome, time, train_time
-    - stats/: win_rate, total_steps, buffer_size, buffer_episodes
-    - world/: loss, recon_loss, reward_loss, continue_loss, kl_loss, kl_value,
-              terminal_count, terminal_pred_mean, terminal_target_mean
-    - behavior/: actor_loss, critic_loss, policy_loss, entropy, value_mean, target_mean, advantage_mean
-    - grad/: world, actor, critic
-    - imagine/: reward_mean, reward_std, continue_mean
-    - eval_weak/: win_rate, loss_rate, draw_rate, mean_reward, mean_length, goals_scored, goals_conceded
-    - eval_strong/: win_rate, loss_rate, draw_rate, mean_reward, mean_length, goals_scored, goals_conceded
-
-    TD3 metric categories (for reference):
-    - performance/: cumulative_win_rate, wins, losses, ties
-    - rewards/: p1, p2, sparse_only, sparse_ratio
-    - scoring/: goals_scored, goals_conceded
-    - training/: epsilon, eps_per_sec, episode
-    - losses/: critic_loss, actor_loss
-    - gradients/: critic_grad_norm, actor_grad_norm
-    - eval/weak/: win_rate, loss_rate, avg_reward
-    - eval/strong/: win_rate, loss_rate, avg_reward
-    """
-    return None  # None means fetch ALL metrics
-
-
 def discretize_data(data, max_points=200):
-    """
-    Intelligently discretize data to reduce size while preserving trends.
-
-    Strategy:
-    - Keep first 50 points (early training critical)
-    - Keep last 50 points (final performance)
-    - Adaptively sample middle based on variance
-    """
+    """Intelligently discretize data to reduce size while preserving trends."""
     if len(data) <= max_points:
         return data
 
     indices = []
 
-    # Always keep first 50 points (early training)
+    # Keep first 50 points (early training)
     n_start = min(50, len(data) // 4)
     indices.extend(range(n_start))
 
-    # Always keep last 50 points (final performance)
+    # Keep last 50 points (final performance)
     n_end = min(50, len(data) // 4)
     indices.extend(range(len(data) - n_end, len(data)))
 
-    # Sample middle based on available budget
+    # Sample middle uniformly
     n_middle = max_points - n_start - n_end
     if n_middle > 0:
         middle_start = n_start
         middle_end = len(data) - n_end
-
-        # Uniform sampling of middle
         middle_indices = np.linspace(middle_start, middle_end - 1, n_middle, dtype=int)
         indices.extend(middle_indices)
 
-    # Sort and remove duplicates
     indices = sorted(set(indices))
-
     return [data[i] for i in indices]
 
 
 def format_run_data(run, include_metrics=None, max_chars=100000):
-    """Format run data for chat analysis"""
+    """Format run data for analysis"""
 
-    # Get run metadata
     config = run.config
     summary = run.summary
 
-    # Determine which metrics to include
-    # If include_metrics is None, we'll fetch ALL metrics from the run
-    metrics_to_fetch = include_metrics  # None means all
-
-    # Fetch history data
+    # Fetch history
     print(f"Fetching run history for: {run.name}")
-
-    # Fetch all available data (don't filter by keys to avoid losing data)
     try:
-        print(f"  Attempting to fetch full history (no key filtering)...")
-        history = run.history()  # Fetch everything, no filtering
-        print(f"  ✓ Fetched {len(history)} rows with {len(history.columns)} columns")
+        history = run.history()
+        print(f"  Fetched {len(history)} rows with {len(history.columns)} columns")
     except Exception as e:
-        print(f"  ✗ Failed with default fetch: {e}")
-        print(f"  Trying alternative fetch method...")
-        try:
-            # Fallback: try with explicit samples parameter
-            history = run.history(samples=None)  # Fetch all samples
-            print(f"  ✓ Fetched {len(history)} rows with {len(history.columns)} columns")
-        except Exception as e2:
-            print(f"  ✗ Also failed with samples=None: {e2}")
-            print(f"  This run may have no logged metrics or API access issues")
-            history = None
+        print(f"  Failed to fetch history: {e}")
+        history = None
 
-    if history is None or history.empty:
-        print(f"  ⚠ WARNING: No history data fetched! The run may not have metrics logged.")
-        print(f"  Returning config/summary only...")
-        metrics_data = {}
-    else:
-        # Debug: Print available columns
-        all_columns = list(history.columns)
-        available_metrics = [col for col in all_columns if '/' in col]  # Only W&B metrics
-        non_metric_cols = [col for col in all_columns if '/' not in col]
-
-        print(f"  ✓ Available W&B metrics: {len(available_metrics)}")
-        print(f"    Non-metric columns: {non_metric_cols}")
-        if available_metrics:
-            print(f"    Sample W&B metrics: {available_metrics[:15]}")
-
-        # Show metrics availability
-        if metrics_to_fetch is not None:
-            available_requested = [m for m in metrics_to_fetch if m in history.columns]
-            missing_requested = [m for m in metrics_to_fetch if m not in history.columns]
-            if available_requested:
-                print(f"  ✓ Found {len(available_requested)} requested metrics")
-            if missing_requested:
-                print(f"    Not found (not logged): {missing_requested[:10]}")
-        else:
-            print(f"  ✓ Fetching ALL {len(available_metrics)} W&B metrics (no filtering)")
-
-    # Organize data by metric (only if history was successfully fetched)
-    if history is not None and not history.empty:
-        metrics_data = defaultdict(list)
-
-        # Determine which metrics to process
-        if metrics_to_fetch is not None:
-            # User specified specific metrics
-            metrics_to_process = [m for m in metrics_to_fetch if m in history.columns]
-            if not metrics_to_process:
-                print(f"  No requested metrics found. Using all available W&B metrics...")
-                metrics_to_process = [col for col in history.columns if '/' in col]
-        else:
-            # Fetch ALL W&B metrics (columns with "/" in name)
-            metrics_to_process = [col for col in history.columns if '/' in col]
-
-        print(f"  Processing {len(metrics_to_process)} metrics from {len(history)} history rows...")
-
-        # Extract metric values from history
-        collected_count = 0
-        for metric in metrics_to_process:
-            if metric in history.columns:
-                values = history[metric].dropna()  # Remove NaN values
-                if len(values) > 0:
-                    metrics_data[metric] = values.tolist()
-                    collected_count += 1
-
-        print(f"  ✓ Successfully extracted data for {collected_count} metrics")
-        if collected_count == 0:
-            print(f"    ⚠ WARNING: No metrics with data found!")
-    else:
-        metrics_data = {}
-
-    # Build output text
+    # Build output
     output_lines = []
     output_lines.append("=" * 80)
     output_lines.append(f"W&B RUN DATA: {run.name}")
     output_lines.append("=" * 80)
     output_lines.append("")
 
-    # Run metadata
+    # Metadata
     output_lines.append("## RUN METADATA")
     output_lines.append(f"Run ID: {run.id}")
     output_lines.append(f"Created: {run.created_at}")
     output_lines.append(f"State: {run.state}")
-    output_lines.append(f"Duration: {run.summary.get('_runtime', 'N/A')} seconds")
+    output_lines.append(f"Duration: {summary.get('_runtime', 'N/A')} seconds")
     output_lines.append("")
 
-    # Config - detect algorithm type and show relevant keys
+    # Configuration - show key DreamerV3 settings
     output_lines.append("## CONFIGURATION")
+    config_groups = {
+        'Environment': ['opponent', 'mode'],
+        'Training': ['batch_size', 'batch_length', 'replay_ratio', 'gradient_steps',
+                     'imagination_horizon', 'discount', 'lambda_'],
+        'Learning Rates': ['lr_world', 'lr_actor', 'lr_critic'],
+        'Entropy': ['entropy_scale'],
+        'PBRS': ['use_pbrs', 'pbrs_scale', 'pbrs_w_chase', 'pbrs_w_attack'],
+        'Architecture': ['recurrent_size', 'latent_length', 'latent_classes'],
+        'Meta': ['seed', 'algorithm'],
+    }
 
-    # Check if DreamerV3 or TD3 based on config keys
-    is_dreamer = any(k.startswith('arch/') or k.startswith('imagination/') or k.startswith('dreamer/') for k in config.keys())
-
-    if is_dreamer:
-        # DreamerV3 config keys
-        config_sections = {
-            'Environment': ['env/mode', 'env/opponent', 'env/obs_dim', 'env/action_dim'],
-            'Architecture': ['arch/hidden_size', 'arch/latent_size', 'arch/recurrent_size'],
-            'Imagination': ['imagination/horizon', 'imagination/batch_size'],
-            'Training': ['train/batch_size', 'train/batch_length', 'train/lr_world',
-                        'train/lr_actor', 'train/lr_critic', 'train/gamma', 'train/lambda_gae'],
-            'DreamerV3': ['dreamer/kl_free', 'dreamer/entropy_scale'],
-            'Meta': ['seed', 'max_steps', 'device'],
-        }
-    else:
-        # TD3 config keys
-        config_sections = {
-            'Environment': ['mode', 'opponent'],
-            'Training': ['learning_rate_actor', 'learning_rate_critic', 'batch_size',
-                        'buffer_size', 'max_episodes', 'gamma', 'tau'],
-            'Exploration': ['eps', 'eps_min', 'eps_decay'],
-            'Self-Play': ['self_play_start', 'self_play_pool_size'],
-            'Meta': ['random_seed', 'algorithm'],
-        }
-
-    for section, keys in config_sections.items():
-        section_values = [(k, config.get(k)) for k in keys if k in config]
+    for section, keys in config_groups.items():
+        section_values = [(k, config.get(k)) for k in keys if config.get(k) is not None]
         if section_values:
             output_lines.append(f"  [{section}]")
             for key, value in section_values:
                 output_lines.append(f"    {key}: {value}")
     output_lines.append("")
 
-    # Summary metrics
+    # Summary
     output_lines.append("## FINAL SUMMARY")
-    # Try common summary keys
-    summary_keys = ['final_win_rate', 'wins', 'losses', 'ties', 'draws',
-                    'total_episodes', 'total_steps', '_runtime']
-    for key in summary_keys:
-        if key in summary:
-            value = summary[key]
-            if key == '_runtime':
-                # Format runtime nicely
-                hours = value / 3600
-                output_lines.append(f"  runtime: {hours:.2f} hours ({value:.0f} seconds)")
-            else:
-                output_lines.append(f"  {key}: {value}")
+    runtime = summary.get('_runtime', 0)
+    if runtime:
+        output_lines.append(f"  runtime: {runtime/3600:.2f} hours ({runtime:.0f} seconds)")
     output_lines.append("")
 
-    # Estimate size and discretize if needed
-    current_size = sum(len(line) for line in output_lines)
-    estimated_metrics_size = sum(len(data) * 20 for data in metrics_data.values())  # ~20 chars per datapoint
-    total_estimated = current_size + estimated_metrics_size
+    # Process metrics
+    if history is not None and not history.empty:
+        metrics_data = defaultdict(list)
 
-    # Calculate discretization factor
-    if total_estimated > max_chars:
-        discretization_factor = int(np.ceil(total_estimated / max_chars))
-        max_points_per_metric = max(50, 200 // discretization_factor)
-        output_lines.append(f"## NOTE: Data discretized to fit {max_chars} char limit")
-        output_lines.append(f"  Showing ~{max_points_per_metric} points per metric (of {len(next(iter(metrics_data.values())) if metrics_data else [])} total)")
+        # Get all W&B metrics (columns with "/" in name)
+        all_metrics = [col for col in history.columns if '/' in col]
+
+        if include_metrics:
+            metrics_to_process = [m for m in include_metrics if m in history.columns]
+        else:
+            metrics_to_process = all_metrics
+
+        print(f"  Processing {len(metrics_to_process)} metrics...")
+
+        for metric in metrics_to_process:
+            values = history[metric].dropna()
+            if len(values) > 0:
+                metrics_data[metric] = values.tolist()
+
+        print(f"  Extracted data for {len(metrics_data)} metrics")
+    else:
+        metrics_data = {}
+
+    # Estimate size and discretize
+    current_size = sum(len(line) for line in output_lines)
+    estimated_size = current_size + sum(len(d) * 20 for d in metrics_data.values())
+
+    if estimated_size > max_chars:
+        factor = int(np.ceil(estimated_size / max_chars))
+        max_points = max(50, 200 // factor)
+        output_lines.append(f"## NOTE: Data discretized to ~{max_points} points per metric")
         output_lines.append("")
     else:
-        max_points_per_metric = 10000  # No discretization needed
+        max_points = 10000
 
-    # Format metrics data
+    # Format metrics by category
     output_lines.append("## METRICS DATA")
     output_lines.append("")
 
     if not metrics_data:
-        output_lines.append("⚠ NO METRICS FOUND")
-        output_lines.append("")
-        output_lines.append("This run has no logged metric history. Possible causes:")
-        output_lines.append("  1. Run crashed before first metric was logged")
-        output_lines.append("  2. Metrics not being logged in training script (check wandb.log calls)")
-        output_lines.append("  3. W&B API access issue")
-        output_lines.append("  4. Run is still in progress (wait for it to complete)")
-        output_lines.append("")
+        output_lines.append("No metrics found")
     else:
+        # Group metrics by prefix
+        metric_groups = defaultdict(list)
         for metric in sorted(metrics_data.keys()):
-            data = metrics_data[metric]
+            prefix = metric.split('/')[0]
+            metric_groups[prefix].append(metric)
 
-            if not data:
+        # Define display order
+        group_order = [
+            'stats', 'episode', 'time', 'eval',  # Progress
+            'world',  # World model
+            'behavior', 'values',  # Actor-critic
+            'imagination',  # Imagination
+            'actions',  # Actions
+            'gradients',  # Gradients
+            'sparse_signal',  # Sparse rewards
+            'pbrs', 'reward_composition', 'reward_hacking',  # Reward analysis
+        ]
+
+        # Add any groups not in order
+        for group in metric_groups:
+            if group not in group_order:
+                group_order.append(group)
+
+        for group in group_order:
+            if group not in metric_groups:
                 continue
 
-            # Discretize if needed
-            if len(data) > max_points_per_metric:
-                data = discretize_data(data, max_points_per_metric)
+            output_lines.append(f"### {group.upper()}")
 
-            output_lines.append(f"### {metric}")
-            output_lines.append(f"  Total points: {len(data)}")
+            for metric in sorted(metric_groups[group]):
+                data = metrics_data[metric]
+                if not data:
+                    continue
 
-            # Handle cases where data might not be numeric
-            try:
-                numeric_data = [float(v) for v in data]
-                output_lines.append(f"  Min: {min(numeric_data):.4f}, Max: {max(numeric_data):.4f}, Mean: {np.mean(numeric_data):.4f}")
+                # Discretize
+                if len(data) > max_points:
+                    data = discretize_data(data, max_points)
 
-                # Format data compactly
-                output_lines.append("  Data: [")
+                metric_name = metric.split('/')[-1]
+                output_lines.append(f"#### {metric_name}")
+                output_lines.append(f"  Points: {len(data)}")
 
-                # Group into lines of 10 values for readability
-                for i in range(0, len(numeric_data), 10):
-                    chunk = numeric_data[i:i+10]
-                    formatted_chunk = ", ".join(f"{v:.4f}" for v in chunk)
-                    output_lines.append(f"    {formatted_chunk},")
+                try:
+                    numeric = [float(v) for v in data]
+                    output_lines.append(f"  Min: {min(numeric):.4f}, Max: {max(numeric):.4f}, Mean: {np.mean(numeric):.4f}")
+                    output_lines.append("  Data: [")
+                    for i in range(0, len(numeric), 10):
+                        chunk = numeric[i:i+10]
+                        output_lines.append(f"    {', '.join(f'{v:.4f}' for v in chunk)},")
+                    output_lines.append("  ]")
+                except (ValueError, TypeError) as e:
+                    output_lines.append(f"  Error: {e}")
 
-                output_lines.append("  ]")
-            except (ValueError, TypeError) as e:
-                output_lines.append(f"  ✗ Could not format data: {e}")
+                output_lines.append("")
 
             output_lines.append("")
 
-    # Join and check size
     output_text = "\n".join(output_lines)
 
     if len(output_text) > max_chars:
-        print(f"Warning: Output size ({len(output_text)} chars) exceeds max_chars ({max_chars})")
-        print("Consider reducing max_chars or selecting fewer metrics")
+        print(f"Warning: Output ({len(output_text)} chars) exceeds max ({max_chars})")
 
     return output_text
 
@@ -599,53 +423,28 @@ def format_run_data(run, include_metrics=None, max_chars=100000):
 def main():
     args = parse_args()
 
-    # Get run
     print(f"Connecting to W&B...")
     run = get_run(args.entity, args.project, args.run_name, args.run_id)
     print(f"Found run: {run.name} (ID: {run.id})")
 
-    # Format data
     output = format_run_data(run, args.include_metrics, args.max_chars)
 
-    # Save to file
     if args.output:
         output_path = Path(args.output)
     else:
         output_path = Path(f"./wandb_run_{run.name.replace('/', '_')}.txt")
 
     output_path.write_text(output)
-    print(f"\n✅ Data saved to: {output_path}")
-    print(f"   Size: {len(output):,} characters")
-    print(f"   Lines: {len(output.splitlines()):,}")
+    print(f"\nSaved to: {output_path}")
+    print(f"Size: {len(output):,} characters, {len(output.splitlines()):,} lines")
 
-    # Generate plot if requested
-    if args.plot:
-        print("\nGenerating visualization plots...")
-        try:
-            history = run.history()
-            if history is not None and not history.empty:
-                # Determine plot output path
-                if args.plot_output:
-                    plot_path = Path(args.plot_output)
-                else:
-                    plot_path = Path(f"./wandb_plot_{run.name.replace('/', '_')}.png")
-
-                plot_dreamer_metrics(history, run.name, plot_path)
-            else:
-                print("  ⚠ No history data available for plotting")
-        except Exception as e:
-            print(f"  ✗ Failed to generate plot: {e}")
-
-    print("\nYou can now copy the text file and paste it in chat for analysis!")
-
-    # Also print first few lines as preview
+    # Preview
     print("\n" + "=" * 80)
-    print("PREVIEW (first 50 lines):")
+    print("PREVIEW (first 40 lines):")
     print("=" * 80)
-    for i, line in enumerate(output.splitlines()[:50]):
+    for line in output.splitlines()[:40]:
         print(line)
     print("...")
-    print("=" * 80)
 
 
 if __name__ == "__main__":

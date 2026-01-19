@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=dreamerv3_small_weak
+#SBATCH --job-name=dreamerv3-small
 #SBATCH --cpus-per-task=8
 #SBATCH --partition=day
 #SBATCH --mem-per-cpu=8G
@@ -18,75 +18,64 @@ cd /scratch/$SLURM_JOB_ID/02-SRC/DreamerV3
 export WANDB_API_KEY="cc059bf17f0dffb378947bc37398b00eea0d1944"
 
 # ============================================================================
-# DreamerV3 Hockey Training - Small Model Configuration
+# DreamerV3 Hockey Training - Small/Fast Configuration
 # ============================================================================
 #
-# ARCHITECTURE:
-#   Model Size: small (~8M parameters)
-#   - Deterministic state (RSSM): 512-dim
-#   - Categorical latent: 32 categories × 32 classes = 1024-dim
-#   - Hidden layers: 512-dim
-#
-# TRAINING STRATEGY:
-#   - World Model: Learns to predict observations, rewards, episode continues
-#   - Actor-Critic: Trained entirely in imagination (latent rollouts)
-#   - Imagination Horizon: 15 steps for credit assignment
-#   - Return Normalization: Percentile-based (5th-95th) for stable learning
-#
-# KEY HYPERPARAMETERS (from DreamerV3 paper):
-#   Learning Rates: 4e-5 (all components, including AGC)
-#   Entropy Scale: 3e-4 (prevents policy collapse)
-#   Gradient Clipping: Adaptive (AGC 0.3 factor)
-#   Categorical Unimix: 1% uniform mixing (prevents latent collapse)
-#   Free Nats: 1.0 (KL loss threshold)
-#
-# EVALUATION & LOGGING:
-#   Eval Frequency: Every 250 training episodes
-#   Eval Episodes: 25 per evaluation run
-#   GIF Recording: Every 100 episodes (3 episodes per GIF, side-by-side)
-#   Checkpoints: Every 250 episodes
-#
-# EXPECTED PERFORMANCE:
-#   vs Weak Opponent: ~70-80% win rate after 1M steps
-#   vs Strong Opponent: ~30-40% win rate after 1M steps
-#   Training Time: ~24 hours on RTX 1080 Ti
+# Faster iteration with smaller batches for debugging/testing.
+# Uses same architecture as optimal config but with:
+#   - Smaller batch: 16 sequences × 32 timesteps (vs 32×32)
+#   - Lower replay ratio: 16 (vs 32) for faster episodes
+#   - More frequent evaluation for monitoring
 #
 # ============================================================================
 
-singularity exec --nv ~/containers/hockey.sif bash -c "
-  conda activate py310
-  python3 train_hockey.py \
+singularity exec --nv ~/containers/hockey.sif python3 train_hockey.py \
+    --config hockey.yml \
     --mode NORMAL \
     --opponent weak \
-    --model_size small \
-    --max_steps 1000000 \
     --seed 43 \
-    --device auto \
-    --batch_size 16 \
-    --batch_length 50 \
+    --device cuda \
+    \
+    --gradient_steps 1000000 \
+    --replay_ratio 16 \
+    --warmup_episodes 10 \
+    --interaction_episodes 1 \
+    \
+    --batch_size 32 \
+    --batch_length 32 \
     --imagination_horizon 15 \
-    --imagine_batch_size 256 \
-    --lr_world 4e-5 \
-    --lr_actor 4e-5 \
-    --lr_critic 4e-5 \
-    --entropy_scale 3e-4 \
-    --gamma 0.997 \
-    --lambda_gae 0.95 \
-    --use_agc \
-    --agc_clip 0.3 \
+    \
+    --recurrent_size 256 \
+    --latent_length 16 \
+    --latent_classes 16 \
+    --encoded_obs_size 256 \
+    \
+    --lr_world 0.0003 \
+    --lr_actor 0.00008 \
+    --lr_critic 0.0001 \
+    \
+    --discount 0.997 \
+    --lambda_ 0.95 \
+    --entropy_scale 0.003 \
     --free_nats 1.0 \
-    --unimix 0.01 \
-    --buffer_size 1000000 \
-    --min_buffer_size 1000 \
-    --eval_frequency 250 \
-    --eval_episodes 25 \
-    --gif_frequency 100 \
+    --gradient_clip 100 \
+    \
+    --use_pbrs \
+    --pbrs_scale 0.03 \
+    --pbrs_w_chase 0.5 \
+    --pbrs_w_attack 1.0 \
+    \
+    --buffer_capacity 100000 \
+    \
+    --checkpoint_interval 2500 \
+    --eval_interval 500 \
+    --eval_episodes 10 \
+    --gif_interval 5000 \
     --gif_episodes 3 \
-    --save_frequency 250 \
-    --self_play_start 0 \
+    --log_interval 10 \
+    \
     --wandb_project rl-hockey \
     --run_name 'DreamerV3-small-weak-seed43'
-"
 
 # Copy results back to home directory
-cp -R /scratch/$SLURM_JOB_ID/02-SRC/DreamerV3/results ~/02-SRC/DreamerV3/results_seed43
+cp -R /scratch/$SLURM_JOB_ID/02-SRC/DreamerV3/results ~/02-SRC/DreamerV3/results_dreamerv3_small_seed43

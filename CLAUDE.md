@@ -4,16 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This repository contains two main components:
+This repository contains three main components:
 
 1. **TD3 Training System** (`TD3/`): A reinforcement learning framework for training TD3 (Twin Delayed DDPG) agents to play air hockey
-2. **COMPRL Client** (`comprl-hockey-agent/`): A client that connects trained agents to a competition server
+2. **DreamerV3 Training System** (`DreamerV3/`): A world-model based RL agent that learns entirely in imagination
+3. **COMPRL Client** (`comprl-hockey-agent/`): A client that connects trained agents to a competition server
 
-The project implements: **Pure TD3 + PBRS + Self-Play with PFSP**
+The project implements:
+- **TD3**: Pure TD3 + PBRS + Self-Play with PFSP
+- **DreamerV3**: World model + imagination-based actor-critic training
 
 ## Common Commands
 
-### Training
+### TD3 Training
 
 ```bash
 # Basic training with weak opponent
@@ -28,6 +31,41 @@ python3 train_hockey.py --mode NORMAL --opponent weak --lr_actor 3e-4 --lr_criti
 
 # Training with specific seed for reproducibility
 python3 train_hockey.py --mode NORMAL --opponent weak --seed 42
+```
+
+### DreamerV3 Training
+
+```bash
+# Basic training with weak opponent
+cd DreamerV3
+python3 train_hockey.py --opponent weak --seed 42
+
+# Training with PBRS disabled
+python3 train_hockey.py --opponent weak --no_pbrs
+
+# Training with custom hyperparameters
+python3 train_hockey.py --opponent weak \
+    --lr_world 3e-4 --lr_actor 8e-5 --lr_critic 1e-4 \
+    --entropy_scale 0.003 --imagination_horizon 15
+
+# Disable W&B for local testing
+python3 train_hockey.py --opponent weak --no_wandb --gradient_steps 10000
+
+# Full configuration example
+python3 train_hockey.py \
+    --opponent weak \
+    --seed 42 \
+    --gradient_steps 1000000 \
+    --batch_size 32 \
+    --batch_length 32 \
+    --imagination_horizon 15 \
+    --lr_world 0.0003 \
+    --lr_actor 0.00008 \
+    --lr_critic 0.0001 \
+    --entropy_scale 0.003 \
+    --use_pbrs \
+    --pbrs_scale 0.03 \
+    --gif_interval 10000
 ```
 
 ### Testing
@@ -151,6 +189,56 @@ bash autorestart.sh --server-url <URL> --server-port <PORT> \
   - PBRS reward shaping and Q-value clipping settings
   - Self-play settings (pool size, save interval, PFSP mode)
 
+### DreamerV3 Training System
+
+**Core Components** (`DreamerV3/`):
+
+- **`train_hockey.py`**: Main training loop
+  - Collects experience in real environment
+  - Trains world model on real data sequences
+  - Trains actor-critic entirely in imagination
+  - Full CLI argument support for all hyperparameters
+  - W&B logging with GIF recording
+
+- **`dreamer.py`**: Dreamer agent combining world model and behavior
+  - `worldModelTraining()`: Train encoder, decoder, RSSM, reward/continue predictors
+  - `behaviorTraining()`: Train actor-critic in imagined rollouts
+  - `act()`: Select actions with recurrent state tracking
+  - `saveCheckpoint()` / `loadCheckpoint()`: Model persistence
+
+- **`networks.py`**: Neural network components
+  - `EncoderMLP`: 18-dim observation → embedding
+  - `DecoderMLP`: Full state → observation reconstruction
+  - `RecurrentModel`: GRU for deterministic state
+  - `PriorNet` / `PosteriorNet`: Categorical latent prediction
+  - `RewardModel`: Normal distribution for rewards
+  - `ContinueModel`: Bernoulli for episode termination
+  - `Actor`: Tanh-squashed Gaussian policy
+  - `Critic`: Normal distribution for values
+
+- **`buffer.py`**: Replay buffer for sequence sampling
+  - Stores (obs, action, reward, next_obs, done) tuples
+  - Samples contiguous sequences for world model training
+
+- **`utils.py`**: Helper functions
+  - `computeLambdaValues()`: TD(λ) returns
+  - `Moments`: Percentile-based value normalization
+  - `sequentialModel1D()`: MLP builder
+
+**Reward Shaping** (`rewards/`):
+
+- **`pbrs.py`**: Same PBRS as TD3 (policy-invariant shaping)
+
+**Visualization** (`visualization/`):
+
+- **`gif_recorder.py`**: Records gameplay GIFs for W&B
+- **`frame_capture.py`**: Frame capture utilities
+
+**Configuration** (`configs/`):
+
+- **`hockey.yml`**: Default configuration with all hyperparameters
+  - All values can be overridden via CLI arguments
+
 ### COMPRL Client System
 
 **Components** (`comprl-hockey-agent/`):
@@ -167,7 +255,7 @@ bash autorestart.sh --server-url <URL> --server-port <PORT> \
 
 ## Key Design Patterns
 
-### Training Pipeline
+### TD3 Training Pipeline
 
 1. **Initialization**: Create environment, opponent(s), agent, metrics tracker
 2. **Warmup Phase**: Collect random transitions before training begins
@@ -175,6 +263,18 @@ bash autorestart.sh --server-url <URL> --server-port <PORT> \
 4. **Training Phase**: Sample batches and update agent networks
 5. **Evaluation**: Periodically test against benchmarks, save best checkpoints
 6. **Self-Play**: Maintain opponent pool and select challengers via PFSP
+
+### DreamerV3 Training Pipeline
+
+1. **Warmup**: Collect initial episodes into replay buffer
+2. **Main Loop** (per iteration):
+   - **Gradient Updates** (replay_ratio times):
+     - Sample sequence batch from buffer
+     - Train world model (reconstruction, reward, KL losses)
+     - Train actor-critic in imagination (lambda returns)
+   - **Environment Interaction**: Run episode, add to buffer
+3. **Evaluation**: Periodic eval episodes without PBRS
+4. **GIF Recording**: Periodic gameplay visualization for W&B
 
 ### Observation Handling
 
@@ -210,6 +310,15 @@ Multiple checkpoint formats supported:
 - **Q-Value Clipping**: Hard or soft (tanh) clipping prevents Q-value explosion (q_clip=25.0)
 - **VF Regularization**: Penalizes near-zero Q-values to prevent passive agents
 
+### DreamerV3-Specific Features
+
+- **RSSM World Model**: Recurrent state space model with deterministic (GRU) + stochastic (categorical) states
+- **Categorical Latents**: 16 variables × 16 classes = 256-dim stochastic state (vs Gaussian in v1/v2)
+- **Free Nats**: KL loss has threshold below which it's not penalized (prevents posterior collapse)
+- **Lambda Returns**: TD(λ) for value targets in imagination
+- **Value Normalization**: Percentile-based moments for stable advantage computation
+- **Imagination Training**: Actor-critic trained entirely in latent space rollouts (no real env gradients)
+
 ### Reward Shaping Strategy
 
 - **PBRS Integration**: Computes potential function based on puck distance/velocity
@@ -240,18 +349,28 @@ Key scenarios to test:
 
 ## W&B Integration
 
-Training logs to Weights & Biases with:
+**TD3 Metrics**:
 - Episode rewards and win rates
 - Q-value statistics and gradient norms
 - Goal scored/conceded metrics
 - Model checkpoints (best and periodic saves)
-- Training hyperparameters for experiment tracking
+
+**DreamerV3 Metrics**:
+- World model: `world/loss`, `world/recon_loss`, `world/reward_loss`, `world/kl_loss`
+- Behavior: `behavior/actor_loss`, `behavior/critic_loss`, `behavior/entropy`, `behavior/advantages`
+- Stats: `stats/win_rate`, `stats/mean_reward`, `stats/buffer_size`
+- Evaluation: `eval/win_rate`, `eval/gif_*` (gameplay GIFs)
 
 ## Performance Monitoring
 
-Key metrics tracked in `metrics_tracker.py`:
+**TD3 Key Metrics**:
 - Win rate vs. opponent
 - Mean episode reward
 - Q-value distribution (min, max, mean)
 - Gradient norms
-- Training efficiency (steps per episode)
+
+**DreamerV3 Key Metrics**:
+- `world/loss`: Should decrease over training
+- `behavior/entropy`: Should stay positive (>0) - negative means policy collapsed
+- `stats/win_rate`: Should increase over training
+- `world/kl_loss`: Should stabilize around free_nats threshold
