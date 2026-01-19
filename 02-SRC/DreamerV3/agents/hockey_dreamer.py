@@ -1,0 +1,343 @@
+"""
+HockeyDreamer: DreamerV3 Agent for Hockey Environment.
+
+Complete agent class that combines:
+- World Model (RSSM + prediction heads)
+- Behavior Model (Actor-Critic)
+
+Provides clean interface for:
+- Acting in environment
+- Training on batches
+- Self-play opponent management (state/restore_state)
+
+AI Usage Declaration:
+This file was developed with assistance from Claude Code.
+"""
+
+import numpy as np
+import torch
+import torch.nn as nn
+from typing import Dict, Optional, Tuple
+
+from models.world_model import WorldModel
+from models.behavior import Behavior
+
+
+class HockeyDreamer(nn.Module):
+    """
+    Complete DreamerV3 agent for hockey.
+
+    The agent learns by:
+    1. Collecting experience in the real environment
+    2. Training world model to predict dynamics
+    3. Training actor-critic entirely in imagination
+
+    Interface designed for easy self-play integration.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int = 18,
+        action_dim: int = 4,
+        hidden_size: int = 256,
+        latent_size: int = 64,
+        recurrent_size: int = 256,
+        embed_dim: int = 256,
+        horizon: int = 15,
+        imagine_batch_size: int = 256,
+        gamma: float = 0.997,
+        lambda_gae: float = 0.95,
+        kl_free: float = 1.0,
+        kl_dyn_scale: float = 0.5,
+        kl_rep_scale: float = 0.1,
+        entropy_scale: float = 3e-4,
+        lr_world: float = 3e-4,
+        lr_actor: float = 3e-5,
+        lr_critic: float = 3e-5,
+        grad_clip: float = 100.0,
+        device: str = 'cpu',
+    ):
+        """
+        Args:
+            obs_dim: Observation dimension (18 for hockey)
+            action_dim: Action dimension (4 for hockey)
+            hidden_size: MLP hidden layer size
+            latent_size: RSSM stochastic state dimension
+            recurrent_size: RSSM deterministic state dimension
+            embed_dim: Encoder output dimension
+            horizon: Imagination rollout length
+            imagine_batch_size: Number of starting states for imagination
+            gamma: Discount factor
+            lambda_gae: TD(λ) lambda parameter
+            kl_free: Free bits threshold for KL loss
+            kl_dyn_scale: Dynamics KL weight
+            kl_rep_scale: Representation KL weight
+            entropy_scale: Entropy bonus coefficient
+            lr_world: World model learning rate
+            lr_actor: Actor learning rate
+            lr_critic: Critic learning rate
+            grad_clip: Gradient clipping norm
+            device: Torch device
+        """
+        super().__init__()
+
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        self.horizon = horizon
+        self.imagine_batch_size = imagine_batch_size
+        self.grad_clip = grad_clip
+        self.device = torch.device(device)
+
+        # World model
+        self.world_model = WorldModel(
+            obs_dim=obs_dim,
+            action_dim=action_dim,
+            hidden_size=hidden_size,
+            latent_size=latent_size,
+            recurrent_size=recurrent_size,
+            embed_dim=embed_dim,
+            kl_free=kl_free,
+            kl_dyn_scale=kl_dyn_scale,
+            kl_rep_scale=kl_rep_scale,
+            device=device,
+        ).to(self.device)
+
+        # Behavior model (actor-critic)
+        feature_dim = recurrent_size + latent_size
+        self.behavior = Behavior(
+            feature_dim=feature_dim,
+            action_dim=action_dim,
+            hidden_size=hidden_size,
+            gamma=gamma,
+            lambda_gae=lambda_gae,
+            entropy_scale=entropy_scale,
+            device=device,
+        ).to(self.device)
+
+        # Optimizers
+        self.world_opt = torch.optim.Adam(
+            self.world_model.parameters(),
+            lr=lr_world,
+        )
+        self.actor_opt = torch.optim.Adam(
+            self.behavior.policy.parameters(),
+            lr=lr_actor,
+        )
+        self.critic_opt = torch.optim.Adam(
+            self.behavior.value.parameters(),
+            lr=lr_critic,
+        )
+
+        # Recurrent state for acting
+        self._state = None
+
+        # Training stats
+        self.train_steps = 0
+
+    def reset(self):
+        """Reset recurrent state for new episode."""
+        self._state = None
+
+    @torch.no_grad()
+    def act(self, obs: np.ndarray, deterministic: bool = False) -> np.ndarray:
+        """
+        Select action given observation.
+
+        Args:
+            obs: Observation array (obs_dim,)
+            deterministic: If True, use mode instead of sampling
+
+        Returns:
+            action: Action array (action_dim,)
+        """
+        obs_t = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
+
+        # Initialize state if needed
+        if self._state is None:
+            self._state = self.world_model.initial_state(1)
+
+        # Encode observation
+        embed = self.world_model.encode(obs_t)
+
+        # Get previous action (zeros for first step)
+        if not hasattr(self, '_last_action'):
+            self._last_action = torch.zeros(1, self.action_dim, device=self.device)
+
+        # Update state using posterior (we have the real observation)
+        posterior, _ = self.world_model.dynamics.posterior_step(
+            self._state,
+            self._last_action,
+            embed,
+        )
+        self._state = posterior
+
+        # Get action from policy
+        features = self.world_model.get_features(self._state)
+        action = self.behavior.act(features, deterministic=deterministic)
+
+        # Store for next step
+        self._last_action = action
+
+        return action.squeeze(0).cpu().numpy()
+
+    def train_step(self, batch: Dict[str, np.ndarray]) -> Dict[str, float]:
+        """
+        One complete training iteration.
+
+        Args:
+            batch: Dictionary with sequences:
+                - obs: (batch, seq_len, obs_dim)
+                - action: (batch, seq_len, action_dim)
+                - reward: (batch, seq_len)
+                - is_first: (batch, seq_len)
+                - is_terminal: (batch, seq_len)
+
+        Returns:
+            metrics: Dictionary of training metrics
+        """
+        self.train_steps += 1
+
+        # Convert to tensors
+        batch_t = {
+            k: torch.FloatTensor(v).to(self.device)
+            for k, v in batch.items()
+        }
+
+        metrics = {}
+
+        # === Train World Model ===
+        self.world_opt.zero_grad()
+
+        world_loss, world_metrics = self.world_model.compute_loss(batch_t)
+        world_loss.backward()
+
+        # Compute gradient norm before clipping
+        world_grad_norm = self._compute_grad_norm(self.world_model.parameters())
+        nn.utils.clip_grad_norm_(self.world_model.parameters(), self.grad_clip)
+        self.world_opt.step()
+
+        metrics.update(world_metrics)
+        metrics['grad/world'] = world_grad_norm
+
+        # === Train Actor-Critic in Imagination ===
+        # Get starting states from real data (subsampled for efficiency)
+        start_states = self.world_model.get_start_states(
+            batch_t, num_starts=self.imagine_batch_size
+        )
+
+        # Imagine trajectories
+        with torch.no_grad():
+            states, actions, rewards, continues = self.world_model.imagine(
+                policy=self.behavior.policy,
+                start_state=start_states,
+                horizon=self.horizon,
+            )
+
+        # Detach states for actor-critic training
+        states = {k: v.detach() for k, v in states.items()}
+        actions = actions.detach()
+        rewards = rewards.detach()
+        continues = continues.detach()
+
+        # Train critic
+        self.critic_opt.zero_grad()
+        _, critic_loss, behavior_metrics = self.behavior.train_step(
+            states, actions, rewards, continues
+        )
+        critic_loss.backward()
+
+        critic_grad_norm = self._compute_grad_norm(self.behavior.value.parameters())
+        nn.utils.clip_grad_norm_(self.behavior.value.parameters(), self.grad_clip)
+        self.critic_opt.step()
+
+        # Train actor
+        self.actor_opt.zero_grad()
+
+        # Re-imagine with gradients through policy
+        states_actor, actions_actor, rewards_actor, continues_actor = self.world_model.imagine(
+            policy=self.behavior.policy,
+            start_state=start_states,
+            horizon=self.horizon,
+        )
+
+        actor_loss, _, _ = self.behavior.train_step(
+            states_actor, actions_actor, rewards_actor, continues_actor
+        )
+        actor_loss.backward()
+
+        actor_grad_norm = self._compute_grad_norm(self.behavior.policy.parameters())
+        nn.utils.clip_grad_norm_(self.behavior.policy.parameters(), self.grad_clip)
+        self.actor_opt.step()
+
+        metrics.update(behavior_metrics)
+        metrics['grad/actor'] = actor_grad_norm
+        metrics['grad/critic'] = critic_grad_norm
+        metrics['train_steps'] = self.train_steps
+
+        # Add imagination stats
+        metrics['imagine/reward_mean'] = rewards.mean().item()
+        metrics['imagine/reward_std'] = rewards.std().item()
+        metrics['imagine/continue_mean'] = continues.mean().item()
+
+        return metrics
+
+    def _compute_grad_norm(self, parameters) -> float:
+        """Compute total gradient norm across parameters."""
+        total_norm = 0.0
+        for p in parameters:
+            if p.grad is not None:
+                total_norm += p.grad.data.norm(2).item() ** 2
+        return total_norm ** 0.5
+
+    # === Self-Play Interface ===
+
+    def state(self) -> Dict:
+        """
+        Serialize agent state for opponent pool.
+
+        Returns state dict that can be saved and loaded later.
+        """
+        return {
+            'world_model': self.world_model.state_dict(),
+            'behavior': self.behavior.state_dict_custom(),
+            'world_opt': self.world_opt.state_dict(),
+            'actor_opt': self.actor_opt.state_dict(),
+            'critic_opt': self.critic_opt.state_dict(),
+            'train_steps': self.train_steps,
+        }
+
+    def restore_state(self, state: Dict):
+        """
+        Load agent state from opponent pool.
+
+        Args:
+            state: State dict from state() method
+        """
+        self.world_model.load_state_dict(state['world_model'])
+        self.behavior.load_state_dict_custom(state['behavior'])
+        self.world_opt.load_state_dict(state['world_opt'])
+        self.actor_opt.load_state_dict(state['actor_opt'])
+        self.critic_opt.load_state_dict(state['critic_opt'])
+        self.train_steps = state['train_steps']
+
+    def save(self, path: str):
+        """Save agent to file."""
+        torch.save({'agent_state': self.state()}, path)
+
+    def load(self, path: str):
+        """Load agent from file."""
+        checkpoint = torch.load(path, map_location=self.device)
+        if 'agent_state' in checkpoint:
+            self.restore_state(checkpoint['agent_state'])
+        else:
+            self.restore_state(checkpoint)
+
+    # === Compatibility Methods ===
+
+    def state_dict(self) -> Dict:
+        """PyTorch-compatible state dict."""
+        return self.state()
+
+    def load_state_dict(self, state: Dict):
+        """PyTorch-compatible state loading."""
+        self.restore_state(state)

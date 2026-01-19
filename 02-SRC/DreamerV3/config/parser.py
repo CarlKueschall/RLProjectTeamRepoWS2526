@@ -58,9 +58,11 @@ def parse_args():
     # ===================
     # Imagination
     # ===================
-    parser.add_argument('--imagination_horizon', type=int, default=50,
-                        help='Imagination horizon for actor-critic training (default: 50). '
-                             'Critical for sparse reward propagation - do not reduce below 25.')
+    parser.add_argument('--imagination_horizon', type=int, default=15,
+                        help='Imagination horizon for actor-critic training (default: 15)')
+    parser.add_argument('--imagine_batch_size', type=int, default=256,
+                        help='Number of starting states for imagination (default: 256). '
+                             'Subsampled from batch_size * batch_length positions.')
 
     # ===================
     # Training Hyperparameters
@@ -135,8 +137,8 @@ def parse_args():
                         help='Steps between GIF recordings (default: 100000)')
     parser.add_argument('--no_wandb', action='store_true',
                         help='Disable W&B logging')
-    parser.add_argument('--wandb_project', type=str, default='dreamer-hockey',
-                        help='W&B project name (default: dreamer-hockey)')
+    parser.add_argument('--wandb_project', type=str, default='rl-hockey',
+                        help='W&B project name (default: rl-hockey)')
     parser.add_argument('--wandb_entity', type=str, default=None,
                         help='W&B entity/team name')
     parser.add_argument('--run_name', type=str, default=None,
@@ -177,12 +179,15 @@ def get_config_dict(args):
     return {
         # World Model
         'stoch_size': args.stoch_size,
+        'latent_size': args.stoch_size,  # Alias for our implementation
         'deter_size': args.deter_size,
+        'recurrent_size': args.deter_size,  # Alias for our implementation
         'hidden_size': args.hidden_size,
         'num_layers': args.num_layers,
 
         # Imagination
         'imagination_horizon': args.imagination_horizon,
+        'imagine_batch_size': args.imagine_batch_size,
 
         # Training
         'batch_size': args.batch_size,

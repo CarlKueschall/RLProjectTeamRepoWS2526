@@ -1,17 +1,14 @@
 """
 DreamerV3 Training Script for Hockey Environment.
 
-Phase 1: Uses external DreamerV3 PyTorch implementation for initial testing.
-Phase 2: Will integrate custom implementation.
+Simplified DreamerV3 with:
+- SPARSE REWARDS ONLY - no reward shaping needed
+- Imagination-based credit assignment
+- Self-play with PFSP for generalization
 
 Based on:
 - DreamerV3 paper (Hafner et al., 2023)
 - Robot Air Hockey Challenge 2023 (Orsula et al., 2024)
-
-Key design choices:
-- SPARSE REWARDS ONLY - no reward shaping needed
-- Imagination-based credit assignment (horizon=50)
-- Self-play with PFSP for generalization
 
 AI Usage Declaration:
 This file was developed with assistance from Claude Code.
@@ -21,7 +18,6 @@ import os
 import sys
 import time
 import random
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -29,24 +25,10 @@ import torch
 
 # Local imports
 from config.parser import parse_args, get_config_dict
-from envs.hockey_wrapper import HockeyEnvDreamer, HockeyVecEnv
+from envs.hockey_wrapper import HockeyEnvDreamer
+from agents.hockey_dreamer import HockeyDreamer
+from utils.buffer import EpisodeBuffer
 from opponents.self_play import SelfPlayManager
-from opponents.fixed import FixedOpponent
-
-# Optional imports - gracefully handle if not available
-try:
-    from metrics.metrics_tracker import MetricsTracker
-except ImportError:
-    MetricsTracker = None
-
-try:
-    from visualization.gif_recorder import GIFRecorder
-except ImportError:
-    GIFRecorder = None
-
-# Import our custom DreamerV3 implementation
-from agents.dreamer_agent import DreamerV3Agent
-DREAMER_BACKEND = "custom"
 
 
 def get_device(device_arg: str) -> torch.device:
@@ -70,150 +52,40 @@ def set_seed(seed: int):
         torch.cuda.manual_seed_all(seed)
 
 
-class SimpleReplayBuffer:
+def run_episode(env, agent, buffer, explore: bool = True):
     """
-    Simple sequence-based replay buffer for DreamerV3.
+    Run one episode and collect experience.
 
-    Stores complete episodes and samples sequences for training.
-    """
-
-    def __init__(self, capacity: int, obs_dim: int, action_dim: int):
-        self.capacity = capacity
-        self.obs_dim = obs_dim
-        self.action_dim = action_dim
-
-        # Storage
-        self.episodes = []
-        self.current_episode = {
-            'obs': [],
-            'action': [],
-            'reward': [],
-            'done': [],
-        }
-        self.total_steps = 0
-
-    def add(self, obs, action, reward, done):
-        """Add a transition to the current episode."""
-        self.current_episode['obs'].append(obs)
-        self.current_episode['action'].append(action)
-        self.current_episode['reward'].append(reward)
-        self.current_episode['done'].append(done)
-        self.total_steps += 1
-
-        if done:
-            self._finalize_episode()
-
-    def _finalize_episode(self):
-        """Store completed episode."""
-        if len(self.current_episode['obs']) > 0:
-            episode = {
-                'obs': np.array(self.current_episode['obs'], dtype=np.float32),
-                'action': np.array(self.current_episode['action'], dtype=np.float32),
-                'reward': np.array(self.current_episode['reward'], dtype=np.float32),
-                'done': np.array(self.current_episode['done'], dtype=bool),
-            }
-            self.episodes.append(episode)
-
-            # FIFO eviction based on total transitions
-            while self._total_transitions() > self.capacity and len(self.episodes) > 1:
-                self.episodes.pop(0)
-
-        self.current_episode = {'obs': [], 'action': [], 'reward': [], 'done': []}
-
-    def _total_transitions(self):
-        return sum(len(ep['obs']) for ep in self.episodes)
-
-    def sample_sequences(self, batch_size: int, sequence_length: int):
-        """Sample batch of sequences for training."""
-        if len(self.episodes) == 0:
-            return None
-
-        batch = {
-            'obs': [],
-            'action': [],
-            'reward': [],
-            'done': [],
-        }
-
-        for _ in range(batch_size):
-            # Sample random episode
-            ep_idx = np.random.randint(len(self.episodes))
-            ep = self.episodes[ep_idx]
-
-            # Sample random start position
-            max_start = max(0, len(ep['obs']) - sequence_length)
-            start = np.random.randint(max_start + 1) if max_start > 0 else 0
-            end = min(start + sequence_length, len(ep['obs']))
-
-            # Extract sequence (may be shorter than sequence_length)
-            seq_len = end - start
-
-            # Pad if necessary
-            obs_seq = np.zeros((sequence_length, self.obs_dim), dtype=np.float32)
-            action_seq = np.zeros((sequence_length, self.action_dim), dtype=np.float32)
-            reward_seq = np.zeros(sequence_length, dtype=np.float32)
-            done_seq = np.ones(sequence_length, dtype=bool)  # Pad with done=True
-
-            obs_seq[:seq_len] = ep['obs'][start:end]
-            action_seq[:seq_len] = ep['action'][start:end]
-            reward_seq[:seq_len] = ep['reward'][start:end]
-            done_seq[:seq_len] = ep['done'][start:end]
-
-            batch['obs'].append(obs_seq)
-            batch['action'].append(action_seq)
-            batch['reward'].append(reward_seq)
-            batch['done'].append(done_seq)
-
-        return {
-            'obs': np.stack(batch['obs']),
-            'action': np.stack(batch['action']),
-            'reward': np.stack(batch['reward']),
-            'done': np.stack(batch['done']),
-        }
-
-    def __len__(self):
-        return self._total_transitions()
-
-
-def train_episode(env, agent, buffer, exploration_noise, device):
-    """
-    Run one training episode.
+    Args:
+        env: Hockey environment
+        agent: DreamerV3 agent
+        buffer: Episode buffer
+        explore: Whether to use exploration
 
     Returns:
         episode_reward: Total sparse reward
         episode_length: Number of steps
-        info: Final step info (contains winner)
+        info: Final step info
     """
     obs, _ = env.reset()
+    agent.reset()
+
     episode_reward = 0.0
     episode_length = 0
     done = False
-
-    # Reset agent state for new episode (important for RSSM)
-    if agent is not None and hasattr(agent, 'reset'):
-        agent.reset()
+    is_first = True
 
     while not done:
-        # Get action from agent
-        with torch.no_grad():
-            if hasattr(agent, 'act'):
-                # Our DreamerV3Agent expects numpy array and returns numpy array
-                action = agent.act(obs, explore=True)
-            else:
-                # Fallback: random action during initial implementation
-                action = env.action_space.sample()
-
-        # Add exploration noise
-        if exploration_noise > 0:
-            noise = np.random.normal(0, exploration_noise, size=action.shape)
-            action = np.clip(action + noise, -1.0, 1.0)
+        # Get action
+        action = agent.act(obs, deterministic=not explore)
 
         # Step environment
         next_obs, reward, terminated, truncated, info = env.step(action)
         done = terminated or truncated
 
         # Store transition
-        buffer.add(obs, action, reward, done)
+        buffer.add(obs, action, reward, done, is_first)
+        is_first = False
 
         # Update
         obs = next_obs
@@ -223,14 +95,72 @@ def train_episode(env, agent, buffer, exploration_noise, device):
     return episode_reward, episode_length, info
 
 
+def evaluate(env, agent, num_episodes: int = 50, prefix: str = 'eval') -> dict:
+    """
+    Evaluate agent without exploration.
+
+    Args:
+        env: Evaluation environment
+        agent: Agent to evaluate
+        num_episodes: Number of evaluation episodes
+        prefix: Prefix for metric names
+
+    Returns:
+        Dictionary with evaluation metrics
+    """
+    wins = 0
+    losses = 0
+    draws = 0
+    total_reward = 0
+    total_length = 0
+    goals_scored = 0
+    goals_conceded = 0
+
+    for _ in range(num_episodes):
+        obs, _ = env.reset()
+        agent.reset()
+        done = False
+        episode_reward = 0
+        episode_length = 0
+
+        while not done:
+            action = agent.act(obs, deterministic=True)
+            obs, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+            episode_reward += reward
+            episode_length += 1
+
+        total_reward += episode_reward
+        total_length += episode_length
+
+        winner = info.get('winner', 0)
+        if winner == 1:
+            wins += 1
+            goals_scored += 1
+        elif winner == -1:
+            losses += 1
+            goals_conceded += 1
+        else:
+            draws += 1
+
+    return {
+        f'{prefix}/win_rate': wins / num_episodes,
+        f'{prefix}/loss_rate': losses / num_episodes,
+        f'{prefix}/draw_rate': draws / num_episodes,
+        f'{prefix}/mean_reward': total_reward / num_episodes,
+        f'{prefix}/mean_length': total_length / num_episodes,
+        f'{prefix}/goals_scored': goals_scored,
+        f'{prefix}/goals_conceded': goals_conceded,
+    }
+
+
 def main():
     args = parse_args()
 
     # Print configuration
     print("=" * 60)
-    print("DreamerV3 Hockey Training")
+    print("DreamerV3 Hockey Training (Simplified)")
     print("=" * 60)
-    print(f"Backend: {DREAMER_BACKEND or 'Custom (Phase 2)'}")
     print(f"Mode: {args.mode}")
     print(f"Opponent: {args.opponent}")
     print(f"Max steps: {args.max_steps:,}")
@@ -238,21 +168,12 @@ def main():
     print(f"Device: {args.device}")
     print("=" * 60)
 
-    # Check for DreamerV3 implementation
-    if DREAMER_BACKEND is None:
-        print("\nWARNING: No DreamerV3 implementation found!")
-        print("Install one of:")
-        print("  pip install dreamer-pytorch")
-        print("  pip install sheeprl")
-        print("\nOr wait for Phase 2 custom implementation.")
-        print("\nRunning with RANDOM ACTIONS for testing infrastructure...")
-
     # Setup
     set_seed(args.seed)
     device = get_device(args.device)
     print(f"\nUsing device: {device}")
 
-    # Create save directory
+    # Create directories
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = save_dir / "checkpoints"
@@ -271,48 +192,36 @@ def main():
     action_dim = env.action_space.shape[0]
     print(f"Observation dim: {obs_dim}, Action dim: {action_dim}")
 
-    # Create replay buffer
-    buffer = SimpleReplayBuffer(
-        capacity=args.buffer_size,
-        obs_dim=obs_dim,
-        action_dim=action_dim,
-    )
-
     # Create agent
     config = get_config_dict(args)
+    agent = HockeyDreamer(
+        obs_dim=obs_dim,
+        action_dim=action_dim,
+        hidden_size=config['hidden_size'],
+        latent_size=config.get('latent_size', 64),
+        recurrent_size=config.get('deter_size', 256),
+        embed_dim=config.get('hidden_size', 256),
+        horizon=config['imagination_horizon'],
+        imagine_batch_size=config.get('imagine_batch_size', 256),
+        gamma=config['gamma'],
+        lambda_gae=config['lambda_gae'],
+        kl_free=config.get('free_nats', 1.0),
+        entropy_scale=config.get('entropy_scale', 3e-4),
+        lr_world=config['lr_world'],
+        lr_actor=config['lr_actor'],
+        lr_critic=config['lr_critic'],
+        grad_clip=config['grad_clip'],
+        device=str(device),
+    )
+    print(f"\nCreated HockeyDreamer agent")
+    print(f"  Imagination: horizon={config['imagination_horizon']}, batch={config.get('imagine_batch_size', 256)}")
 
-    if DREAMER_BACKEND == "custom":
-        # Use our custom DreamerV3 implementation
-        agent = DreamerV3Agent(
-            obs_dim=obs_dim,
-            action_dim=action_dim,
-            stoch_size=config.get('stoch_size', 32),
-            deter_size=config.get('deter_size', 256),
-            hidden_size=config.get('hidden_size', 256),
-            imagination_horizon=config.get('imagination_horizon', 50),
-            gamma=config.get('gamma', 0.997),
-            lr_world=config.get('lr_world', 3e-4),
-            lr_actor=config.get('lr_actor', 3e-5),
-            lr_critic=config.get('lr_critic', 3e-5),
-            device=str(device),
-        )
-        print(f"\nCreated DreamerV3Agent (custom implementation)")
-    elif DREAMER_BACKEND == "dreamer-pytorch":
-        agent = DreamerAgent(
-            obs_space=env.observation_space,
-            action_space=env.action_space,
-            config=config,
-        ).to(device)
-    elif DREAMER_BACKEND == "sheeprl":
-        agent = DreamerAgent(
-            observation_space=env.observation_space,
-            action_space=env.action_space,
-            **config,
-        ).to(device)
-    else:
-        # Placeholder agent for infrastructure testing
-        agent = None
-        print("\nUsing placeholder agent (random actions)")
+    # Create replay buffer
+    buffer = EpisodeBuffer(
+        capacity=args.buffer_size,
+        obs_shape=(obs_dim,),
+        action_shape=(action_dim,),
+    )
 
     # Self-play setup
     self_play_manager = None
@@ -329,12 +238,55 @@ def main():
     if not args.no_wandb:
         try:
             import wandb
-            run_name = args.run_name or f"DreamerV3-{args.mode}-{args.opponent}-{args.seed}"
+            run_name = args.run_name or f"DreamerV3-{args.mode}-{args.opponent}-seed{args.seed}"
+
+            # Comprehensive config for W&B
+            wandb_config = {
+                # Environment
+                'env/mode': args.mode,
+                'env/opponent': args.opponent,
+                'env/obs_dim': obs_dim,
+                'env/action_dim': action_dim,
+
+                # Architecture
+                'arch/hidden_size': config['hidden_size'],
+                'arch/latent_size': config.get('latent_size', 64),
+                'arch/recurrent_size': config.get('deter_size', 256),
+
+                # Imagination
+                'imagination/horizon': config['imagination_horizon'],
+                'imagination/batch_size': config.get('imagine_batch_size', 256),
+
+                # Training
+                'train/batch_size': args.batch_size,
+                'train/batch_length': args.batch_length,
+                'train/lr_world': config['lr_world'],
+                'train/lr_actor': config['lr_actor'],
+                'train/lr_critic': config['lr_critic'],
+                'train/gamma': config['gamma'],
+                'train/lambda_gae': config['lambda_gae'],
+                'train/grad_clip': config['grad_clip'],
+
+                # DreamerV3 specific
+                'dreamer/kl_free': config.get('free_nats', 1.0),
+                'dreamer/entropy_scale': config.get('entropy_scale', 3e-4),
+
+                # Buffer
+                'buffer/capacity': args.buffer_size,
+                'buffer/min_size': args.min_buffer_size,
+
+                # Meta
+                'seed': args.seed,
+                'max_steps': args.max_steps,
+                'device': str(device),
+            }
+
             wandb.init(
                 project=args.wandb_project,
                 entity=args.wandb_entity,
                 name=run_name,
-                config=vars(args),
+                config=wandb_config,
+                tags=['dreamerv3', args.mode, args.opponent],
             )
             print(f"W&B run: {run_name}")
         except ImportError:
@@ -345,21 +297,22 @@ def main():
     total_steps = 0
     episode_count = 0
     best_eval_winrate = 0.0
-    exploration_noise = args.expl_noise
-
-    # Metrics tracking
-    episode_rewards = []
-    episode_lengths = []
     wins, losses, draws = 0, 0, 0
+    train_metrics = {}
+    last_log_time = time.time()
 
     print("\nStarting training...")
+    print("Legend: W=Win, L=Loss, D=Draw | Training starts after buffer fills\n")
     start_time = time.time()
 
     while total_steps < args.max_steps:
+        episode_start = time.time()
+
         # Run episode
-        episode_reward, episode_length, info = train_episode(
-            env, agent, buffer, exploration_noise, device
+        episode_reward, episode_length, info = run_episode(
+            env, agent, buffer, explore=True
         )
+        episode_time = time.time() - episode_start
 
         total_steps += episode_length
         episode_count += 1
@@ -368,131 +321,141 @@ def main():
         winner = info.get('winner', 0)
         if winner == 1:
             wins += 1
+            outcome = 'W'
         elif winner == -1:
             losses += 1
+            outcome = 'L'
         else:
             draws += 1
-
-        episode_rewards.append(episode_reward)
-        episode_lengths.append(episode_length)
-
-        # Decay exploration
-        exploration_noise = max(args.expl_min, exploration_noise * args.expl_decay)
+            outcome = 'D'
 
         # Train agent
-        if agent is not None and len(buffer) >= args.min_buffer_size:
-            # Sample batch and train
-            batch = buffer.sample_sequences(args.batch_size, args.batch_length)
+        train_time = 0
+        training_active = len(buffer) >= args.min_buffer_size
+        if training_active:
+            train_start = time.time()
+            batch = buffer.sample(args.batch_size, args.batch_length)
             if batch is not None:
-                if hasattr(agent, 'train_step'):
-                    train_metrics = agent.train_step(batch)
-                elif hasattr(agent, 'update'):
-                    train_metrics = agent.update(batch)
-                else:
-                    train_metrics = {}
+                train_metrics = agent.train_step(batch)
+            train_time = time.time() - train_start
+
+        # Brief per-episode logging (console)
+        elapsed = time.time() - start_time
+        win_rate = wins / episode_count if episode_count > 0 else 0
+
+        if training_active:
+            print(f"Ep {episode_count:4d} [{outcome}] | "
+                  f"steps: {episode_length:3d} | "
+                  f"r: {episode_reward:+.1f} | "
+                  f"ep: {episode_time:.1f}s | "
+                  f"train: {train_time:.1f}s | "
+                  f"world_loss: {train_metrics.get('world/loss', 0):.3f}")
+        else:
+            # Before training starts, show buffer fill progress
+            fill_pct = 100 * len(buffer) / args.min_buffer_size
+            print(f"Ep {episode_count:4d} [{outcome}] | "
+                  f"steps: {episode_length:3d} | "
+                  f"r: {episode_reward:+.1f} | "
+                  f"buffer: {len(buffer):,}/{args.min_buffer_size:,} ({fill_pct:.0f}%)")
+
+        # W&B logging every episode (for smooth graphs)
+        if not args.no_wandb and training_active:
+            import wandb
+            wandb.log({
+                # Episode metrics
+                'episode/reward': episode_reward,
+                'episode/length': episode_length,
+                'episode/outcome': {'W': 1, 'L': -1, 'D': 0}[outcome],
+                'episode/time': episode_time,
+                'episode/train_time': train_time,
+
+                # Running stats
+                'stats/win_rate': win_rate,
+                'stats/total_steps': total_steps,
+                'stats/buffer_size': len(buffer),
+                'stats/buffer_episodes': buffer.num_episodes,
+
+                # All training metrics (world model + behavior)
+                **train_metrics,
+
+                # Step for x-axis
+                'step': total_steps,
+                'episode': episode_count,
+            })
 
         # Self-play opponent switching
         if self_play_manager is not None and total_steps >= args.self_play_start:
-            # Decide opponent for next episode
-            if np.random.random() > args.self_play_weak_ratio:
-                # Play against pool opponent
-                opponent_state = self_play_manager.get_opponent()
-                if opponent_state is not None and agent is not None:
-                    # Create opponent from saved state
-                    pass  # TODO: Implement opponent loading
+            # Save to pool periodically
+            if total_steps % args.self_play_save_interval == 0:
+                self_play_manager.update_pool(
+                    episode_count, agent, checkpoint_dir
+                )
 
-            # Save current agent to pool periodically
-            if total_steps % args.self_play_save_interval == 0 and agent is not None:
-                if hasattr(agent, 'state_dict'):
-                    self_play_manager.add_to_pool(agent.state_dict(), total_steps)
-
-        # Logging
+        # Detailed summary every 10 episodes (console only)
         if episode_count % 10 == 0:
-            recent_rewards = episode_rewards[-100:] if len(episode_rewards) >= 100 else episode_rewards
-            recent_lengths = episode_lengths[-100:] if len(episode_lengths) >= 100 else episode_lengths
-
-            elapsed = time.time() - start_time
             steps_per_sec = total_steps / elapsed if elapsed > 0 else 0
 
-            win_rate = wins / episode_count if episode_count > 0 else 0
-
-            print(f"Step {total_steps:,} | Ep {episode_count} | "
-                  f"Reward: {np.mean(recent_rewards):.2f} | "
-                  f"WinRate: {win_rate:.1%} | "
-                  f"Eps: {exploration_noise:.3f} | "
-                  f"SPS: {steps_per_sec:.0f}")
-
-            if not args.no_wandb:
-                import wandb
-                wandb.log({
-                    'step': total_steps,
-                    'episode': episode_count,
-                    'reward/mean': np.mean(recent_rewards),
-                    'reward/episode': episode_reward,
-                    'episode_length': np.mean(recent_lengths),
-                    'win_rate': win_rate,
-                    'exploration_noise': exploration_noise,
-                    'buffer_size': len(buffer),
-                    'steps_per_second': steps_per_sec,
-                })
+            print(f"\n{'─'*60}")
+            print(f"Summary at Episode {episode_count} | Step {total_steps:,}")
+            print(f"  Win Rate: {win_rate:.1%} (W:{wins} L:{losses} D:{draws})")
+            print(f"  Buffer: {len(buffer):,} transitions | {buffer.num_episodes} episodes")
+            print(f"  Speed: {steps_per_sec:.1f} steps/sec | Elapsed: {elapsed/60:.1f} min")
+            if train_metrics:
+                print(f"  Losses: world={train_metrics.get('world/loss', 0):.3f} "
+                      f"actor={train_metrics.get('behavior/actor_loss', 0):.3f} "
+                      f"critic={train_metrics.get('behavior/critic_loss', 0):.3f}")
+            print(f"{'─'*60}\n")
 
         # Evaluation
         if total_steps % args.eval_interval == 0 and total_steps > 0:
-            print(f"\n--- Evaluation at step {total_steps:,} ---")
+            print(f"\n{'='*60}")
+            print(f"EVALUATION at step {total_steps:,}")
+            print(f"{'='*60}")
 
-            # Evaluate against weak opponent
-            eval_env = HockeyEnvDreamer(mode=args.mode, opponent='weak', seed=args.seed + 1000)
-            eval_wins = 0
+            # Evaluate vs weak opponent
+            eval_env_weak = HockeyEnvDreamer(
+                mode=args.mode,
+                opponent='weak',
+                seed=args.seed + 1000
+            )
+            eval_weak = evaluate(eval_env_weak, agent, args.eval_episodes, prefix='eval_weak')
+            eval_env_weak.close()
+            print(f"  vs Weak:   {eval_weak['eval_weak/win_rate']:.1%} win | "
+                  f"{eval_weak['eval_weak/draw_rate']:.1%} draw | "
+                  f"{eval_weak['eval_weak/loss_rate']:.1%} loss")
 
-            for ep in range(args.eval_episodes):
-                obs, _ = eval_env.reset()
-                done = False
-                # Reset agent state for new episode
-                if agent is not None and hasattr(agent, 'reset'):
-                    agent.reset()
-                while not done:
-                    if agent is not None and hasattr(agent, 'act'):
-                        with torch.no_grad():
-                            action = agent.act(obs, explore=False)
-                    else:
-                        action = eval_env.action_space.sample()
+            # Evaluate vs strong opponent
+            eval_env_strong = HockeyEnvDreamer(
+                mode=args.mode,
+                opponent='strong',
+                seed=args.seed + 2000
+            )
+            eval_strong = evaluate(eval_env_strong, agent, args.eval_episodes, prefix='eval_strong')
+            eval_env_strong.close()
+            print(f"  vs Strong: {eval_strong['eval_strong/win_rate']:.1%} win | "
+                  f"{eval_strong['eval_strong/draw_rate']:.1%} draw | "
+                  f"{eval_strong['eval_strong/loss_rate']:.1%} loss")
 
-                    obs, _, terminated, truncated, info = eval_env.step(action)
-                    done = terminated or truncated
+            print(f"{'='*60}\n")
 
-                if info.get('winner', 0) == 1:
-                    eval_wins += 1
-
-            eval_winrate = eval_wins / args.eval_episodes
-            print(f"Eval vs Weak: {eval_winrate:.1%} ({eval_wins}/{args.eval_episodes})")
-
+            # W&B logging for evaluation
             if not args.no_wandb:
                 import wandb
                 wandb.log({
-                    'eval/win_rate_weak': eval_winrate,
+                    **eval_weak,
+                    **eval_strong,
                     'eval/step': total_steps,
                 })
 
-            # Save best model
-            if eval_winrate > best_eval_winrate and agent is not None:
-                best_eval_winrate = eval_winrate
-                if hasattr(agent, 'state_dict'):
-                    torch.save(
-                        agent.state_dict(),
-                        checkpoint_dir / 'best_model.pth'
-                    )
-                    print(f"New best model saved! Win rate: {eval_winrate:.1%}")
-
-            eval_env.close()
-            print()
+            # Save best model (based on weak opponent performance)
+            if eval_weak['eval_weak/win_rate'] > best_eval_winrate:
+                best_eval_winrate = eval_weak['eval_weak/win_rate']
+                agent.save(checkpoint_dir / 'best_model.pth')
+                print(f"New best model saved! Win rate vs weak: {best_eval_winrate:.1%}\n")
 
         # Periodic checkpoint
-        if total_steps % args.save_interval == 0 and agent is not None:
-            if hasattr(agent, 'state_dict'):
-                torch.save(
-                    agent.state_dict(),
-                    checkpoint_dir / f'checkpoint_{total_steps}.pth'
-                )
+        if total_steps % args.save_interval == 0:
+            agent.save(checkpoint_dir / f'checkpoint_{total_steps}.pth')
 
     # Final summary
     print("\n" + "=" * 60)
