@@ -14,6 +14,7 @@ AI Usage Declaration:
 This file was developed with assistance from Claude Code.
 """
 
+import gc
 import numpy as np
 import torch
 import torch.nn as nn
@@ -225,7 +226,8 @@ class HockeyDreamer(nn.Module):
             batch_t, num_starts=self.imagine_batch_size
         )
 
-        # Imagine trajectories
+        # === Train Critic ===
+        # Imagine trajectories without gradients (critic doesn't need policy gradients)
         with torch.no_grad():
             states, actions, rewards, continues = self.world_model.imagine(
                 policy=self.behavior.policy,
@@ -233,16 +235,15 @@ class HockeyDreamer(nn.Module):
                 horizon=self.horizon,
             )
 
-        # Detach states for actor-critic training
-        states = {k: v.detach() for k, v in states.items()}
-        actions = actions.detach()
-        rewards = rewards.detach()
-        continues = continues.detach()
+        # Store imagination stats
+        imagine_reward_mean = rewards.mean().item()
+        imagine_reward_std = rewards.std().item()
+        imagine_continue_mean = continues.mean().item()
 
-        # Train critic
+        # Train critic (separate method - no actor graph built)
         self.critic_opt.zero_grad()
-        _, critic_loss, behavior_metrics = self.behavior.train_step(
-            states, actions, rewards, continues
+        critic_loss, critic_metrics = self.behavior.train_critic(
+            states, rewards, continues
         )
         critic_loss.backward()
 
@@ -250,17 +251,20 @@ class HockeyDreamer(nn.Module):
         nn.utils.clip_grad_norm_(self.behavior.value.parameters(), self.grad_clip)
         self.critic_opt.step()
 
-        # Train actor
-        self.actor_opt.zero_grad()
+        # Explicitly free critic tensors and clear graph
+        del states, actions, rewards, continues, critic_loss
+        self._clear_memory_cache()
 
-        # Re-imagine with gradients through policy
+        # === Train Actor ===
+        # Re-imagine WITH gradients through policy for actor training
+        self.actor_opt.zero_grad()
         states_actor, actions_actor, rewards_actor, continues_actor = self.world_model.imagine(
             policy=self.behavior.policy,
             start_state=start_states,
             horizon=self.horizon,
         )
 
-        actor_loss, _, _ = self.behavior.train_step(
+        actor_loss, actor_metrics = self.behavior.train_actor(
             states_actor, actions_actor, rewards_actor, continues_actor
         )
         actor_loss.backward()
@@ -269,17 +273,38 @@ class HockeyDreamer(nn.Module):
         nn.utils.clip_grad_norm_(self.behavior.policy.parameters(), self.grad_clip)
         self.actor_opt.step()
 
-        metrics.update(behavior_metrics)
+        # Explicitly free actor tensors and clear graph
+        del states_actor, actions_actor, rewards_actor, continues_actor, start_states, actor_loss
+        self._clear_memory_cache()
+
+        # Combine metrics
+        metrics.update(critic_metrics)
+        metrics.update(actor_metrics)
         metrics['grad/actor'] = actor_grad_norm
         metrics['grad/critic'] = critic_grad_norm
         metrics['train_steps'] = self.train_steps
 
         # Add imagination stats
-        metrics['imagine/reward_mean'] = rewards.mean().item()
-        metrics['imagine/reward_std'] = rewards.std().item()
-        metrics['imagine/continue_mean'] = continues.mean().item()
+        metrics['imagine/reward_mean'] = imagine_reward_mean
+        metrics['imagine/reward_std'] = imagine_reward_std
+        metrics['imagine/continue_mean'] = imagine_continue_mean
 
         return metrics
+
+    def _clear_memory_cache(self):
+        """Clear GPU/MPS memory cache and run garbage collection."""
+        # Force Python garbage collection to release tensor references
+        gc.collect()
+
+        # Clear device memory cache
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+        elif self.device.type == 'mps':
+            if hasattr(torch.mps, 'empty_cache'):
+                torch.mps.empty_cache()
+            # Also synchronize to ensure all operations complete
+            if hasattr(torch.mps, 'synchronize'):
+                torch.mps.synchronize()
 
     def _compute_grad_norm(self, parameters) -> float:
         """Compute total gradient norm across parameters."""

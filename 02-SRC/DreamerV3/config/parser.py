@@ -73,10 +73,10 @@ def parse_args():
                         help='Sequence length for training (default: 64, reduce to 50 for 2080ti)')
     parser.add_argument('--lr_world', type=float, default=3e-4,
                         help='World model learning rate (default: 3e-4)')
-    parser.add_argument('--lr_actor', type=float, default=3e-5,
-                        help='Actor learning rate (default: 3e-5)')
-    parser.add_argument('--lr_critic', type=float, default=3e-5,
-                        help='Critic learning rate (default: 3e-5)')
+    parser.add_argument('--lr_actor', type=float, default=8e-5,
+                        help='Actor learning rate (default: 8e-5)')
+    parser.add_argument('--lr_critic', type=float, default=1e-4,
+                        help='Critic learning rate (default: 1e-4)')
     parser.add_argument('--gamma', type=float, default=0.997,
                         help='Discount factor (default: 0.997, higher than TD3 for longer horizons)')
     parser.add_argument('--lambda_gae', type=float, default=0.95,
@@ -168,8 +168,8 @@ def parse_args():
                         help='Free nats for KL loss (default: 1.0)')
     parser.add_argument('--kl_balance', type=float, default=0.8,
                         help='KL balance between prior and posterior (default: 0.8)')
-    parser.add_argument('--entropy_scale', type=float, default=3e-4,
-                        help='Entropy regularization scale (default: 3e-4)')
+    parser.add_argument('--entropy_scale', type=float, default=3e-3,
+                        help='Entropy regularization scale (default: 3e-3, prevents policy collapse)')
 
     return parser.parse_args()
 

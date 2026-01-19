@@ -1,14 +1,14 @@
 """
 AI Usage Declaration:
-This file was developed with assistance from AI autocomplete features in Cursor AI IDE.
+This file was developed with assistance from Claude Code.
 
-W&B Run Data Downloader and Discretizer
+W&B Run Data Downloader and Visualizer
 
-Downloads complete run data from W&B and formats it for analysis.
-Automatically discretizes data to fit within character limits for chat analysis.
+Downloads complete run data from W&B and creates visualization plots.
+Supports both TD3 and DreamerV3 runs with automatic metric detection.
 
 Usage:
-    python download_wandb_run.py --run_name "TD3-Hockey-NORMAL-weak-lr0.0003-seed42"
+    python download_wandb_run.py --run_name "DreamerV3-NORMAL-weak-seed42"
     python download_wandb_run.py --run_id "abc123xyz"
     python download_wandb_run.py --run_name "..." --max_chars 50000
 """
@@ -19,6 +19,13 @@ import wandb
 import numpy as np
 from pathlib import Path
 from collections import defaultdict
+
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
 
 
 def parse_args():
@@ -38,8 +45,187 @@ def parse_args():
                         help='Output file path (default: ./wandb_run_data.txt)')
     parser.add_argument('--include_metrics', type=str, nargs='+', default=None,
                         help='Specific metrics to include (default: ALL metrics - no filtering)')
+    parser.add_argument('--plot', action='store_true',
+                        help='Generate visualization plots')
+    parser.add_argument('--plot_output', type=str, default=None,
+                        help='Output path for plot (default: ./wandb_run_<name>.png)')
 
     return parser.parse_args()
+
+
+def plot_dreamer_metrics(history, run_name, output_path):
+    """Generate comprehensive DreamerV3 training visualization."""
+    if not HAS_MATPLOTLIB:
+        print("Warning: matplotlib not installed, skipping plots")
+        return
+
+    # Set up the figure with subplots
+    fig = plt.figure(figsize=(20, 16))
+    fig.suptitle(f'DreamerV3 Training: {run_name}', fontsize=14, fontweight='bold')
+
+    gs = gridspec.GridSpec(4, 3, figure=fig, hspace=0.3, wspace=0.25)
+
+    # Helper to plot with smoothing
+    def plot_metric(ax, data, label, color, smooth_window=10):
+        if data is None or len(data) == 0:
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+            return
+        x = np.arange(len(data))
+        ax.plot(x, data, alpha=0.3, color=color)
+        if len(data) > smooth_window:
+            smoothed = np.convolve(data, np.ones(smooth_window)/smooth_window, mode='valid')
+            ax.plot(np.arange(len(smoothed)) + smooth_window//2, smoothed, color=color, label=label)
+        else:
+            ax.plot(x, data, color=color, label=label)
+
+    def get_metric(name):
+        if name in history.columns:
+            return history[name].dropna().values
+        return None
+
+    # 1. Episode Reward
+    ax1 = fig.add_subplot(gs[0, 0])
+    reward_data = get_metric('episode/reward')
+    plot_metric(ax1, reward_data, 'Reward', 'blue')
+    ax1.set_title('Episode Reward')
+    ax1.set_xlabel('Episode')
+    ax1.set_ylabel('Reward')
+    ax1.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+    ax1.legend()
+
+    # 2. Win Rate
+    ax2 = fig.add_subplot(gs[0, 1])
+    win_rate = get_metric('stats/win_rate')
+    if win_rate is not None:
+        ax2.plot(win_rate, color='green', label='Win Rate')
+        ax2.fill_between(range(len(win_rate)), win_rate, alpha=0.3, color='green')
+    ax2.set_title('Win Rate')
+    ax2.set_xlabel('Episode')
+    ax2.set_ylabel('Win Rate')
+    ax2.set_ylim(0, 1)
+    ax2.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+    ax2.legend()
+
+    # 3. Episode Length
+    ax3 = fig.add_subplot(gs[0, 2])
+    length_data = get_metric('episode/length')
+    plot_metric(ax3, length_data, 'Length', 'purple')
+    ax3.set_title('Episode Length')
+    ax3.set_xlabel('Episode')
+    ax3.set_ylabel('Steps')
+    ax3.legend()
+
+    # 4. World Model Loss
+    ax4 = fig.add_subplot(gs[1, 0])
+    world_loss = get_metric('world/loss')
+    plot_metric(ax4, world_loss, 'Total', 'red')
+    ax4.set_title('World Model Loss')
+    ax4.set_xlabel('Episode')
+    ax4.set_ylabel('Loss')
+    ax4.set_yscale('log')
+    ax4.legend()
+
+    # 5. World Model Loss Components
+    ax5 = fig.add_subplot(gs[1, 1])
+    recon_loss = get_metric('world/recon_loss')
+    reward_loss = get_metric('world/reward_loss')
+    kl_loss = get_metric('world/kl_loss')
+    if recon_loss is not None:
+        plot_metric(ax5, recon_loss, 'Recon', 'blue')
+    if reward_loss is not None:
+        plot_metric(ax5, reward_loss, 'Reward', 'green')
+    if kl_loss is not None:
+        plot_metric(ax5, kl_loss, 'KL', 'orange')
+    ax5.set_title('World Model Components')
+    ax5.set_xlabel('Episode')
+    ax5.set_ylabel('Loss')
+    ax5.legend()
+
+    # 6. KL Divergence
+    ax6 = fig.add_subplot(gs[1, 2])
+    kl_value = get_metric('world/kl_value')
+    plot_metric(ax6, kl_value, 'KL Value', 'orange')
+    ax6.set_title('KL Divergence (Prior vs Posterior)')
+    ax6.set_xlabel('Episode')
+    ax6.set_ylabel('KL')
+    ax6.legend()
+
+    # 7. Actor Loss
+    ax7 = fig.add_subplot(gs[2, 0])
+    actor_loss = get_metric('behavior/actor_loss')
+    plot_metric(ax7, actor_loss, 'Actor Loss', 'blue')
+    ax7.set_title('Actor Loss')
+    ax7.set_xlabel('Episode')
+    ax7.set_ylabel('Loss')
+    ax7.legend()
+
+    # 8. Critic Loss
+    ax8 = fig.add_subplot(gs[2, 1])
+    critic_loss = get_metric('behavior/critic_loss')
+    plot_metric(ax8, critic_loss, 'Critic Loss', 'red')
+    ax8.set_title('Critic Loss')
+    ax8.set_xlabel('Episode')
+    ax8.set_ylabel('Loss')
+    ax8.legend()
+
+    # 9. Policy Entropy
+    ax9 = fig.add_subplot(gs[2, 2])
+    entropy = get_metric('behavior/entropy')
+    plot_metric(ax9, entropy, 'Entropy', 'purple')
+    ax9.set_title('Policy Entropy')
+    ax9.set_xlabel('Episode')
+    ax9.set_ylabel('Entropy')
+    ax9.legend()
+
+    # 10. Gradient Norms
+    ax10 = fig.add_subplot(gs[3, 0])
+    grad_world = get_metric('grad/world')
+    grad_actor = get_metric('grad/actor')
+    grad_critic = get_metric('grad/critic')
+    if grad_world is not None:
+        plot_metric(ax10, grad_world, 'World', 'red')
+    if grad_actor is not None:
+        plot_metric(ax10, grad_actor, 'Actor', 'blue')
+    if grad_critic is not None:
+        plot_metric(ax10, grad_critic, 'Critic', 'green')
+    ax10.set_title('Gradient Norms')
+    ax10.set_xlabel('Episode')
+    ax10.set_ylabel('Norm')
+    ax10.legend()
+
+    # 11. Value Estimates
+    ax11 = fig.add_subplot(gs[3, 1])
+    value_mean = get_metric('behavior/value_mean')
+    target_mean = get_metric('behavior/target_mean')
+    if value_mean is not None:
+        plot_metric(ax11, value_mean, 'Value', 'blue')
+    if target_mean is not None:
+        plot_metric(ax11, target_mean, 'Target', 'green')
+    ax11.set_title('Value Estimates')
+    ax11.set_xlabel('Episode')
+    ax11.set_ylabel('Value')
+    ax11.legend()
+
+    # 12. Imagined Rewards
+    ax12 = fig.add_subplot(gs[3, 2])
+    imagine_reward = get_metric('imagine/reward_mean')
+    imagine_continue = get_metric('imagine/continue_mean')
+    if imagine_reward is not None:
+        ax12_twin = ax12.twinx()
+        plot_metric(ax12, imagine_reward, 'Reward Mean', 'blue')
+        if imagine_continue is not None:
+            plot_metric(ax12_twin, imagine_continue, 'Continue Prob', 'orange')
+            ax12_twin.set_ylabel('Continue Prob', color='orange')
+            ax12_twin.tick_params(axis='y', labelcolor='orange')
+    ax12.set_title('Imagination Stats')
+    ax12.set_xlabel('Episode')
+    ax12.set_ylabel('Reward', color='blue')
+    ax12.tick_params(axis='y', labelcolor='blue')
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"✓ Plot saved to: {output_path}")
 
 
 def get_run(entity, project, run_name=None, run_id=None):
@@ -74,25 +260,25 @@ def get_all_metrics():
     The script will automatically fetch all W&B metrics (those with "/" in name).
     This ensures we never miss any logged metrics.
 
-    Known metric categories (for reference):
+    DreamerV3 metric categories:
+    - episode/: reward, length, outcome, time, train_time
+    - stats/: win_rate, total_steps, buffer_size, buffer_episodes
+    - world/: loss, recon_loss, reward_loss, continue_loss, kl_loss, kl_value
+    - behavior/: actor_loss, critic_loss, policy_loss, entropy, value_mean, target_mean, advantage_mean
+    - grad/: world, actor, critic
+    - imagine/: reward_mean, reward_std, continue_mean
+    - eval_weak/: win_rate, loss_rate, draw_rate, mean_reward, mean_length, goals_scored, goals_conceded
+    - eval_strong/: win_rate, loss_rate, draw_rate, mean_reward, mean_length, goals_scored, goals_conceded
+
+    TD3 metric categories (for reference):
     - performance/: cumulative_win_rate, wins, losses, ties
     - rewards/: p1, p2, sparse_only, sparse_ratio
     - scoring/: goals_scored, goals_conceded
-    - training/: epsilon, eps_per_sec, episode, pbrs_enabled, calls_per_episode,
-                 avg_episode_length, episode_block_size, episodes_in_current_block
+    - training/: epsilon, eps_per_sec, episode
     - losses/: critic_loss, actor_loss
     - gradients/: critic_grad_norm, actor_grad_norm
-    - pbrs/: avg_per_episode, annealing_weight
-    - vf_reg/: active_ratio, violation_ratio, q_advantage_mean, reg_loss
-    - selfplay/: active, pool_size, weak_ratio_target, anchor_*, pfsp_*, episode_opponent_type_*
-    - eval/weak/: win_rate, win_rate_decisive, tie_rate, loss_rate, avg_reward, wins, losses, ties
-    - eval/strong/: win_rate, win_rate_decisive, tie_rate, loss_rate, avg_reward, wins, losses, ties
-    - eval/selfplay/: win_rate, win_rate_decisive, tie_rate, loss_rate, avg_reward, wins, losses, ties, opponent_age
-    - behavior/: action_magnitude_avg, action_magnitude_max, lazy_action_ratio, dist_to_puck_avg,
-                 dist_to_puck_min, puck_touches, time_near_puck, distance_traveled, velocity_avg,
-                 velocity_max, shoot_action_avg, shoot_action_when_possess, possession_ratio
-    - values/: Q_avg, Q_std, Q_min, Q_max
-    - hacking/: possession_hoarding_ratio, possession_no_shoot_count, pbrs_to_sparse_ratio
+    - eval/weak/: win_rate, loss_rate, avg_reward
+    - eval/strong/: win_rate, loss_rate, avg_reward
     """
     return None  # None means fetch ALL metrics
 
@@ -239,23 +425,56 @@ def format_run_data(run, include_metrics=None, max_chars=100000):
     output_lines.append(f"Duration: {run.summary.get('_runtime', 'N/A')} seconds")
     output_lines.append("")
 
-    # Config
+    # Config - detect algorithm type and show relevant keys
     output_lines.append("## CONFIGURATION")
-    key_config = ['algorithm', 'mode', 'opponent', 'learning_rate_actor', 'learning_rate_critic',
-                  'batch_size', 'buffer_size', 'max_episodes', 'random_seed',
-                  'reward_shaping', 'self_play_start', 'self_play_pool_size',
-                  'eps', 'eps_min', 'eps_decay', 'gamma', 'tau']
-    for key in key_config:
-        if key in config:
-            output_lines.append(f"  {key}: {config[key]}")
+
+    # Check if DreamerV3 or TD3 based on config keys
+    is_dreamer = any(k.startswith('arch/') or k.startswith('imagination/') or k.startswith('dreamer/') for k in config.keys())
+
+    if is_dreamer:
+        # DreamerV3 config keys
+        config_sections = {
+            'Environment': ['env/mode', 'env/opponent', 'env/obs_dim', 'env/action_dim'],
+            'Architecture': ['arch/hidden_size', 'arch/latent_size', 'arch/recurrent_size'],
+            'Imagination': ['imagination/horizon', 'imagination/batch_size'],
+            'Training': ['train/batch_size', 'train/batch_length', 'train/lr_world',
+                        'train/lr_actor', 'train/lr_critic', 'train/gamma', 'train/lambda_gae'],
+            'DreamerV3': ['dreamer/kl_free', 'dreamer/entropy_scale'],
+            'Meta': ['seed', 'max_steps', 'device'],
+        }
+    else:
+        # TD3 config keys
+        config_sections = {
+            'Environment': ['mode', 'opponent'],
+            'Training': ['learning_rate_actor', 'learning_rate_critic', 'batch_size',
+                        'buffer_size', 'max_episodes', 'gamma', 'tau'],
+            'Exploration': ['eps', 'eps_min', 'eps_decay'],
+            'Self-Play': ['self_play_start', 'self_play_pool_size'],
+            'Meta': ['random_seed', 'algorithm'],
+        }
+
+    for section, keys in config_sections.items():
+        section_values = [(k, config.get(k)) for k in keys if k in config]
+        if section_values:
+            output_lines.append(f"  [{section}]")
+            for key, value in section_values:
+                output_lines.append(f"    {key}: {value}")
     output_lines.append("")
 
     # Summary metrics
     output_lines.append("## FINAL SUMMARY")
-    key_summary = ['final_win_rate', 'wins', 'losses', 'ties', 'total_episodes']
-    for key in key_summary:
+    # Try common summary keys
+    summary_keys = ['final_win_rate', 'wins', 'losses', 'ties', 'draws',
+                    'total_episodes', 'total_steps', '_runtime']
+    for key in summary_keys:
         if key in summary:
-            output_lines.append(f"  {key}: {summary[key]}")
+            value = summary[key]
+            if key == '_runtime':
+                # Format runtime nicely
+                hours = value / 3600
+                output_lines.append(f"  runtime: {hours:.2f} hours ({value:.0f} seconds)")
+            else:
+                output_lines.append(f"  {key}: {value}")
     output_lines.append("")
 
     # Estimate size and discretize if needed
@@ -351,7 +570,26 @@ def main():
     print(f"\n✅ Data saved to: {output_path}")
     print(f"   Size: {len(output):,} characters")
     print(f"   Lines: {len(output.splitlines()):,}")
-    print("\nYou can now copy this file and paste it in chat for analysis!")
+
+    # Generate plot if requested
+    if args.plot:
+        print("\nGenerating visualization plots...")
+        try:
+            history = run.history()
+            if history is not None and not history.empty:
+                # Determine plot output path
+                if args.plot_output:
+                    plot_path = Path(args.plot_output)
+                else:
+                    plot_path = Path(f"./wandb_plot_{run.name.replace('/', '_')}.png")
+
+                plot_dreamer_metrics(history, run.name, plot_path)
+            else:
+                print("  ⚠ No history data available for plotting")
+        except Exception as e:
+            print(f"  ✗ Failed to generate plot: {e}")
+
+    print("\nYou can now copy the text file and paste it in chat for analysis!")
 
     # Also print first few lines as preview
     print("\n" + "=" * 80)
