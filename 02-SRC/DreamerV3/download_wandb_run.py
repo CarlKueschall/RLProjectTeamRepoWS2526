@@ -11,6 +11,10 @@ Usage:
     python download_wandb_run.py --run_name "DreamerV3-small-weak-seed43"
     python download_wandb_run.py --run_id "abc123xyz"
     python download_wandb_run.py --run_name "..." --max_chars 50000
+
+    # For long runs, use --fraction to reduce data (e.g., 10% of points):
+    python download_wandb_run.py --run_name "..." --fraction 0.1
+    python download_wandb_run.py --run_name "..." --fraction 0.05 --max_points 100
 """
 
 import argparse
@@ -200,6 +204,10 @@ def parse_args():
                         help='Output file path (default: ./wandb_run_<name>.txt)')
     parser.add_argument('--include_metrics', type=str, nargs='+', default=None,
                         help='Specific metrics to include (default: ALL metrics)')
+    parser.add_argument('--fraction', type=float, default=1.0,
+                        help='Fraction of data points to keep (0.0-1.0, default: 1.0 = all)')
+    parser.add_argument('--max_points', type=int, default=200,
+                        help='Maximum points per metric after discretization (default: 200)')
 
     return parser.parse_args()
 
@@ -255,8 +263,26 @@ def discretize_data(data, max_points=200):
     return [data[i] for i in indices]
 
 
-def format_run_data(run, include_metrics=None, max_chars=100000):
-    """Format run data for analysis"""
+def subsample_data(data, fraction):
+    """Subsample data by keeping only a fraction of points (evenly spaced)."""
+    if fraction >= 1.0 or len(data) == 0:
+        return data
+
+    n_keep = max(1, int(len(data) * fraction))
+    indices = np.linspace(0, len(data) - 1, n_keep, dtype=int)
+    return [data[i] for i in indices]
+
+
+def format_run_data(run, include_metrics=None, max_chars=100000, fraction=1.0, max_points=200):
+    """Format run data for analysis
+
+    Args:
+        run: W&B run object
+        include_metrics: List of specific metrics to include (None = all)
+        max_chars: Maximum characters in output
+        fraction: Fraction of data points to keep (0.0-1.0)
+        max_points: Maximum points per metric after discretization
+    """
 
     config = run.config
     summary = run.summary
@@ -266,6 +292,8 @@ def format_run_data(run, include_metrics=None, max_chars=100000):
     try:
         history = run.history()
         print(f"  Fetched {len(history)} rows with {len(history.columns)} columns")
+        if fraction < 1.0:
+            print(f"  Will keep {fraction*100:.1f}% of data points")
     except Exception as e:
         print(f"  Failed to fetch history: {e}")
         history = None
@@ -330,23 +358,32 @@ def format_run_data(run, include_metrics=None, max_chars=100000):
         for metric in metrics_to_process:
             values = history[metric].dropna()
             if len(values) > 0:
-                metrics_data[metric] = values.tolist()
+                data = values.tolist()
+                # Apply fraction subsampling first
+                if fraction < 1.0:
+                    data = subsample_data(data, fraction)
+                metrics_data[metric] = data
 
         print(f"  Extracted data for {len(metrics_data)} metrics")
+        if fraction < 1.0:
+            total_points = sum(len(d) for d in metrics_data.values())
+            print(f"  Total data points after {fraction*100:.1f}% subsampling: {total_points:,}")
     else:
         metrics_data = {}
 
-    # Estimate size and discretize
+    # Estimate size and apply discretization if needed
     current_size = sum(len(line) for line in output_lines)
     estimated_size = current_size + sum(len(d) * 20 for d in metrics_data.values())
 
+    # Use provided max_points, but reduce further if output would be too large
+    effective_max_points = max_points
     if estimated_size > max_chars:
         factor = int(np.ceil(estimated_size / max_chars))
-        max_points = max(50, 200 // factor)
-        output_lines.append(f"## NOTE: Data discretized to ~{max_points} points per metric")
+        effective_max_points = max(50, max_points // factor)
+
+    if fraction < 1.0 or effective_max_points < 10000:
+        output_lines.append(f"## NOTE: Data reduced (fraction={fraction}, max_points={effective_max_points})")
         output_lines.append("")
-    else:
-        max_points = 10000
 
     # Format metrics by category
     output_lines.append("## METRICS DATA")
@@ -389,9 +426,9 @@ def format_run_data(run, include_metrics=None, max_chars=100000):
                 if not data:
                     continue
 
-                # Discretize
-                if len(data) > max_points:
-                    data = discretize_data(data, max_points)
+                # Discretize if still too many points
+                if len(data) > effective_max_points:
+                    data = discretize_data(data, effective_max_points)
 
                 metric_name = metric.split('/')[-1]
                 output_lines.append(f"#### {metric_name}")
@@ -427,7 +464,13 @@ def main():
     run = get_run(args.entity, args.project, args.run_name, args.run_id)
     print(f"Found run: {run.name} (ID: {run.id})")
 
-    output = format_run_data(run, args.include_metrics, args.max_chars)
+    output = format_run_data(
+        run,
+        include_metrics=args.include_metrics,
+        max_chars=args.max_chars,
+        fraction=args.fraction,
+        max_points=args.max_points
+    )
 
     if args.output:
         output_path = Path(args.output)

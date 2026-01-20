@@ -247,6 +247,8 @@ def parse_args():
     parser.add_argument("--beta_prior", type=float, default=None, help="Prior KL weight")
     parser.add_argument("--beta_posterior", type=float, default=None, help="Posterior KL weight")
     parser.add_argument("--gradient_clip", type=float, default=None, help="Gradient clipping")
+    parser.add_argument("--uniform_mix", type=float, default=None,
+                        help="Uniform mixing ratio for latent categoricals (prevents collapse, default: 0.01)")
 
     # Buffer
     parser.add_argument("--buffer_capacity", type=int, default=None, help="Replay buffer capacity")
@@ -338,6 +340,10 @@ def main():
         config.dreamer.betaPosterior = args.beta_posterior
     if args.gradient_clip is not None:
         config.dreamer.gradientClip = args.gradient_clip
+    if args.uniform_mix is not None:
+        # Apply to both prior and posterior networks
+        config.dreamer.priorNet.uniformMix = args.uniform_mix
+        config.dreamer.posteriorNet.uniformMix = args.uniform_mix
 
     # Buffer override
     if args.buffer_capacity is not None:
@@ -409,6 +415,7 @@ def main():
                 "entropy_scale": config.dreamer.entropyScale,
                 "free_nats": config.dreamer.freeNats,
                 "buffer_capacity": config.dreamer.buffer.capacity,
+                "uniform_mix": config.dreamer.priorNet.uniformMix,
                 "use_auxiliary_tasks": config.get('useAuxiliaryTasks', True),
                 "gif_interval": config.gifInterval,
             }
