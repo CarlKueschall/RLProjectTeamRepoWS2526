@@ -29,11 +29,19 @@ export WANDB_API_KEY="cc059bf17f0dffb378947bc37398b00eea0d1944"
 #
 # ============================================================================
 
+# ============================================================================
+# FIXED CONFIGURATION after analyzing run DreamerV3-small-weak-seed43
+# Key fixes:
+#   1. imagination_horizon: 50 → 15 (was way too long, caused entropy collapse)
+#   2. batch_size: 16 → 32, batch_length: 64 → 32 (more stable)
+#   3. Actor logStdMin fixed in networks.py (-5 → -2) to prevent std collapse
+# ============================================================================
+
 singularity exec --nv ~/containers/hockey.sif python3 train_hockey.py \
     --config hockey.yml \
     --mode NORMAL \
     --opponent weak \
-    --seed 43 \
+    --seed 44 \
     --device cuda \
     \
     --gradient_steps 1000000 \
@@ -70,7 +78,7 @@ singularity exec --nv ~/containers/hockey.sif python3 train_hockey.py \
     --log_interval 10 \
     \
     --wandb_project rl-hockey \
-    --run_name 'DreamerV3-small-weak-seed43'
+    --run_name 'DreamerV3-small-fixed-seed44'
 
 # Copy results back to home directory
 cp -R /scratch/$SLURM_JOB_ID/02-SRC/DreamerV3/results ~/02-SRC/DreamerV3/results_dreamerv3_small_seed43

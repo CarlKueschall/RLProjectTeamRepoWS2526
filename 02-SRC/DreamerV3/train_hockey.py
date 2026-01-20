@@ -421,7 +421,7 @@ def main():
         'TRAIN_DEFENSE': Mode.TRAIN_DEFENSE,
     }
     env_mode = mode_map.get(args.mode, Mode.NORMAL)
-    env = h_env.HockeyEnv(mode=env_mode)
+    env = h_env.HockeyEnv(mode=env_mode, keep_mode=True)
     observationSize = env.observation_space.shape[0]
     actionSize = env.action_space.shape[0] // 2  # Only agent's actions (4)
     actionLow = env.action_space.low[:actionSize].tolist()

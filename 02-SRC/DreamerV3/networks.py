@@ -180,7 +180,9 @@ class Actor(nn.Module):
         self.register_buffer("actionBias", (torch.tensor(actionHigh, device=device) + torch.tensor(actionLow, device=device)) / 2.0)
 
     def forward(self, x, training=False):
-        logStdMin, logStdMax = -5, 2
+        # logStdMin=-2 gives std_min=0.135, preventing entropy collapse
+        # Old value of -5 allowed std=0.0067 which caused entropy to go negative
+        logStdMin, logStdMax = -2, 2
         mean, logStd = self.network(x).chunk(2, dim=-1)
         # Bound log_std to [logStdMin, logStdMax]
         logStd = logStdMin + (logStdMax - logStdMin) / 2 * (torch.tanh(logStd) + 1)
