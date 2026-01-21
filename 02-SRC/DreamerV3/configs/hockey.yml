@@ -275,6 +275,16 @@ dreamer:
                                  # ~400 episodes at 250 steps each
                                  # Older data is overwritten (FIFO)
 
+        # DreamSmooth: Temporal reward smoothing for sparse rewards
+        # (arXiv:2311.01450)
+        # Smooths reward signal before world model training, making
+        # reward prediction easier and providing denser learning signal.
+        # Enable via --use_dreamsmooth CLI flag.
+        useDreamSmooth: false    # Enable DreamSmooth (default: off)
+        dreamsmoothAlpha: 0.5    # EMA smoothing factor (0-1)
+                                 # Higher = more smoothing
+                                 # 0.5 is recommended for sparse rewards
+
     # -------------------------------------------------------------------------
     # NETWORK ARCHITECTURES
     # -------------------------------------------------------------------------
@@ -357,6 +367,18 @@ dreamer:
         hiddenSize: 256
         numLayers: 2
         activation: Tanh
+
+    # -------------------------------------------------------------------------
+    # SLOW CRITIC (EMA) - DreamerV3 Robustness Technique
+    # -------------------------------------------------------------------------
+    # Uses exponential moving average of critic weights for stable bootstrap
+    # targets. This reduces value estimation variance and improves stability.
+    # -------------------------------------------------------------------------
+
+    slowCriticDecay: 0.98            # EMA decay rate for slow critic
+                                     # Higher = slower adaptation (more stable, slower to track changes)
+                                     # 0.98 = ~50 updates to reach 63% of new value
+                                     # 0.99 = ~100 updates, 0.95 = ~20 updates
 
 # -----------------------------------------------------------------------------
 # OUTPUT FOLDERS

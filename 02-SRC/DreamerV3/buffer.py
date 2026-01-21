@@ -4,12 +4,68 @@ Replay Buffer for DreamerV3.
 Simple sequence-based buffer that stores transitions and samples
 contiguous sequences for training.
 
+Includes DreamSmooth: temporal reward smoothing for sparse reward environments.
+
 AI Usage Declaration:
 This file was developed with assistance from Claude Code.
 """
 
 import numpy as np
 import torch
+
+
+def dreamsmooth_ema(rewards, dones, alpha=0.5):
+    """
+    Apply bidirectional EMA smoothing to rewards within episodes.
+
+    DreamSmooth (arXiv:2311.01450) smooths rewards before world model training,
+    making reward prediction easier and providing denser learning signal.
+
+    Instead of sparse spikes (0, 0, 0, +10, 0, 0), produces (0, 0.5, 2.5, 6.25, 3.1, 1.5)
+
+    Args:
+        rewards: Reward tensor of shape (batch, seq_len, 1) or (batch, seq_len)
+        dones: Done flags of shape (batch, seq_len, 1) or (batch, seq_len)
+        alpha: Smoothing factor (0-1). Higher = more smoothing.
+                0.5 is recommended for sparse rewards.
+
+    Returns:
+        Smoothed rewards with same shape as input
+    """
+    # Handle shape
+    squeeze_last = False
+    if rewards.dim() == 3 and rewards.shape[-1] == 1:
+        rewards = rewards.squeeze(-1)
+        dones = dones.squeeze(-1)
+        squeeze_last = True
+
+    batch_size, seq_len = rewards.shape
+    smoothed = torch.zeros_like(rewards)
+
+    # Forward pass: smooth from past to present
+    for b in range(batch_size):
+        running = 0.0
+        for t in range(seq_len):
+            # Reset at episode boundary
+            if t > 0 and dones[b, t-1] > 0.5:
+                running = 0.0
+            running = alpha * rewards[b, t] + (1 - alpha) * running
+            smoothed[b, t] = running
+
+    # Backward pass: smooth from future to present (adds anticipation signal)
+    for b in range(batch_size):
+        running = 0.0
+        for t in range(seq_len - 1, -1, -1):
+            # Reset at episode boundary (looking backward)
+            if t < seq_len - 1 and dones[b, t] > 0.5:
+                running = 0.0
+            running = alpha * smoothed[b, t] + (1 - alpha) * running
+            smoothed[b, t] = running
+
+    if squeeze_last:
+        smoothed = smoothed.unsqueeze(-1)
+
+    return smoothed
 
 
 class ReplayBuffer:
@@ -25,12 +81,16 @@ class ReplayBuffer:
         Args:
             observationSize: Dimension of observation (scalar for 1D, tuple for images)
             actionSize: Dimension of action
-            config: Config with 'capacity' field
+            config: Config with 'capacity' field and optional DreamSmooth settings
             device: torch device for sampling
         """
         self.config = config
         self.device = device
         self.capacity = int(config.capacity)
+
+        # DreamSmooth settings (for sparse reward environments)
+        self.useDreamSmooth = getattr(config, 'useDreamSmooth', False)
+        self.dreamsmoothAlpha = getattr(config, 'dreamsmoothAlpha', 0.5)
 
         # Handle both 1D (int) and multi-D (tuple) observations
         if isinstance(observationSize, int):
@@ -88,6 +148,10 @@ class ReplayBuffer:
         actions = torch.as_tensor(self.actions[sampleIndex], device=self.device).float()
         rewards = torch.as_tensor(self.rewards[sampleIndex], device=self.device).float()
         dones = torch.as_tensor(self.dones[sampleIndex], device=self.device).float()
+
+        # Apply DreamSmooth if enabled (temporal reward smoothing for sparse rewards)
+        if self.useDreamSmooth:
+            rewards = dreamsmooth_ema(rewards, dones, alpha=self.dreamsmoothAlpha)
 
         # Return as simple namespace
         class Batch:

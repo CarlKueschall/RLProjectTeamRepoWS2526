@@ -102,6 +102,12 @@ class RewardModel(nn.Module):
             bins,  # Output logits for each bin
             self.config.activation
         )
+        # Initialize output layer to zeros for uniform initial predictions
+        # This makes initial reward predictions ≈ 0 (center bin in symlog space)
+        # Critical for sparse rewards: prevents hallucinated rewards early in training
+        with torch.no_grad():
+            self.network[-1].weight.zero_()
+            self.network[-1].bias.zero_()
 
     def forward(self, x):
         """Returns logits of shape (*, bins)."""

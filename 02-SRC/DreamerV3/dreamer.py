@@ -72,6 +72,14 @@ class Dreamer:
         self.actor = Actor(self.fullStateSize, actionSize, actionLow, actionHigh, device, config.actor).to(device)
         self.critic = Critic(self.fullStateSize, config.critic).to(device)
 
+        # EMA (slow) critic for stable bootstrap targets (DreamerV3 robustness technique)
+        # Uses exponential moving average of critic weights to reduce value estimation variance
+        self.slowCritic = Critic(self.fullStateSize, config.critic).to(device)
+        self.slowCritic.load_state_dict(self.critic.state_dict())  # Initialize with same weights
+        for param in self.slowCritic.parameters():
+            param.requires_grad = False  # Don't train directly - updated via EMA
+        self.slowCriticDecay = getattr(config, 'slowCriticDecay', 0.98)  # EMA decay rate
+
         # =================================================================
         # Auxiliary Task Heads
         # =================================================================
@@ -135,6 +143,12 @@ class Dreamer:
         self.totalEpisodes = 0
         self.totalEnvSteps = 0
         self.totalGradientSteps = 0
+
+    def _updateSlowCritic(self):
+        """Update slow critic via exponential moving average of critic weights."""
+        with torch.no_grad():
+            for slow_param, param in zip(self.slowCritic.parameters(), self.critic.parameters()):
+                slow_param.data.mul_(self.slowCriticDecay).add_(param.data, alpha=1 - self.slowCriticDecay)
 
     def worldModelTraining(self, data):
         """
@@ -508,6 +522,14 @@ class Dreamer:
         rewardLogits = rewardLogits.view(fullStates.shape[0], -1, self.twoHotBins)  # (B, H-1, 255)
         predictedRewards = self.twoHot.decode(rewardLogits)  # (B, H-1)
 
+        # Use SLOW critic for bootstrap targets (DreamerV3 robustness technique)
+        # The EMA critic provides stable value estimates for computing lambda returns
+        with torch.no_grad():
+            slowCriticLogits = self.slowCritic(fullStates.reshape(-1, self.fullStateSize))
+            slowCriticLogits = slowCriticLogits.view(fullStates.shape[0], -1, self.twoHotBins)  # (B, H, 255)
+            slowValues = self.twoHot.decode(slowCriticLogits)  # (B, H)
+
+        # Main critic values (for advantage baseline)
         criticLogits = self.critic(fullStates.reshape(-1, self.fullStateSize))
         criticLogits = criticLogits.view(fullStates.shape[0], -1, self.twoHotBins)  # (B, H, 255)
         values = self.twoHot.decode(criticLogits)  # (B, H)
@@ -517,18 +539,13 @@ class Dreamer:
         else:
             continues = torch.full_like(predictedRewards, self.config.discount)
 
-        # Compute lambda returns
-        lambdaValues = computeLambdaValues(predictedRewards, values, continues, self.config.lambda_)
+        # Compute lambda returns using SLOW critic bootstrap (stable targets)
+        lambdaValues = computeLambdaValues(predictedRewards, slowValues, continues, self.config.lambda_)
 
-        # Normalize advantages (can be disabled via config)
-        useAdvantageNormalization = getattr(self.config, 'useAdvantageNormalization', True)
-        if useAdvantageNormalization:
-            _, inverseScale = self.valueMoments(lambdaValues)
-            advantages = (lambdaValues - values[:, :-1]) / inverseScale
-        else:
-            # No normalization - raw advantages
-            self.valueMoments(lambdaValues)  # Still update moments for logging
-            advantages = lambdaValues - values[:, :-1]
+        # Normalize advantages using percentile-based scaling (DreamerV3 robustness technique)
+        # Critical for sparse rewards - prevents advantage collapse when reward std ≈ 0
+        _, inverseScale = self.valueMoments(lambdaValues)
+        advantages = (lambdaValues - values[:, :-1]) / inverseScale
 
         # === Actor Loss ===
         actorLoss = -torch.mean(advantages.detach() * logprobs + self.config.entropyScale * entropies)
@@ -549,6 +566,9 @@ class Dreamer:
         criticLoss.backward()
         criticGradNorm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.config.gradientClip, norm_type=self.config.gradientNormType)
         self.criticOptimizer.step()
+
+        # Update slow critic via EMA (after critic update)
+        self._updateSlowCritic()
 
         # === Compute Detailed Metrics ===
 
@@ -711,6 +731,7 @@ class Dreamer:
             'rewardPredictor': self.rewardPredictor.state_dict(),
             'actor': self.actor.state_dict(),
             'critic': self.critic.state_dict(),
+            'slowCritic': self.slowCritic.state_dict(),
             'worldModelOptimizer': self.worldModelOptimizer.state_dict(),
             'actorOptimizer': self.actorOptimizer.state_dict(),
             'criticOptimizer': self.criticOptimizer.state_dict(),
@@ -745,6 +766,11 @@ class Dreamer:
         self.rewardPredictor.load_state_dict(checkpoint['rewardPredictor'])
         self.actor.load_state_dict(checkpoint['actor'])
         self.critic.load_state_dict(checkpoint['critic'])
+        # Load slow critic (backward compatible - initialize from critic if not present)
+        if 'slowCritic' in checkpoint:
+            self.slowCritic.load_state_dict(checkpoint['slowCritic'])
+        else:
+            self.slowCritic.load_state_dict(checkpoint['critic'])  # Initialize from main critic
         self.worldModelOptimizer.load_state_dict(checkpoint['worldModelOptimizer'])
         self.actorOptimizer.load_state_dict(checkpoint['actorOptimizer'])
         self.criticOptimizer.load_state_dict(checkpoint['criticOptimizer'])

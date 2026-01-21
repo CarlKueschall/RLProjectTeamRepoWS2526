@@ -300,8 +300,6 @@ def parse_args():
     parser.add_argument("--discount", type=float, default=None, help="Discount factor gamma")
     parser.add_argument("--lambda_", type=float, default=None, help="Lambda for TD(lambda)")
     parser.add_argument("--entropy_scale", type=float, default=None, help="Entropy bonus scale")
-    parser.add_argument("--no_advantage_normalization", action="store_true",
-                        help="Disable advantage normalization (use raw advantages)")
     parser.add_argument("--free_nats", type=float, default=None, help="KL free nats threshold")
     parser.add_argument("--beta_prior", type=float, default=None, help="Prior KL weight")
     parser.add_argument("--beta_posterior", type=float, default=None, help="Posterior KL weight")
@@ -311,6 +309,10 @@ def parse_args():
 
     # Buffer
     parser.add_argument("--buffer_capacity", type=int, default=None, help="Replay buffer capacity")
+
+    # Auxiliary tasks
+    parser.add_argument("--no_aux_tasks", action="store_true",
+                        help="Disable auxiliary task heads (goal/distance/shot quality prediction)")
 
     # Checkpointing and evaluation
     parser.add_argument("--checkpoint_interval", type=int, default=None,
@@ -347,6 +349,12 @@ def parse_args():
     parser.add_argument("--pfsp_mode", type=str, default="variance",
                         choices=["variance", "hard", "uniform"],
                         help="PFSP mode: variance (50%% winrate), hard (lowest winrate)")
+
+    # DreamSmooth (sparse reward handling)
+    parser.add_argument("--use_dreamsmooth", action="store_true",
+                        help="Enable DreamSmooth reward smoothing for sparse rewards")
+    parser.add_argument("--dreamsmooth_alpha", type=float, default=0.5,
+                        help="DreamSmooth EMA alpha (0-1). Higher = more smoothing. Default: 0.5")
 
     return parser.parse_args()
 
@@ -406,8 +414,6 @@ def main():
         config.dreamer.lambda_ = args.lambda_
     if args.entropy_scale is not None:
         config.dreamer.entropyScale = args.entropy_scale
-    if args.no_advantage_normalization:
-        config.dreamer.useAdvantageNormalization = False
     if args.free_nats is not None:
         config.dreamer.freeNats = args.free_nats
     if args.beta_prior is not None:
@@ -424,6 +430,17 @@ def main():
     # Buffer override
     if args.buffer_capacity is not None:
         config.dreamer.buffer.capacity = args.buffer_capacity
+
+    # DreamSmooth (sparse reward handling) overrides
+    if args.use_dreamsmooth:
+        config.dreamer.buffer.useDreamSmooth = True
+        config.dreamer.buffer.dreamsmoothAlpha = args.dreamsmooth_alpha
+        print(f"DreamSmooth enabled with alpha={args.dreamsmooth_alpha}")
+
+    # Auxiliary tasks override
+    if args.no_aux_tasks:
+        config.useAuxiliaryTasks = False
+        print("Auxiliary task heads disabled")
 
     # Checkpoint/eval overrides
     if args.checkpoint_interval is not None:
