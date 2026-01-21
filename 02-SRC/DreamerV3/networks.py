@@ -186,9 +186,12 @@ class Actor(nn.Module):
         self.register_buffer("actionBias", (torch.tensor(actionHigh, device=device) + torch.tensor(actionLow, device=device)) / 2.0)
 
     def forward(self, x, training=False):
-        # logStdMin=-2 gives std_min=0.135, preventing entropy collapse
-        # Old value of -5 allowed std=0.0067 which caused entropy to go negative
-        logStdMin, logStdMax = -2, 2
+        # logStdMin=-0.5 gives std_min=0.606, ensuring entropy stays POSITIVE
+        # Gaussian entropy = 0.5*ln(2*pi*e*σ²) is negative when σ < 0.242
+        # With σ_min=0.606, minimum entropy per dim ≈ +0.5 (total ≈ +2 for 4-dim)
+        # Old value of -2 (σ=0.135) caused negative entropy which ENCOURAGED
+        # determinism instead of exploration - a critical bug!
+        logStdMin, logStdMax = -0.5, 2
         mean, logStd = self.network(x).chunk(2, dim=-1)
         # Bound log_std to [logStdMin, logStdMax]
         logStd = logStdMin + (logStdMax - logStdMin) / 2 * (torch.tanh(logStd) + 1)

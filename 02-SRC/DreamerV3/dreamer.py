@@ -682,16 +682,22 @@ class Dreamer:
             # Critic stability (EMA regularization monitoring)
             "values/critic_slow_diff": criticSlowDiff.item(),  # How much main critic differs from EMA
 
-            # === ENTROPY vs ADVANTAGE BALANCE (Critical diagnostic) ===
-            # If entropy_contribution >> advantage_contribution, entropy dominates learning
-            # and policy will stay random. The ratio should decrease over training.
+            # === ENTROPY vs ADVANTAGE BALANCE ===
+            # These metrics help diagnose exploration/exploitation balance.
+            # NOTE: The ratio evolves AUTOMATICALLY through return normalization (S).
+            # Do NOT manually target specific ratio values - just observe trends.
             "diagnostics/advantage_contribution": (advantages.abs() * logprobs.abs()).mean().item(),
             "diagnostics/entropy_contribution": (self.config.entropyScale * entropies).mean().item(),
             "diagnostics/entropy_advantage_ratio": (
                 (self.config.entropyScale * entropies).mean() /
                 (advantages.abs() * logprobs.abs()).mean().clamp(min=1e-8)
-            ).item(),  # Should decrease from ~1.0 to ~0.01 over training
-            "diagnostics/return_range_S": inverseScale.item(),  # Same as norm_scale, explicit name
+            ).item(),
+
+            # === RETURN NORMALIZATION (Critical for entropy balance) ===
+            # S is the return range (95th - 5th percentile). If stuck at floor (1.0),
+            # returns are too stable or reward signal is weak.
+            "diagnostics/return_range_S": inverseScale.item(),
+            "diagnostics/return_range_at_floor": (inverseScale <= 1.01).float().item(),  # 1.0 if at floor
         }
 
         return metrics
