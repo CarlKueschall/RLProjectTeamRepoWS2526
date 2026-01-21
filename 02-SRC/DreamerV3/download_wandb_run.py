@@ -184,6 +184,48 @@ from collections import defaultdict
 #   pbrs_when_loss             - Avg PBRS in losing episodes
 #   loss_pbrs_minus_win_pbrs   - Should be <0 (more PBRS when winning)
 #
+# -----------------------------------------------------------------------------
+# SELF-PLAY (curriculum learning through self-play)
+# -----------------------------------------------------------------------------
+# selfplay/
+#   active                     - Is self-play active? (0 or 1)
+#   pool_size                  - Number of opponents in pool
+#   weak_ratio_target          - Target ratio for anchor opponents
+#   episodes_since_activation  - Episodes since self-play started
+#
+#   anchor_weak_count          - Episodes trained against weak anchor
+#   anchor_strong_count        - Episodes trained against strong anchor
+#   selfplay_count             - Episodes trained against self-play pool
+#   anchor_ratio_actual        - Actual anchor vs pool ratio
+#   selfplay_ratio_actual      - Actual self-play ratio
+#   anchor_weak_ratio          - Weak vs strong within anchor
+#
+#   pfsp_num_tracked           - Opponents with enough data for PFSP
+#   pfsp_avg_winrate           - Average win rate across pool
+#   pfsp_std_winrate           - Std of win rates (diversity indicator)
+#   pfsp_min_winrate           - Hardest opponent win rate
+#   pfsp_max_winrate           - Easiest opponent win rate
+#
+#   current_opponent_idx       - Current pool opponent index
+#   current_opponent_episode   - Episode when current opponent was saved
+#
+# -----------------------------------------------------------------------------
+# DUAL EVALUATION (separate weak/strong eval)
+# -----------------------------------------------------------------------------
+# eval/
+#   weak_win_rate              - Win rate vs weak opponent
+#   weak_mean_reward           - Mean reward vs weak
+#   weak_wins/losses/draws     - Outcome counts vs weak
+#
+#   strong_win_rate            - Win rate vs strong opponent
+#   strong_mean_reward         - Mean reward vs strong
+#   strong_wins/losses/draws   - Outcome counts vs strong
+#
+#   combined_win_rate          - Average of weak and strong win rates
+#
+#   gif_weak                   - GIF vs weak opponent
+#   gif_strong                 - GIF vs strong opponent
+#
 # =============================================================================
 
 
@@ -322,6 +364,8 @@ def format_run_data(run, include_metrics=None, max_chars=100000, fraction=1.0, m
         'Learning Rates': ['lr_world', 'lr_actor', 'lr_critic'],
         'Entropy': ['entropy_scale'],
         'PBRS': ['use_pbrs', 'pbrs_scale', 'pbrs_w_chase', 'pbrs_w_attack'],
+        'Self-Play': ['self_play_start', 'self_play_pool_size', 'self_play_save_interval',
+                      'self_play_weak_ratio', 'use_pfsp', 'pfsp_mode'],
         'Architecture': ['recurrent_size', 'latent_length', 'latent_classes'],
         'Meta': ['seed', 'algorithm'],
     }
@@ -401,6 +445,7 @@ def format_run_data(run, include_metrics=None, max_chars=100000, fraction=1.0, m
         # Define display order
         group_order = [
             'stats', 'episode', 'time', 'eval',  # Progress
+            'selfplay',  # Self-play metrics
             'world',  # World model
             'behavior', 'values',  # Actor-critic
             'imagination',  # Imagination
@@ -408,6 +453,7 @@ def format_run_data(run, include_metrics=None, max_chars=100000, fraction=1.0, m
             'gradients',  # Gradients
             'sparse_signal',  # Sparse rewards
             'pbrs', 'reward_composition', 'reward_hacking',  # Reward analysis
+            'aux',  # Auxiliary tasks
         ]
 
         # Add any groups not in order

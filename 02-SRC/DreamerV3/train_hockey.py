@@ -21,10 +21,11 @@ import numpy as np
 import torch
 import wandb
 import hockey.hockey_env as h_env
-from hockey.hockey_env import BasicOpponent, Mode
+from hockey.hockey_env import Mode
 
 from dreamer import Dreamer
 from utils import loadConfig, seedEverything, ensureParentFolders, saveLossesToCSV, plotMetrics
+from opponents import FixedOpponent, SelfPlayManager
 
 
 def get_device():
@@ -39,9 +40,9 @@ def get_device():
 def create_opponent(opponent_type: str):
     """Create opponent based on type."""
     if opponent_type == "weak":
-        return BasicOpponent(weak=True)
+        return FixedOpponent(weak=True)
     elif opponent_type == "strong":
-        return BasicOpponent(weak=False)
+        return FixedOpponent(weak=False)
     else:
         raise ValueError(f"Unknown opponent type: {opponent_type}")
 
@@ -198,6 +199,62 @@ def save_gif_to_wandb(frames, results, step, opponent_name):
         print(f"GIF recording failed: {e}")
 
 
+def evaluate_against_opponent(env, agent, opponent, num_episodes, opponent_name):
+    """
+    Evaluate agent against a specific opponent.
+
+    Args:
+        env: Hockey environment
+        agent: DreamerV3 agent
+        opponent: Opponent to evaluate against
+        num_episodes: Number of episodes to run
+        opponent_name: Name for logging
+
+    Returns:
+        dict: Evaluation metrics
+    """
+    eval_rewards = []
+    eval_outcomes = {'win': 0, 'loss': 0, 'draw': 0}
+
+    for _ in range(num_episodes):
+        opponent.reset()  # Reset opponent state if any
+        reward, _, outcome, _, _ = run_episode(env, agent, opponent, training=False)
+        eval_rewards.append(reward)
+        eval_outcomes[outcome] += 1
+
+    win_rate = eval_outcomes['win'] / num_episodes
+    mean_reward = np.mean(eval_rewards)
+
+    return {
+        f'eval/{opponent_name}_win_rate': win_rate,
+        f'eval/{opponent_name}_mean_reward': mean_reward,
+        f'eval/{opponent_name}_wins': eval_outcomes['win'],
+        f'eval/{opponent_name}_losses': eval_outcomes['loss'],
+        f'eval/{opponent_name}_draws': eval_outcomes['draw'],
+    }
+
+
+def record_and_log_gif(env, agent, opponent, opponent_name, step, num_episodes, use_wandb):
+    """
+    Record GIF against opponent and log to W&B.
+
+    Args:
+        env: Hockey environment
+        agent: DreamerV3 agent
+        opponent: Opponent for GIF
+        opponent_name: Name for logging
+        step: Current gradient step
+        num_episodes: Episodes per GIF
+        use_wandb: Whether W&B is enabled
+    """
+    if not use_wandb:
+        return
+
+    opponent.reset()
+    frames, results = record_gif(env, agent, opponent, num_episodes=num_episodes)
+    save_gif_to_wandb(frames, results, step, opponent_name)
+
+
 def parse_args():
     """Parse command line arguments with all config overrides."""
     parser = argparse.ArgumentParser(description="DreamerV3 Hockey Training")
@@ -243,6 +300,8 @@ def parse_args():
     parser.add_argument("--discount", type=float, default=None, help="Discount factor gamma")
     parser.add_argument("--lambda_", type=float, default=None, help="Lambda for TD(lambda)")
     parser.add_argument("--entropy_scale", type=float, default=None, help="Entropy bonus scale")
+    parser.add_argument("--no_advantage_normalization", action="store_true",
+                        help="Disable advantage normalization (use raw advantages)")
     parser.add_argument("--free_nats", type=float, default=None, help="KL free nats threshold")
     parser.add_argument("--beta_prior", type=float, default=None, help="Prior KL weight")
     parser.add_argument("--beta_posterior", type=float, default=None, help="Posterior KL weight")
@@ -273,6 +332,21 @@ def parse_args():
 
     # Resume
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint path to resume from")
+
+    # Self-play settings
+    parser.add_argument("--self_play_start", type=int, default=None,
+                        help="Episode to activate self-play (default: disabled)")
+    parser.add_argument("--self_play_pool_size", type=int, default=10,
+                        help="Number of past checkpoints to keep in self-play pool")
+    parser.add_argument("--self_play_save_interval", type=int, default=500,
+                        help="Episodes between adding new opponents to pool")
+    parser.add_argument("--self_play_weak_ratio", type=float, default=0.3,
+                        help="Probability of training against anchor (weak/strong) vs pool")
+    parser.add_argument("--use_pfsp", action="store_true",
+                        help="Enable Prioritized Fictitious Self-Play opponent selection")
+    parser.add_argument("--pfsp_mode", type=str, default="variance",
+                        choices=["variance", "hard", "uniform"],
+                        help="PFSP mode: variance (50%% winrate), hard (lowest winrate)")
 
     return parser.parse_args()
 
@@ -332,6 +406,8 @@ def main():
         config.dreamer.lambda_ = args.lambda_
     if args.entropy_scale is not None:
         config.dreamer.entropyScale = args.entropy_scale
+    if args.no_advantage_normalization:
+        config.dreamer.useAdvantageNormalization = False
     if args.free_nats is not None:
         config.dreamer.freeNats = args.free_nats
     if args.beta_prior is not None:
@@ -418,6 +494,13 @@ def main():
                 "uniform_mix": config.dreamer.priorNet.uniformMix,
                 "use_auxiliary_tasks": config.get('useAuxiliaryTasks', True),
                 "gif_interval": config.gifInterval,
+                # Self-play settings
+                "self_play_start": args.self_play_start,
+                "self_play_pool_size": args.self_play_pool_size,
+                "self_play_save_interval": args.self_play_save_interval,
+                "self_play_weak_ratio": args.self_play_weak_ratio,
+                "use_pfsp": args.use_pfsp,
+                "pfsp_mode": args.pfsp_mode,
             }
         )
 
@@ -437,12 +520,42 @@ def main():
     print(f"Hockey environment: obs={observationSize}, action={actionSize}, mode={args.mode}")
     print(f"Action bounds: low={actionLow}, high={actionHigh}")
 
-    # Create opponent
+    # Create training opponent (initial)
     opponent = create_opponent(config.opponent)
-    print(f"Opponent: {config.opponent}")
+    print(f"Initial opponent: {config.opponent}")
+
+    # Create evaluation opponents (always have both for proper evaluation)
+    eval_opponent_weak = create_opponent("weak")
+    eval_opponent_strong = create_opponent("strong")
 
     # Create agent
     agent = Dreamer(observationSize, actionSize, actionLow, actionHigh, device, config.dreamer)
+
+    # Setup self-play manager (if enabled)
+    self_play_enabled = args.self_play_start is not None
+    self_play_manager = None
+
+    if self_play_enabled:
+        self_play_manager = SelfPlayManager(
+            pool_size=args.self_play_pool_size,
+            save_interval=args.self_play_save_interval,
+            weak_ratio=args.self_play_weak_ratio,
+            device=device,
+            use_pfsp=args.use_pfsp,
+            pfsp_mode=args.pfsp_mode,
+            agent_class=Dreamer,
+            obs_size=observationSize,
+            action_size=actionSize,
+            action_low=actionLow,
+            action_high=actionHigh,
+            config=config.dreamer,
+        )
+        print(f"\nSelf-play enabled:")
+        print(f"  Activation episode: {args.self_play_start}")
+        print(f"  Pool size: {args.self_play_pool_size}")
+        print(f"  Save interval: {args.self_play_save_interval}")
+        print(f"  Weak ratio: {args.self_play_weak_ratio}")
+        print(f"  PFSP: {args.use_pfsp} (mode: {args.pfsp_mode})")
 
     # Resume if requested
     if args.resume:
@@ -504,8 +617,39 @@ def main():
 
         # === Environment Interaction ===
         for _ in range(config.numInteractionEpisodes):
+            # === Self-Play Opponent Selection ===
+            current_opponent = opponent  # Default to initial opponent
+            current_opponent_type = config.opponent
+
+            if self_play_enabled and self_play_manager is not None:
+                # Check for activation
+                if self_play_manager.should_activate(agent.totalEpisodes, args.self_play_start):
+                    selfplay_dir = os.path.join(config.folderNames.checkpointsFolder, runName)
+                    self_play_manager.activate(agent.totalEpisodes, selfplay_dir, agent)
+
+                # Select opponent
+                if self_play_manager.active:
+                    current_opponent_type = self_play_manager.select_opponent()
+
+                    if current_opponent_type == 'weak':
+                        current_opponent = eval_opponent_weak
+                    elif current_opponent_type == 'strong':
+                        current_opponent = eval_opponent_strong
+                    elif current_opponent_type == 'self-play':
+                        sp_opponent = self_play_manager.get_opponent()
+                        if sp_opponent is not None:
+                            current_opponent = sp_opponent
+                        else:
+                            current_opponent = eval_opponent_weak
+                            current_opponent_type = 'weak'
+
+                    # Reset opponent state for new episode
+                    self_play_manager.reset_opponent()
+
+            # Run episode
+            current_opponent.reset()
             reward, steps, outcome, transitions, _ = run_episode(
-                env, agent, opponent, training=True
+                env, agent, current_opponent, training=True
             )
 
             for trans in transitions:
@@ -513,6 +657,17 @@ def main():
 
             agent.totalEnvSteps += steps
             agent.totalEpisodes += 1
+
+            # Record result for PFSP
+            if self_play_enabled and self_play_manager is not None and self_play_manager.active:
+                winner = 1 if outcome == 'win' else (-1 if outcome == 'loss' else 0)
+                self_play_manager.record_result(winner)
+
+                # Update pool periodically
+                self_play_manager.update_pool(
+                    agent.totalEpisodes, agent,
+                    os.path.join(config.folderNames.checkpointsFolder, runName)
+                )
 
             # Track episode metrics
             episode_rewards.append(reward)
@@ -580,6 +735,10 @@ def main():
                 log_dict.update(worldModelMetrics)
                 log_dict.update(behaviorMetrics)
 
+                # Add self-play metrics
+                if self_play_enabled and self_play_manager is not None:
+                    log_dict.update(self_play_manager.get_stats())
+
                 wandb.log(log_dict, step=agent.totalGradientSteps)
 
         # === Checkpointing ===
@@ -592,36 +751,47 @@ def main():
             if use_wandb:
                 wandb.save(checkpoint_path + '.pth')
 
-        # === Evaluation ===
+        # === Evaluation (against both weak and strong) ===
         if agent.totalGradientSteps % config.get('evalInterval', 1000) == 0:
-            eval_rewards = []
-            eval_outcomes = {'win': 0, 'loss': 0, 'draw': 0}
+            eval_metrics = {}
 
-            for _ in range(config.numEvaluationEpisodes):
-                reward, _, outcome, _, _ = run_episode(
-                    env, agent, opponent, training=False
-                )
-                eval_rewards.append(reward)
-                eval_outcomes[outcome] += 1
+            # Evaluate against weak opponent
+            weak_metrics = evaluate_against_opponent(
+                env, agent, eval_opponent_weak,
+                config.numEvaluationEpisodes, "weak"
+            )
+            eval_metrics.update(weak_metrics)
 
-            eval_win_rate = eval_outcomes['win'] / config.numEvaluationEpisodes
-            eval_mean_reward = np.mean(eval_rewards)
+            # Evaluate against strong opponent
+            strong_metrics = evaluate_against_opponent(
+                env, agent, eval_opponent_strong,
+                config.numEvaluationEpisodes, "strong"
+            )
+            eval_metrics.update(strong_metrics)
 
-            print(f"  EVAL: Win={eval_win_rate:.1%}, R={eval_mean_reward:.2f}")
+            # Compute combined metrics
+            weak_wr = weak_metrics['eval/weak_win_rate']
+            strong_wr = strong_metrics['eval/strong_win_rate']
+            eval_metrics['eval/combined_win_rate'] = (weak_wr + strong_wr) / 2
+
+            print(f"  EVAL: Weak={weak_wr:.1%}, Strong={strong_wr:.1%}, Combined={(weak_wr + strong_wr)/2:.1%}")
 
             if use_wandb:
-                wandb.log({
-                    "eval/win_rate": eval_win_rate,
-                    "eval/mean_reward": eval_mean_reward,
-                    "eval/wins": eval_outcomes['win'],
-                    "eval/losses": eval_outcomes['loss'],
-                    "eval/draws": eval_outcomes['draw'],
-                }, step=agent.totalGradientSteps)
+                wandb.log(eval_metrics, step=agent.totalGradientSteps)
 
-        # === GIF Recording ===
+        # === GIF Recording (against both weak and strong) ===
         if config.gifInterval > 0 and agent.totalGradientSteps % config.gifInterval == 0 and use_wandb:
-            frames, results = record_gif(env, agent, opponent, num_episodes=config.gifEpisodes)
-            save_gif_to_wandb(frames, results, agent.totalGradientSteps, config.opponent)
+            # Record GIF against weak opponent
+            record_and_log_gif(
+                env, agent, eval_opponent_weak, "weak",
+                agent.totalGradientSteps, config.gifEpisodes, use_wandb
+            )
+
+            # Record GIF against strong opponent
+            record_and_log_gif(
+                env, agent, eval_opponent_strong, "strong",
+                agent.totalGradientSteps, config.gifEpisodes, use_wandb
+            )
 
         # === Save Metrics ===
         if config.saveMetrics and iteration % 100 == 0:

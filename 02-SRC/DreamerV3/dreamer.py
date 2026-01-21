@@ -520,9 +520,15 @@ class Dreamer:
         # Compute lambda returns
         lambdaValues = computeLambdaValues(predictedRewards, values, continues, self.config.lambda_)
 
-        # Normalize advantages
-        _, inverseScale = self.valueMoments(lambdaValues)
-        advantages = (lambdaValues - values[:, :-1]) / inverseScale
+        # Normalize advantages (can be disabled via config)
+        useAdvantageNormalization = getattr(self.config, 'useAdvantageNormalization', True)
+        if useAdvantageNormalization:
+            _, inverseScale = self.valueMoments(lambdaValues)
+            advantages = (lambdaValues - values[:, :-1]) / inverseScale
+        else:
+            # No normalization - raw advantages
+            self.valueMoments(lambdaValues)  # Still update moments for logging
+            advantages = lambdaValues - values[:, :-1]
 
         # === Actor Loss ===
         actorLoss = -torch.mean(advantages.detach() * logprobs + self.config.entropyScale * entropies)
@@ -757,3 +763,71 @@ class Dreamer:
                 self.puckGoalDistPredictor.load_state_dict(checkpoint['puckGoalDistPredictor'])
             if 'shotQualityPredictor' in checkpoint:
                 self.shotQualityPredictor.load_state_dict(checkpoint['shotQualityPredictor'])
+
+    def state(self):
+        """
+        Get lightweight agent state for self-play opponent pool.
+
+        Returns only network weights (no optimizers, no buffer) for efficient
+        storage and loading of self-play opponents.
+
+        Returns:
+            dict: State dict that can be used with restore_state()
+        """
+        state = {
+            'encoder': self.encoder.state_dict(),
+            'decoder': self.decoder.state_dict(),
+            'recurrentModel': self.recurrentModel.state_dict(),
+            'priorNet': self.priorNet.state_dict(),
+            'posteriorNet': self.posteriorNet.state_dict(),
+            'rewardPredictor': self.rewardPredictor.state_dict(),
+            'actor': self.actor.state_dict(),
+            'critic': self.critic.state_dict(),
+            'totalEpisodes': self.totalEpisodes,
+            'totalEnvSteps': self.totalEnvSteps,
+            'totalGradientSteps': self.totalGradientSteps,
+        }
+
+        if self.config.useContinuationPrediction:
+            state['continuePredictor'] = self.continuePredictor.state_dict()
+
+        if self.useAuxiliaryTasks:
+            state['goalPredictor'] = self.goalPredictor.state_dict()
+            state['puckGoalDistPredictor'] = self.puckGoalDistPredictor.state_dict()
+            state['shotQualityPredictor'] = self.shotQualityPredictor.state_dict()
+
+        return state
+
+    def restore_state(self, state):
+        """
+        Restore agent state from state dict.
+
+        Used for loading self-play opponents from pool. Does not restore
+        optimizers or buffer (opponents don't train).
+
+        Args:
+            state: State dict from state() method
+        """
+        self.encoder.load_state_dict(state['encoder'])
+        self.decoder.load_state_dict(state['decoder'])
+        self.recurrentModel.load_state_dict(state['recurrentModel'])
+        self.priorNet.load_state_dict(state['priorNet'])
+        self.posteriorNet.load_state_dict(state['posteriorNet'])
+        self.rewardPredictor.load_state_dict(state['rewardPredictor'])
+        self.actor.load_state_dict(state['actor'])
+        self.critic.load_state_dict(state['critic'])
+
+        self.totalEpisodes = state.get('totalEpisodes', 0)
+        self.totalEnvSteps = state.get('totalEnvSteps', 0)
+        self.totalGradientSteps = state.get('totalGradientSteps', 0)
+
+        if self.config.useContinuationPrediction and 'continuePredictor' in state:
+            self.continuePredictor.load_state_dict(state['continuePredictor'])
+
+        if self.useAuxiliaryTasks:
+            if 'goalPredictor' in state:
+                self.goalPredictor.load_state_dict(state['goalPredictor'])
+            if 'puckGoalDistPredictor' in state:
+                self.puckGoalDistPredictor.load_state_dict(state['puckGoalDistPredictor'])
+            if 'shotQualityPredictor' in state:
+                self.shotQualityPredictor.load_state_dict(state['shotQualityPredictor'])
