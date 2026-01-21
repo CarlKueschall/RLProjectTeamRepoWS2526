@@ -261,10 +261,11 @@ dreamer:
     # Critical for preventing policy collapse (entropy -> 0).
     # -------------------------------------------------------------------------
 
-    entropyScale: 0.003          # Entropy bonus coefficient
+    entropyScale: 0.0003         # Entropy bonus coefficient (DreamerV3 paper default)
                                  # Higher = more exploration, less exploitation
                                  # If entropy collapses to 0, increase this
-                                 # Paper uses 3e-4, we use 3e-3 (10x higher for stability)
+                                 # IMPORTANT: Must match paper (3e-4) - higher values cause
+                                 # entropy term to dominate advantages, preventing learning
 
     # -------------------------------------------------------------------------
     # REPLAY BUFFER

@@ -43,7 +43,7 @@ singularity exec --nv ~/containers/hockey.sif python3 train_hockey.py \
     --device cuda \
     \
     --gradient_steps 1000000000 \
-    --replay_ratio 4 \
+    --replay_ratio 16 \
     --warmup_episodes 500 \
     --interaction_episodes 1 \
     \
@@ -63,7 +63,7 @@ singularity exec --nv ~/containers/hockey.sif python3 train_hockey.py \
     \
     --discount 0.997 \
     --lambda_ 0.99 \
-    --entropy_scale 0.003 \
+    --entropy_scale 0.0003 \
     --free_nats 1.0 \
     --gradient_clip 100 \
     \

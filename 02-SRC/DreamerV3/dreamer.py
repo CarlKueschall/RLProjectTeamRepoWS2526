@@ -72,8 +72,10 @@ class Dreamer:
         self.actor = Actor(self.fullStateSize, actionSize, actionLow, actionHigh, device, config.actor).to(device)
         self.critic = Critic(self.fullStateSize, config.critic).to(device)
 
-        # EMA (slow) critic for stable bootstrap targets (DreamerV3 robustness technique)
-        # Uses exponential moving average of critic weights to reduce value estimation variance
+        # EMA (slow) critic for regularization (DreamerV3 robustness technique)
+        # The slow critic is a REGULARIZER, not a target network for computing lambda returns.
+        # It prevents the critic from changing too rapidly (bootstrap divergence prevention).
+        # Lambda returns use the MAIN critic; the slow critic provides implicit stability.
         self.slowCritic = Critic(self.fullStateSize, config.critic).to(device)
         self.slowCritic.load_state_dict(self.critic.state_dict())  # Initialize with same weights
         for param in self.slowCritic.parameters():
@@ -522,14 +524,9 @@ class Dreamer:
         rewardLogits = rewardLogits.view(fullStates.shape[0], -1, self.twoHotBins)  # (B, H-1, 255)
         predictedRewards = self.twoHot.decode(rewardLogits)  # (B, H-1)
 
-        # Use SLOW critic for bootstrap targets (DreamerV3 robustness technique)
-        # The EMA critic provides stable value estimates for computing lambda returns
-        with torch.no_grad():
-            slowCriticLogits = self.slowCritic(fullStates.reshape(-1, self.fullStateSize))
-            slowCriticLogits = slowCriticLogits.view(fullStates.shape[0], -1, self.twoHotBins)  # (B, H, 255)
-            slowValues = self.twoHot.decode(slowCriticLogits)  # (B, H)
-
-        # Main critic values (for advantage baseline)
+        # Get critic values for lambda returns and advantage baseline
+        # NOTE: Lambda returns use the MAIN critic, not the slow critic
+        # The slow critic is a REGULARIZER (prevents rapid critic changes), not a target network
         criticLogits = self.critic(fullStates.reshape(-1, self.fullStateSize))
         criticLogits = criticLogits.view(fullStates.shape[0], -1, self.twoHotBins)  # (B, H, 255)
         values = self.twoHot.decode(criticLogits)  # (B, H)
@@ -539,8 +536,8 @@ class Dreamer:
         else:
             continues = torch.full_like(predictedRewards, self.config.discount)
 
-        # Compute lambda returns using SLOW critic bootstrap (stable targets)
-        lambdaValues = computeLambdaValues(predictedRewards, slowValues, continues, self.config.lambda_)
+        # Compute lambda returns using main critic values for bootstrap
+        lambdaValues = computeLambdaValues(predictedRewards, values, continues, self.config.lambda_)
 
         # Normalize advantages using percentile-based scaling (DreamerV3 robustness technique)
         # Critical for sparse rewards - prevents advantage collapse when reward std ≈ 0
@@ -562,12 +559,21 @@ class Dreamer:
         # Two-hot cross-entropy loss with lambda returns as targets
         criticLoss = self.twoHot.loss(criticLogitsForLoss, lambdaValues.detach()).mean()
 
+        # Compute slow critic values for monitoring (track critic stability)
+        with torch.no_grad():
+            slowCriticLogits = self.slowCritic(fullStates[:, :-1].detach().reshape(-1, self.fullStateSize))
+            slowCriticLogits = slowCriticLogits.view(fullStates.shape[0], -1, self.twoHotBins)
+            slowValues = self.twoHot.decode(slowCriticLogits)  # (B, H-1)
+            # How much has the critic diverged from its slow EMA?
+            criticSlowDiff = (values[:, :-1].detach() - slowValues).abs().mean()
+
         self.criticOptimizer.zero_grad()
         criticLoss.backward()
         criticGradNorm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.config.gradientClip, norm_type=self.config.gradientNormType)
         self.criticOptimizer.step()
 
         # Update slow critic via EMA (after critic update)
+        # This provides implicit regularization by having a slowly-moving reference
         self._updateSlowCritic()
 
         # === Compute Detailed Metrics ===
@@ -672,6 +678,20 @@ class Dreamer:
             # Gradient norms
             "gradients/actor_norm": actorGradNorm.item(),
             "gradients/critic_norm": criticGradNorm.item(),
+
+            # Critic stability (EMA regularization monitoring)
+            "values/critic_slow_diff": criticSlowDiff.item(),  # How much main critic differs from EMA
+
+            # === ENTROPY vs ADVANTAGE BALANCE (Critical diagnostic) ===
+            # If entropy_contribution >> advantage_contribution, entropy dominates learning
+            # and policy will stay random. The ratio should decrease over training.
+            "diagnostics/advantage_contribution": (advantages.abs() * logprobs.abs()).mean().item(),
+            "diagnostics/entropy_contribution": (self.config.entropyScale * entropies).mean().item(),
+            "diagnostics/entropy_advantage_ratio": (
+                (self.config.entropyScale * entropies).mean() /
+                (advantages.abs() * logprobs.abs()).mean().clamp(min=1e-8)
+            ).item(),  # Should decrease from ~1.0 to ~0.01 over training
+            "diagnostics/return_range_S": inverseScale.item(),  # Same as norm_scale, explicit name
         }
 
         return metrics
