@@ -300,6 +300,7 @@ def parse_args():
     parser.add_argument("--discount", type=float, default=None, help="Discount factor gamma")
     parser.add_argument("--lambda_", type=float, default=None, help="Lambda for TD(lambda)")
     parser.add_argument("--entropy_scale", type=float, default=None, help="Entropy bonus scale")
+    parser.add_argument("--mean_reg_scale", type=float, default=None, help="L2 regularization on actor means (prevents tanh saturation drift)")
     parser.add_argument("--free_nats", type=float, default=None, help="KL free nats threshold")
     parser.add_argument("--beta_prior", type=float, default=None, help="Prior KL weight")
     parser.add_argument("--beta_posterior", type=float, default=None, help="Posterior KL weight")
@@ -334,6 +335,12 @@ def parse_args():
 
     # Resume
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint path to resume from")
+
+    # Opponent mixing (pre-self-play)
+    parser.add_argument("--mixed_opponents", action="store_true",
+                        help="Alternate between weak and strong opponents each episode (prevents overfitting to one opponent)")
+    parser.add_argument("--mixed_weak_prob", type=float, default=0.5,
+                        help="Probability of weak opponent per episode when --mixed_opponents is set (default: 0.5)")
 
     # Self-play settings
     parser.add_argument("--self_play_start", type=int, default=None,
@@ -414,6 +421,8 @@ def main():
         config.dreamer.lambda_ = args.lambda_
     if args.entropy_scale is not None:
         config.dreamer.entropyScale = args.entropy_scale
+    if args.mean_reg_scale is not None:
+        config.dreamer.meanRegScale = args.mean_reg_scale
     if args.free_nats is not None:
         config.dreamer.freeNats = args.free_nats
     if args.beta_prior is not None:
@@ -506,11 +515,15 @@ def main():
                 "discount": config.dreamer.discount,
                 "lambda": config.dreamer.lambda_,
                 "entropy_scale": config.dreamer.entropyScale,
+                "mean_reg_scale": config.dreamer.meanRegScale,
                 "free_nats": config.dreamer.freeNats,
                 "buffer_capacity": config.dreamer.buffer.capacity,
                 "uniform_mix": config.dreamer.priorNet.uniformMix,
                 "use_auxiliary_tasks": config.get('useAuxiliaryTasks', True),
                 "gif_interval": config.gifInterval,
+                # Mixed opponents
+                "mixed_opponents": args.mixed_opponents,
+                "mixed_weak_prob": args.mixed_weak_prob,
                 # Self-play settings
                 "self_play_start": args.self_play_start,
                 "self_play_pool_size": args.self_play_pool_size,
@@ -589,15 +602,26 @@ def main():
     print(f"Batch: {config.dreamer.batchSize} x {config.dreamer.batchLength}")
     print(f"Imagination horizon: {config.dreamer.imaginationHorizon}")
     print(f"LR: world={config.dreamer.worldModelLR}, actor={config.dreamer.actorLR}, critic={config.dreamer.criticLR}")
-    print(f"Entropy scale: {config.dreamer.entropyScale}")
+    print(f"Entropy scale: {config.dreamer.entropyScale}, Mean reg: {config.dreamer.meanRegScale}")
     print(f"GIF interval: {config.gifInterval}")
     print()
 
     # === Warmup Phase ===
+    use_mixed = args.mixed_opponents
+    mixed_weak_prob = args.mixed_weak_prob
+    if use_mixed:
+        print(f"Mixed opponents enabled: weak_prob={mixed_weak_prob:.0%}")
+
     print(f"=== Warmup: {config.episodesBeforeStart} episodes ===")
     for ep in range(config.episodesBeforeStart):
+        # Select opponent for warmup (alternate if mixed)
+        if use_mixed:
+            warmup_opponent = eval_opponent_weak if np.random.random() < mixed_weak_prob else eval_opponent_strong
+        else:
+            warmup_opponent = opponent
+        warmup_opponent.reset()
         _, steps, outcome, transitions, _ = run_episode(
-            env, agent, opponent, training=True, seed=config.seed + ep
+            env, agent, warmup_opponent, training=True, seed=config.seed + ep
         )
         for trans in transitions:
             agent.buffer.add(*trans)
@@ -606,6 +630,21 @@ def main():
 
     print(f"Buffer size after warmup: {len(agent.buffer)}")
 
+    # Ensure buffer has enough data to sample (critical for finetuning with 0 warmup)
+    min_required = config.dreamer.batchSize * config.dreamer.batchLength
+    if len(agent.buffer) < min_required:
+        needed = min_required - len(agent.buffer)
+        print(f"Buffer has {len(agent.buffer)} transitions, need {min_required}. Collecting with current policy...")
+        while len(agent.buffer) < min_required:
+            _, steps, outcome, transitions, _ = run_episode(
+                env, agent, opponent, training=True, seed=config.seed + agent.totalEpisodes
+            )
+            for trans in transitions:
+                agent.buffer.add(*trans)
+            agent.totalEpisodes += 1
+            print(f"  Collected episode: {steps} steps, {outcome} (buffer: {len(agent.buffer)}/{min_required})")
+        print(f"Buffer ready: {len(agent.buffer)} transitions")
+
     # === Main Training Loop ===
     print(f"\n=== Training: {config.gradientSteps} gradient steps ===")
 
@@ -613,6 +652,7 @@ def main():
     episode_rewards = []
     episode_lengths = []
     episode_outcomes = {'win': 0, 'loss': 0, 'draw': 0}
+    opponent_type_counts = {'weak': 0, 'strong': 0, 'self-play': 0}
     recent_wins = []
     recent_lengths = []
     start_time = time.time()
@@ -634,7 +674,7 @@ def main():
 
         # === Environment Interaction ===
         for _ in range(config.numInteractionEpisodes):
-            # === Self-Play Opponent Selection ===
+            # === Opponent Selection ===
             current_opponent = opponent  # Default to initial opponent
             current_opponent_type = config.opponent
 
@@ -663,6 +703,16 @@ def main():
                     # Reset opponent state for new episode
                     self_play_manager.reset_opponent()
 
+            # Mixed opponents (before self-play activates, or if no self-play)
+            if use_mixed and current_opponent_type == config.opponent:
+                # Self-play not active yet (or disabled) — use mixed opponents
+                if np.random.random() < mixed_weak_prob:
+                    current_opponent = eval_opponent_weak
+                    current_opponent_type = 'weak'
+                else:
+                    current_opponent = eval_opponent_strong
+                    current_opponent_type = 'strong'
+
             # Run episode
             current_opponent.reset()
             reward, steps, outcome, transitions, _ = run_episode(
@@ -690,6 +740,8 @@ def main():
             episode_rewards.append(reward)
             episode_lengths.append(steps)
             episode_outcomes[outcome] += 1
+            if current_opponent_type in opponent_type_counts:
+                opponent_type_counts[current_opponent_type] += 1
 
             # Rolling windows for recent stats
             recent_wins.append(1 if outcome == 'win' else 0)
@@ -730,6 +782,9 @@ def main():
                     "stats/losses": episode_outcomes['loss'],
                     "stats/draws": episode_outcomes['draw'],
                     "stats/buffer_size": len(agent.buffer),
+                    "stats/opponent_weak_count": opponent_type_counts['weak'],
+                    "stats/opponent_strong_count": opponent_type_counts['strong'],
+                    "stats/opponent_selfplay_count": opponent_type_counts['self-play'],
 
                     # Episode-level stats
                     "episode/length_mean": mean_length,

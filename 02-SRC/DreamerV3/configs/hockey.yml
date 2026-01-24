@@ -110,9 +110,14 @@ auxTaskScale: 1.0                # Weight multiplier for auxiliary losses
                                  # 1.0 = equal weight to main world model losses
                                  # Reduce if auxiliary tasks dominate training
 
-goalPredictionHorizon: 15        # Look-ahead window for goal prediction task
+goalPredictionHorizon: 25        # Look-ahead window for goal prediction task
                                  # "Will a goal happen in next K steps?"
-                                 # 15 steps ≈ 1-2 seconds of gameplay
+                                 # 25 steps ≈ 2-3 seconds of gameplay
+
+goalRewardThreshold: 1.0         # Reward magnitude that counts as "goal event"
+                                 # Hockey rewards are ±2.5 for goals
+                                 # With DreamSmooth (alpha=0.5), smoothed peak ≈ 1.25
+                                 # Threshold must be < 2.5 to detect goals!
 
 auxHiddenSize: 128               # Hidden layer size for auxiliary task heads
                                  # Smaller than main networks (256) since simpler tasks
@@ -271,6 +276,13 @@ dreamer:
                                  # If entropy collapses to 0, increase this
                                  # IMPORTANT: Must match paper (3e-4) - higher values cause
                                  # entropy term to dominate advantages, preventing learning
+
+    meanRegScale: 0.01           # L2 regularization on actor pre-squash means
+                                 # Prevents means from drifting into tanh saturation
+                                 # where the Jacobian correction creates perverse incentives.
+                                 # Higher = stronger pull toward mean=0, less directional bias
+                                 # Lower = allows more directional specialization but risks drift
+                                 # Suggested ablation values: 0.001, 0.01, 0.05
 
     # -------------------------------------------------------------------------
     # REPLAY BUFFER

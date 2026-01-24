@@ -277,17 +277,18 @@ Keep-mode affects observation dimension (OFF=16, ON=18). The training code detec
 
 **Entropy scale (η = 3e-4) is FIXED** - no annealing, no domain-specific tuning. Return normalization handles domain variation.
 
-**Expected entropy values for 4-dim continuous actions**:
+**Expected entropy values for 4-dim continuous actions** (std bounds: [0.368, 1.649]):
 | Training Phase | Entropy Range | Notes |
 |----------------|---------------|-------|
-| Early | +3 to +8 | High exploration |
-| Mid | +1 to +3 | Learning proceeds |
-| Converged | +0.5 to +1.5 | Focused but stochastic |
+| Early | +5 to +7.7 | High exploration (std near max 1.649) |
+| Mid | +3 to +5 | Learning proceeds |
+| Converged | +1.7 to +3 | Focused but stochastic |
 | **Negative** | **BUG!** | Fix: ensure σ_min > 0.242 |
 
 **Red flags**:
 - Entropy < 0: Policy std collapsed too low (bug in logStd bounds)
-- Entropy stuck at max: No learning signal (check advantages, world model)
+- Entropy stuck at 7.7 (max): No learning signal (check advantages, world model)
+- Entropy > 8: IMPOSSIBLE with current bounds, indicates code bug
 - Return range S always at floor (1.0): Reward signal weak or pathological
 
 **Key insight**: Entropy-advantage balance evolves AUTOMATICALLY through percentile-based return normalization. Do NOT manually target specific ratios.

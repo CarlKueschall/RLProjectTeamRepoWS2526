@@ -95,6 +95,7 @@ class Dreamer:
         self.useAuxiliaryTasks = getattr(config, 'useAuxiliaryTasks', True)
         self.auxTaskScale = getattr(config, 'auxTaskScale', 1.0)
         self.goalPredictionHorizon = getattr(config, 'goalPredictionHorizon', 15)  # Look ahead K steps
+        self.goalRewardThreshold = getattr(config, 'goalRewardThreshold', 1.0)  # Reward magnitude that indicates a goal
 
         if self.useAuxiliaryTasks:
             auxHiddenSize = getattr(config, 'auxHiddenSize', 128)
@@ -284,7 +285,7 @@ class Dreamer:
             for t in range(rewards_for_goal.shape[1]):
                 endIdx = min(t + goalHorizon, rewards_for_goal.shape[1])
                 futureRewards = rewards_for_goal[:, t:endIdx]
-                goalTargets[:, t] = (futureRewards.abs() > 5.0).any(dim=1).float()
+                goalTargets[:, t] = (futureRewards.abs() > self.goalRewardThreshold).any(dim=1).float()
 
             # Predict from latent states
             goalLogits = self.goalPredictor(fullStates.view(-1, self.fullStateSize))
@@ -499,11 +500,12 @@ class Dreamer:
         h, z = torch.split(fullState, (self.recurrentSize, self.latentSize), dim=-1)
 
         # Imagine trajectories
-        fullStates, logprobs, entropies = [], [], []
+        fullStates, logprobs, entropies, actorMeans = [], [], [], []
 
         for _ in range(self.config.imaginationHorizon):
             # Get action from actor
-            action, logprob, entropy = self.actor(fullState.detach(), training=True)
+            action, logprob, entropy, actorMean = self.actor(fullState.detach(), training=True)
+            actorMeans.append(actorMean)
 
             # Step world model (using prior - no observation in imagination)
             h = self.recurrentModel(h, z, action)
@@ -545,7 +547,13 @@ class Dreamer:
         advantages = (lambdaValues - values[:, :-1]) / inverseScale
 
         # === Actor Loss ===
-        actorLoss = -torch.mean(advantages.detach() * logprobs + self.config.entropyScale * entropies)
+        # Mean regularization: prevent actor means from drifting into tanh saturation.
+        # Without this, the Jacobian correction creates a gradient toward |mean|→∞,
+        # causing tanh to saturate and killing useful gradients.
+        allMeans = torch.stack(actorMeans[1:], dim=1)  # (B, H-1, actionDim)
+        meanRegScale = getattr(self.config, 'meanRegScale', 0.01)
+        meanRegLoss = meanRegScale * (allMeans.pow(2)).mean()
+        actorLoss = -torch.mean(advantages.detach() * logprobs + self.config.entropyScale * entropies) + meanRegLoss
 
         self.actorOptimizer.zero_grad()
         actorLoss.backward()
@@ -587,7 +595,7 @@ class Dreamer:
             sampleState = fullState[:256]  # Sample subset to avoid memory issues
             h_sample, z_sample = torch.split(sampleState, (self.recurrentSize, self.latentSize), dim=-1)
             for _ in range(min(5, self.config.imaginationHorizon)):  # Just a few steps
-                action, _, _ = self.actor(sampleState, training=True)
+                action, _, _, _ = self.actor(sampleState, training=True)
                 sampleActions.append(action)
                 h_sample = self.recurrentModel(h_sample, z_sample, action)
                 z_sample, _ = self.priorNet(h_sample)
@@ -608,6 +616,10 @@ class Dreamer:
             # Log probabilities
             "behavior/logprobs_mean": logprobs.mean().item(),
             "behavior/logprobs_std": logprobs.std().item(),
+
+            # Actor mean regularization (prevents tanh saturation drift)
+            "behavior/mean_reg_loss": meanRegLoss.item(),
+            "behavior/actor_mean_abs": allMeans.abs().mean().item(),
 
             # Advantages (policy gradient signal strength)
             "behavior/advantages_mean": advantages.mean().item(),

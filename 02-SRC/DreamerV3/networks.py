@@ -186,12 +186,12 @@ class Actor(nn.Module):
         self.register_buffer("actionBias", (torch.tensor(actionHigh, device=device) + torch.tensor(actionLow, device=device)) / 2.0)
 
     def forward(self, x, training=False):
-        # logStdMin=-0.5 gives std_min=0.606, ensuring entropy stays POSITIVE
-        # Gaussian entropy = 0.5*ln(2*pi*e*σ²) is negative when σ < 0.242
-        # With σ_min=0.606, minimum entropy per dim ≈ +0.5 (total ≈ +2 for 4-dim)
-        # Old value of -2 (σ=0.135) caused negative entropy which ENCOURAGED
-        # determinism instead of exploration - a critical bug!
-        logStdMin, logStdMax = -0.5, 2
+        # std bounds: exp(-1.0)=0.368 to exp(0.5)=1.649
+        # - std_min=0.368 > 0.242 threshold, so entropy stays POSITIVE (≈1.7 nats total)
+        # - std_max=1.649 keeps samples in tanh linear region: P(|N(0,1.65)|>2)≈22%
+        # Previously logStdMax=2 gave std_max=7.39, causing tanh saturation (abs_mean=0.98)
+        # and killing actor gradients entirely (tanh'(x)≈0 for |x|>2)
+        logStdMin, logStdMax = -1.0, 0.5
         mean, logStd = self.network(x).chunk(2, dim=-1)
         # Bound log_std to [logStdMin, logStdMax]
         logStd = logStdMin + (logStdMax - logStdMin) / 2 * (torch.tanh(logStd) + 1)
@@ -204,10 +204,13 @@ class Actor(nn.Module):
 
         if training:
             logprobs = distribution.log_prob(sample)
-            # Jacobian correction for tanh
-            logprobs -= torch.log(self.actionScale * (1 - sampleTanh.pow(2)) + 1e-6)
+            # Jacobian correction for tanh squashing.
+            # Clamp (1-tanh²) to min=0.01 to prevent logprob explosion when saturated.
+            # Without clamping, tanh→±1 makes log(1-tanh²)→-∞, giving +∞ logprobs
+            # which creates a perverse gradient toward MORE saturation.
+            logprobs -= torch.log(self.actionScale * (1 - sampleTanh.pow(2)).clamp(min=0.01) + 1e-6)
             entropy = distribution.entropy()
-            return action, logprobs.sum(-1), entropy.sum(-1)
+            return action, logprobs.sum(-1), entropy.sum(-1), mean
         else:
             return action
 
