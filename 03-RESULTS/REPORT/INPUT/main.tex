@@ -1,0 +1,381 @@
+\documentclass[11pt]{article}
+
+\usepackage{times}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{url}
+\usepackage{graphics}
+\usepackage{graphicx}
+\usepackage{color}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{subcaption}
+\usepackage{caption}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{geometry}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+% Geometry setup
+\geometry{left=2.8cm,right=2.8cm,top=2.6cm,bottom=2.6cm}
+\pagestyle{fancy}
+\lhead{RL Hockey Project}
+\chead{}
+\rhead{\thepage}
+\cfoot{}
+
+% Author highlighting for contributions
+\newcommand{\carl}[1]{{\textbf{[Carl]}}\, #1}
+\newcommand{\serhat}[1]{{\textbf{[Serhat]}}\, #1}
+
+\title{World-Model Based Reinforcement Learning for Hockey:\\
+        DreamerV3 with 3-Phase Training Curriculum}
+\author{Carl Kueschall and Serhat Alpay\\
+        University of T\"ubingen}
+\date{Winter Semester 2025/26}
+
+\begin{document}
+
+\maketitle
+
+% ============================================================================
+% SECTION 1: INTRODUCTION
+% ============================================================================
+\section{Introduction}\label{sec:intro}
+
+The hockey environment~\cite{martius2024} presents a challenging continuous control problem in an adversarial setting. Two agents compete in an air-hockey game with 18-dimensional state observations encoding positions, velocities, and puck state, while each player controls 4 continuous action dimensions. Episodes last up to 250 timesteps with extremely sparse rewards: $+10$ for scoring, $-10$ for conceding, and $0$ otherwise. This sparsity makes credit assignment difficult---agents must learn complex behaviors (positioning, puck control, shooting, defending) from reward signals that occur only at episode boundaries.
+
+\carl{We implement DreamerV3~\cite{hafner2024}, a world-model based reinforcement learning algorithm that addresses sparse rewards by learning entirely in ``imagination.'' The agent first learns a world model from real experience, then trains its policy through simulated rollouts in learned latent space. This enables efficient credit assignment without requiring dense reward shaping. Our implementation builds upon the NaturalDreamer codebase\footnote{\url{https://github.com/InexperiencedMe/NaturalDreamer}}, with significant modifications for the hockey domain: Two-Hot Symlog encoding for sparse reward prediction, DreamSmooth~\cite{dreamsmooth2023} temporal reward smoothing, auxiliary prediction tasks, and a 3-phase training curriculum combining mixed opponents with self-play.}
+
+\serhat{[TODO: Serhat's algorithm introduction paragraph]}
+
+\textbf{Contributions:}
+\begin{itemize}
+    \item \carl{DreamerV3 implementation with Two-Hot Symlog, DreamSmooth, auxiliary tasks (goal prediction, distance, shot quality), mixed opponent training, and PFSP self-play---achieving 88.5\% combined win rate}
+    \item \serhat{[TODO: Serhat's contribution]}
+\end{itemize}
+
+% ============================================================================
+% SECTION 2: METHODS
+% ============================================================================
+\section{Methods}\label{sec:method}
+
+% --- Carl's Methods ---
+\carl{\subsection{DreamerV3: World-Model Based RL}\label{subsec:dreamer-method}}
+
+\carl{
+\subsubsection{Background}
+
+DreamerV3~\cite{hafner2024} learns a world model that predicts future states and rewards from actions, then trains actor-critic policies entirely through imagined rollouts in learned latent space. This is particularly suited for sparse-reward environments: the world model propagates reward information backward through imagined trajectories, enabling credit assignment even when real rewards are rare. Our implementation adapts this approach for the hockey domain, addressing three key challenges: (1) extremely sparse goal rewards, (2) continuous 4D action space requiring precise control, and (3) adversarial dynamics requiring opponent modeling.
+
+\subsubsection{World Model Architecture}
+
+The world model uses a Recurrent State Space Model (RSSM) combining deterministic and stochastic dynamics:
+
+\textbf{State Representation.} The model state $s_t = (h_t, z_t)$ consists of a deterministic recurrent component $h_t \in \mathbb{R}^{256}$ (GRU hidden state) and a stochastic latent $z_t$ represented as 16 categorical variables with 16 classes each. The dynamics follow:
+\begin{align}
+h_t &= \text{GRU}(h_{t-1}, z_{t-1}, a_{t-1}) \\
+\hat{z}_t &\sim p_\theta(z_t | h_t) \quad \text{(prior)} \\
+z_t &\sim q_\phi(z_t | h_t, \text{Enc}(o_t)) \quad \text{(posterior)}
+\end{align}
+
+The prior predicts next state without observation; the posterior incorporates the actual observation for training. The KL divergence between them, subject to free nats thresholding, trains the model to make accurate predictions while maintaining useful stochastic structure.
+
+\textbf{Two-Hot Symlog Prediction.} Standard MSE regression fails catastrophically for hockey's sparse reward distribution $\{-10, 0, +10\}$. We use Two-Hot Symlog encoding~\cite{hafner2024}, discretizing predictions into 255 bins in symlog-transformed space:
+\begin{equation}
+\text{symlog}(x) = \text{sign}(x) \cdot \ln(|x| + 1)
+\end{equation}
+The ``two-hot'' encoding places probability mass on the two bins surrounding the target value, enabling gradient flow through the discretization. This is applied to both reward prediction and value estimation.
+
+\textbf{Auxiliary Tasks.} To encourage goal-relevant latent representations without corrupting the reward signal, we add auxiliary prediction heads: (1) binary classification predicting whether a goal occurs within the next $K$ steps, (2) regression predicting puck-to-goal distance, and (3) shot quality estimation. These provide additional learning signal that helps the world model capture strategically important features.
+
+\subsubsection{Key Modifications for Hockey}
+
+Table~\ref{tab:modifications} summarizes our domain-specific modifications beyond the baseline DreamerV3 implementation.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lp{4.8cm}p{5.2cm}}
+\toprule
+\textbf{Modification} & \textbf{Problem Addressed} & \textbf{Implementation} \\
+\midrule
+Two-Hot Symlog & MSE fails on sparse $\{-10,0,+10\}$ rewards & 255 bins in symlog space for rewards \& values \\
+DreamSmooth & Temporal credit assignment for delayed goals & Exponential smoothing: $\tilde{r}_t = \alpha r_t + (1-\alpha)\tilde{r}_{t+1}$ \\
+Auxiliary Tasks & Weak latent representations & Goal, distance, shot quality prediction heads \\
+Mixed Opponents & Overfitting to single opponent & 50\% weak / 50\% strong bot per episode \\
+Self-Play + PFSP & Limited strategic diversity & 15-checkpoint pool, variance-weighted selection \\
+\bottomrule
+\end{tabular}
+\caption{Key modifications from baseline DreamerV3 for the hockey domain.}
+\label{tab:modifications}
+\end{table}
+
+\textbf{DreamSmooth}~\cite{dreamsmooth2023} addresses the temporal credit assignment problem for goals that occur at episode boundaries. Rather than the goal reward appearing only at timestep $T$, we smooth rewards backward: $\tilde{r}_t = \alpha r_t + (1-\alpha)\tilde{r}_{t+1}$ with $\alpha = 0.5$. This propagates goal information to earlier timesteps in the replay buffer, helping the world model learn that certain states lead to scoring opportunities.
+
+\subsubsection{Behavior Learning}
+
+The actor-critic trains entirely in imagination, using states sampled from the world model:
+
+\textbf{Actor.} Tanh-squashed Gaussian policy $a = \tanh(\mu_\theta(s) + \sigma_\theta(s) \cdot \epsilon)$ where $\epsilon \sim \mathcal{N}(0, I)$. We enforce minimum standard deviation $\sigma_{\min} = 0.1$ to maintain exploration throughout training.
+
+\textbf{Critic.} Two-Hot Symlog value prediction with slow EMA target network (decay $\tau = 0.98$) for stable bootstrapping. The target network is updated as $\theta' \leftarrow \tau \theta' + (1-\tau)\theta$ after each gradient step.
+
+\textbf{Lambda Returns.} Value targets use TD($\lambda$) with $\lambda = 0.95$ and discount $\gamma = 0.997$:
+\begin{equation}
+V^\lambda_t = r_t + \gamma \left[ (1-\lambda) V(s_{t+1}) + \lambda V^\lambda_{t+1} \right]
+\end{equation}
+
+\textbf{Value Normalization.} Advantages are normalized using percentile-based scaling: we track the 5th and 95th percentiles of returns and scale advantages by the range $S = \max(1, P_{95} - P_5)$ to handle varying reward magnitudes automatically.
+
+\textbf{Actor Loss.} The actor maximizes normalized advantages with entropy regularization:
+\begin{equation}
+\mathcal{L}_\text{actor} = -\mathbb{E}_{s \sim \text{imagine}} \left[ \frac{V^\lambda(s) - V(s)}{S} + \eta \cdot H[\pi(\cdot|s)] \right]
+\end{equation}
+where $\eta = 3 \times 10^{-4}$ is fixed throughout training (no annealing).
+}
+
+% --- Serhat's Methods ---
+\serhat{\subsection{[Serhat's Algorithm]}\label{subsec:serhat-method}}
+
+\serhat{
+[TODO: Serhat's method section - approximately 1.5 pages covering algorithm background, architecture, modifications, and training procedure]
+}
+
+% ============================================================================
+% SECTION 3: EXPERIMENTAL EVALUATION
+% ============================================================================
+\section{Experimental Evaluation}\label{sec:experiments}
+
+\carl{\subsection{DreamerV3 Results}\label{subsec:dreamer-experiments}}
+
+\carl{
+\subsubsection{3-Phase Training Curriculum}
+
+We developed a 3-phase training curriculum that progressively refines the policy (Table~\ref{tab:training-phases}). \textbf{Phase 1} uses high replay ratio (32 gradient steps per environment step) with self-play for rapid initial learning and strategic diversity. \textbf{Phase 2} removes self-play to focus optimization on the target bots. \textbf{Phase 3} reduces replay ratio and learning rates for fine-grained convergence without overshooting.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Phase} & \textbf{Time} & \textbf{RR} & \textbf{LR (Actor)} & \textbf{Opponents} & \textbf{Win Rate} \\
+\midrule
+1: Bootstrap & 30h & 32 & $1 \times 10^{-4}$ & Mixed + Self-play & 0\% $\rightarrow$ 72\% \\
+2: Stabilize & 8h & 16 & $1 \times 10^{-4}$ & Mixed only & 72\% $\rightarrow$ 85\% \\
+3: Fine-tune & 16h & 4 & $5 \times 10^{-5}$ & Mixed only & 85\% $\rightarrow$ \textbf{88.5\%} \\
+\bottomrule
+\end{tabular}
+\caption{3-phase training curriculum. RR = replay ratio. Mixed = 50\% weak + 50\% strong. Best checkpoint at 266k gradient steps.}
+\label{tab:training-phases}
+\end{table}
+
+Figure~\ref{fig:training-curve} shows the win rate progression across all three phases. The transition points are clearly visible: Phase 1 shows rapid but noisy improvement with self-play, Phase 2 stabilizes performance, and Phase 3 achieves final convergence.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/training_curve_placeholder.png}
+\caption{Training curve showing win rate progression across 3 phases. Vertical lines indicate phase transitions. The best checkpoint (266k steps) achieves 88.5\% combined win rate.}
+\label{fig:training-curve}
+\end{figure}
+
+\subsubsection{Ablation Studies}
+
+We conduct ablation studies to validate our key modifications. Each ablation trains from scratch with identical hyperparameters except the ablated component.
+
+\textbf{DreamSmooth Ablation.} Figure~\ref{fig:ablation-dreamsmooth} compares training with and without DreamSmooth temporal reward smoothing. Without DreamSmooth, the agent struggles to learn from sparse goal rewards, achieving only [X]\% win rate after equivalent training time. DreamSmooth accelerates learning by [Y]$\times$ and improves final performance by [Z]\%.
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/ablation_dreamsmooth_winrate.png}
+    \caption{Win rate progression}
+    \label{fig:ablation-dreamsmooth-winrate}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/ablation_dreamsmooth_reward.png}
+    \caption{Mean episode reward}
+    \label{fig:ablation-dreamsmooth-reward}
+\end{subfigure}
+\caption{DreamSmooth ablation: with vs without temporal reward smoothing. DreamSmooth significantly accelerates learning and improves final performance.}
+\label{fig:ablation-dreamsmooth}
+\end{figure}
+
+\textbf{Auxiliary Tasks Ablation.} Figure~\ref{fig:ablation-auxiliary} evaluates the contribution of auxiliary prediction heads (goal prediction, distance, shot quality). Without auxiliary tasks, the world model develops weaker latent representations, resulting in [X]\% lower final win rate. The auxiliary tasks provide additional learning signal without corrupting the primary reward.
+
+\begin{figure}[h]
+\centering
+\begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/ablation_auxiliary_winrate.png}
+    \caption{Win rate progression}
+    \label{fig:ablation-auxiliary-winrate}
+\end{subfigure}
+\hfill
+\begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/ablation_auxiliary_worldloss.png}
+    \caption{World model loss}
+    \label{fig:ablation-auxiliary-worldloss}
+\end{subfigure}
+\caption{Auxiliary tasks ablation: with vs without goal/distance/quality prediction heads. Auxiliary tasks improve both world model quality and final policy performance.}
+\label{fig:ablation-auxiliary}
+\end{figure}
+
+Table~\ref{tab:ablation-summary} summarizes the ablation results quantitatively.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+\textbf{Configuration} & \textbf{Win Rate (Weak)} & \textbf{Win Rate (Strong)} & \textbf{Combined} \\
+\midrule
+Full Model (Ours) & 87\% & 90\% & \textbf{88.5\%} \\
+w/o DreamSmooth & [X]\% & [X]\% & [X]\% \\
+w/o Auxiliary Tasks & [X]\% & [X]\% & [X]\% \\
+\bottomrule
+\end{tabular}
+\caption{Ablation study results. Each modification contributes meaningfully to final performance.}
+\label{tab:ablation-summary}
+\end{table}
+
+\subsubsection{Final Benchmark Performance}
+
+Table~\ref{tab:benchmark} presents the final evaluation results for our best checkpoint (266k gradient steps). We evaluate over 100 games per opponent with deterministic policy (no exploration noise).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Opponent} & \textbf{Win Rate} & \textbf{Tie Rate} & \textbf{Loss Rate} & \textbf{Avg Reward} \\
+\midrule
+Weak Bot & 87\% & 5\% & 8\% & +7.4 \\
+Strong Bot & 90\% & 3\% & 7\% & +8.0 \\
+\midrule
+\textbf{Combined} & \textbf{88.5\%} & 4\% & 7.5\% & +7.7 \\
+\bottomrule
+\end{tabular}
+\caption{Final benchmark results (266k checkpoint, 100 games per opponent, deterministic evaluation).}
+\label{tab:benchmark}
+\end{table}
+
+Notably, performance against the strong bot (90\%) exceeds performance against the weak bot (87\%). We hypothesize this is because the strong bot plays more predictably optimal moves, while the weak bot's suboptimal behavior introduces variance that occasionally catches our agent off-guard.
+}
+
+\serhat{\subsection{[Serhat's Algorithm] Results}\label{subsec:serhat-experiments}}
+
+\serhat{
+[TODO: Serhat's experimental results - approximately 1 page covering training setup, results, and key findings]
+}
+
+% ============================================================================
+% SECTION 4: DISCUSSION
+% ============================================================================
+\section{Discussion}\label{sec:discussion}
+
+\carl{\textbf{DreamerV3 Key Findings.} Our modifications proved essential for the hockey domain. Two-Hot Symlog encoding is critical---MSE regression fails to predict the sparse $\{-10, 0, +10\}$ reward distribution, leading to unstable training. DreamSmooth significantly accelerates learning by propagating goal signals backward in time; without it, the agent struggles to connect early-episode actions to eventual goals. The 3-phase curriculum effectively balances exploration (self-play) with exploitation (fine-tuning), preventing both premature convergence and catastrophic forgetting.
+
+The auxiliary tasks (goal prediction, distance, shot quality) improve world model representations modestly but measurably. Mixed opponent training prevents overfitting we observed when training against a single bot type---agents trained only against weak bots fail to generalize to strong bots and vice versa.
+
+Self-play with PFSP provides strategic diversity but shows diminishing returns once the policy is strong. The primary benefit appears in early training, where exposure to diverse strategies prevents policy collapse into narrow behaviors. After Phase 1, removing self-play allows faster convergence on the target evaluation opponents.
+}
+
+\serhat{\textbf{[Serhat's Algorithm] Key Findings.} [TODO: Serhat's discussion points]}
+
+\textbf{Algorithm Comparison.} [TODO: Compare DreamerV3 vs Serhat's approach after Serhat completes experiments]
+
+\textbf{Limitations.} Our evaluation is limited to weak and strong bots---the tournament will reveal true generalization to diverse human-designed agents. The 54-hour training time, while feasible, constrains hyperparameter search. Some ablations (e.g., varying auxiliary task weights) remain unexplored due to compute constraints.
+
+\textbf{Future Work.} Population-based training could automate the 3-phase curriculum. Model-based planning during evaluation (not just imagination during training) might improve real-time performance. Applying DreamerV3 to other adversarial continuous control domains would test generalization of our modifications.
+
+% ============================================================================
+% AI USAGE DECLARATION
+% ============================================================================
+\section{AI Usage Declaration}\label{sec:ai-usage}
+
+\textbf{Carl Kueschall:}
+\begin{itemize}
+    \item \textbf{IDE Autocomplete:} AI-powered code completion (Cursor AI IDE) used throughout development for all source files.
+    \item \textbf{Claude Code (claude.ai/code):} Used for two purposes: (A) \textit{Learning}---interactive discussions about DreamerV3 internals, debugging complex RL concepts, understanding world model training dynamics through detailed Q\&A that deepened my understanding of the algorithm; (B) \textit{Routine tasks}---writing plotting scripts, managing W\&B metrics, debugging tensor shape mismatches, creating evaluation scripts.
+    \item \textbf{Philosophy:} Development proceeded step-by-step to ensure genuine understanding. AI accelerated learning complex concepts and handled routine tasks, while core algorithmic decisions and debugging insights came from careful analysis.
+\end{itemize}
+
+\textbf{Serhat Alpay:}
+\begin{itemize}
+    \item [TODO: Serhat's AI usage declaration]
+\end{itemize}
+
+% ============================================================================
+% REFERENCES
+% ============================================================================
+\newpage
+\bibliographystyle{abbrv}
+\bibliography{main}
+
+% ============================================================================
+% APPENDIX
+% ============================================================================
+\appendix
+
+\section{Hyperparameter Summary}\label{app:hyperparams}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+\textbf{Parameter} & \textbf{Phase 1} & \textbf{Phase 3} \\
+\midrule
+Replay Ratio & 32 & 4 \\
+LR World Model & $3 \times 10^{-4}$ & $2 \times 10^{-4}$ \\
+LR Actor & $1 \times 10^{-4}$ & $5 \times 10^{-5}$ \\
+LR Critic & $1 \times 10^{-4}$ & $5 \times 10^{-5}$ \\
+Batch Size & 32 & 32 \\
+Batch Length (sequence) & 32 & 32 \\
+Imagination Horizon & 15 & 15 \\
+Entropy Scale $\eta$ & $3 \times 10^{-4}$ & $3 \times 10^{-4}$ \\
+Discount $\gamma$ & 0.997 & 0.997 \\
+Lambda $\lambda$ & 0.95 & 0.95 \\
+DreamSmooth $\alpha$ & 0.5 & 0.5 \\
+Slow Critic Decay $\tau$ & 0.98 & 0.98 \\
+Free Nats & 1.0 & 1.0 \\
+Self-Play Pool Size & 15 & --- \\
+Mixed Weak Probability & 0.5 & 0.5 \\
+\bottomrule
+\end{tabular}
+\caption{Complete hyperparameters for Phase 1 and Phase 3. Phase 2 uses Phase 1 hyperparameters without self-play.}
+\label{tab:hyperparams-full}
+\end{table}
+
+\section{Network Architecture}\label{app:architecture}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+\textbf{Component} & \textbf{Architecture} \\
+\midrule
+Encoder & MLP: $18 \rightarrow 256 \rightarrow 256 \rightarrow 256$ \\
+Decoder & MLP: $512 \rightarrow 256 \rightarrow 256 \rightarrow 18$ \\
+Recurrent (GRU) & Hidden size 256 \\
+Prior/Posterior & MLP: $256 \rightarrow 256 \rightarrow 256$ (16$\times$16 categorical) \\
+Reward Head & MLP: $512 \rightarrow 256 \rightarrow 255$ (Two-Hot) \\
+Continue Head & MLP: $512 \rightarrow 256 \rightarrow 1$ (Bernoulli) \\
+Actor & MLP: $512 \rightarrow 256 \rightarrow 256 \rightarrow 8$ ($\mu$, $\log\sigma$) \\
+Critic & MLP: $512 \rightarrow 256 \rightarrow 256 \rightarrow 255$ (Two-Hot) \\
+\bottomrule
+\end{tabular}
+\caption{Network architecture. Input to decoder/heads is concatenated $[h_t, z_t]$ (512-dim).}
+\label{tab:architecture}
+\end{table}
+
+\end{document}

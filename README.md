@@ -4,6 +4,18 @@ Authors: Serhat Alpay, Carl Kueschall
 
 Reinforcement Learning project for training agents to play hockey using DreamerV3 (world-model based) and TD3 algorithms with self-play.
 
+## Benchmark Results
+
+**Best Checkpoint: 266k gradient steps**
+
+| Opponent | Win Rate |
+|----------|----------|
+| Weak Bot | 87% |
+| Strong Bot | 90% |
+| **Combined** | **88.5%** |
+
+Training completed using a **3-phase approach** over ~54 hours total compute time.
+
 ## Quick Start
 
 ### DreamerV3 (Primary - Active Development)
@@ -191,6 +203,104 @@ Training logs to Weights & Biases with:
 - **Behavior**: actor loss, critic loss, entropy, advantages
 - **Stats**: win rate, episode rewards, buffer size
 - **Visualization**: Periodic gameplay GIFs
+
+---
+
+## Training Methodology: 3-Phase Approach
+
+The benchmark performance was achieved through a carefully designed 3-phase training curriculum:
+
+### Phase 1: Mixed Opponents + Self-Play (30 hours)
+
+Initial training with diverse opponents to build robust fundamentals.
+
+```bash
+python train_hockey.py \
+    --seed 42 \
+    --replay_ratio 32 \
+    --warmup_episodes 200 \
+    --lr_world 0.0003 \
+    --lr_actor 0.0001 \
+    --lr_critic 0.0001 \
+    --entropy_scale 0.0003 \
+    --use_dreamsmooth \
+    --dreamsmooth_alpha 0.5 \
+    --mixed_opponents \
+    --mixed_weak_prob 0.5 \
+    --self_play_start 1000 \
+    --self_play_pool_size 15 \
+    --use_pfsp \
+    --pfsp_mode variance
+```
+
+**Key characteristics:**
+- Mixed opponents: 50% weak bot, 50% strong bot
+- Self-play activates at episode 1000 with PFSP (variance mode)
+- High replay ratio (32) for sample efficiency
+- DreamSmooth enabled for sparse reward handling
+- Ran for ~268k gradient steps, 8,581 episodes
+- Win rate progressed from ~13% to ~72%
+
+### Phase 2: Mixed Opponents Only (8 hours)
+
+After Phase 1 plateaued, removed self-play to focus on beating the fixed bots.
+
+```bash
+python train_hockey.py \
+    --seed 43 \
+    --resume results/checkpoints/.../192k.pth \
+    --replay_ratio 16 \
+    --lr_world 0.0002 \
+    --lr_actor 0.0001 \
+    --lr_critic 0.0001 \
+    --use_dreamsmooth \
+    --mixed_opponents \
+    --mixed_weak_prob 0.5
+```
+
+**Key changes from Phase 1:**
+- No self-play (focus on weak/strong bots)
+- Reduced replay ratio (16 vs 32)
+- Reduced world model LR (0.0002 vs 0.0003)
+- Resumed from 192k checkpoint (Phase 1)
+- Ran from 192k to ~270k gradient steps
+- Win rate: ~75-85%
+
+### Phase 3: Fine-Tuning (16 hours)
+
+Final polishing with conservative learning rates for stable convergence.
+
+```bash
+python train_hockey.py \
+    --seed 43 \
+    --resume results/checkpoints/.../260k.pth \
+    --replay_ratio 4 \
+    --lr_world 0.0002 \
+    --lr_actor 0.00005 \
+    --lr_critic 0.00005 \
+    --use_dreamsmooth \
+    --mixed_opponents \
+    --mixed_weak_prob 0.5
+```
+
+**Key changes from Phase 2:**
+- Much lower replay ratio (4) for more real environment experience
+- Halved actor/critic LRs (0.00005 vs 0.0001)
+- Resumed from 260k checkpoint (Phase 2)
+- Ran from 260k to ~340k gradient steps, ~30k episodes
+- **Best checkpoint at 266k: 87% weak, 90% strong, 88.5% combined**
+
+### Training Insights
+
+1. **Self-play bootstrap, then remove**: Self-play helps early training but can become destabilizing once the agent is strong. Removing it in Phase 2 helped focus on the target opponents.
+
+2. **Gradual LR reduction**: Each phase reduced learning rates to allow finer-grained optimization without overshooting.
+
+3. **Replay ratio tradeoff**: High replay ratio (32) for initial learning, then progressively lower (16 → 4) to balance gradient updates with fresh experience.
+
+4. **DreamSmooth throughout**: Essential for handling sparse goal rewards across all phases.
+
+5. **Mixed opponents always**: Training against both weak and strong bots prevents overfitting to a single opponent type.
 
 ---
 

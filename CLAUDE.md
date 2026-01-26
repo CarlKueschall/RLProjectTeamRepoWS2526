@@ -20,6 +20,21 @@ The project implements:
 - **DreamerV3**: World model + imagination-based actor-critic training with self-play support
 - **TD3** (archived): Pure TD3 + PBRS + Self-Play with PFSP
 
+## Benchmark Results
+
+**Best Checkpoint: 266k gradient steps**
+
+| Opponent | Win Rate |
+|----------|----------|
+| Weak Bot | 87% |
+| Strong Bot | 90% |
+| **Combined** | **88.5%** |
+
+Achieved using a **3-phase training approach** (~54 hours total):
+1. **Phase 1**: Mixed opponents + self-play (30h, seed 42, 0→268k steps)
+2. **Phase 2**: Mixed opponents only (8h, seed 43, 192k→270k steps)
+3. **Phase 3**: Fine-tuning with lower LRs (16h, seed 43, 260k→340k steps)
+
 ## Common Commands
 
 ### DreamerV3 Training (Primary)
@@ -297,7 +312,7 @@ Keep-mode affects observation dimension (OFF=16, ON=18). The training code detec
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--replay_ratio` | 32 | Gradient steps per env step. **Do NOT reduce to 4!** |
+| `--replay_ratio` | 32 | Gradient steps per env step. Use 32 for initial training, can reduce for fine-tuning. |
 | `--imagination_horizon` | 15 | Steps to imagine for actor-critic training |
 | `--batch_size` | 32 | Sequences per batch |
 | `--batch_length` | 32 | Timesteps per sequence |
@@ -315,12 +330,53 @@ Keep-mode affects observation dimension (OFF=16, ON=18). The training code detec
 ### Critical Hyperparameter Warnings
 
 **Do NOT override these with bad values:**
-- `--replay_ratio 4` → Causes **3-5× slower** convergence. Use 16-32.
 - `--lr_actor 0.0005` → Inverts actor/critic hierarchy, causes instability. Use ≤0.0001.
+- Skipping DreamSmooth → Sparse reward signal makes training unstable.
 
-**Recommended training command:**
+**Note on replay ratio**: While 32 is optimal for initial training, Phase 3 fine-tuning successfully used replay_ratio=4 with lower learning rates.
+
+## Recommended Training Approach (3-Phase)
+
+The benchmark performance (88.5% combined win rate) was achieved using this 3-phase approach:
+
+### Phase 1: Mixed Opponents + Self-Play
 ```bash
 cd 02-SRC/DreamerV3
-python3 train_hockey.py --opponent weak --seed 42 --use_dreamsmooth
-# Uses good defaults from hockey.yml - don't override critical params!
+python3 train_hockey.py \
+    --seed 42 \
+    --replay_ratio 32 \
+    --warmup_episodes 200 \
+    --lr_world 0.0003 --lr_actor 0.0001 --lr_critic 0.0001 \
+    --entropy_scale 0.0003 \
+    --use_dreamsmooth --dreamsmooth_alpha 0.5 \
+    --mixed_opponents --mixed_weak_prob 0.5 \
+    --self_play_start 1000 --self_play_pool_size 15 --use_pfsp --pfsp_mode variance
 ```
+
+### Phase 2: Mixed Opponents Only (resume from Phase 1)
+```bash
+python3 train_hockey.py \
+    --seed 43 \
+    --resume <phase1_checkpoint.pth> \
+    --replay_ratio 16 \
+    --lr_world 0.0002 --lr_actor 0.0001 --lr_critic 0.0001 \
+    --use_dreamsmooth \
+    --mixed_opponents --mixed_weak_prob 0.5
+```
+
+### Phase 3: Fine-Tuning (resume from Phase 2)
+```bash
+python3 train_hockey.py \
+    --seed 43 \
+    --resume <phase2_checkpoint.pth> \
+    --replay_ratio 4 \
+    --lr_world 0.0002 --lr_actor 0.00005 --lr_critic 0.00005 \
+    --use_dreamsmooth \
+    --mixed_opponents --mixed_weak_prob 0.5
+```
+
+**Key insights:**
+1. Self-play bootstraps diverse play styles, then remove it to focus on target opponents
+2. Gradually reduce learning rates and replay ratio across phases
+3. DreamSmooth essential throughout for sparse reward handling
+4. Mixed opponents (weak+strong) prevents overfitting to single opponent type
