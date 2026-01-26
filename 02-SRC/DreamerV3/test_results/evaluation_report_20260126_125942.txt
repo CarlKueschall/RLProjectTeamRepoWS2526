@@ -1,0 +1,284 @@
+================================================================================
+DREAMERV3 CHECKPOINT EVALUATION REPORT
+================================================================================
+Generated: 2026-01-26 13:24:15
+Total Test Duration: 24.6 minutes
+Checkpoints Tested: 14
+
+--------------------------------------------------------------------------------
+SUMMARY TABLE
+--------------------------------------------------------------------------------
+Checkpoint                                  Weak%  Strong%   Combined        Steps
+--------------------------------------------------------------------------------
+results_checkpoints_balanced-finetune-      87.0%    90.0%      88.5%      266,100
+results_checkpoints_dreamer_weak_seed4      82.0%    85.0%      83.5%      250,000
+results_checkpoints_dreamer_weak_seed4      76.0%    87.0%      81.5%      260,000
+results_checkpoints_balanced-finetune-      76.0%    84.0%      80.0%      296,800
+results_checkpoints_DreamerV3-mixed-se      80.0%    80.0%      80.0%      220,000
+results_checkpoints_dreamer_weak_seed4      75.0%    79.0%      77.0%      240,000
+results_checkpoints_DreamerV3-mixed-se      69.0%    83.0%      76.0%      192,000
+results_checkpoints_DreamerV3-mixed-se      73.0%    77.0%      75.0%      188,000
+results_checkpoints_DreamerV3-mixed-se      73.0%    71.0%      72.0%      140,000
+best_weak.pth                               77.0%    47.0%      62.0%       68,000
+best_strong.pth                             40.0%    75.0%      57.5%      124,000
+results_checkpoints_DreamerV3-dreamsmo      62.0%    30.0%      46.0%      120,000
+results_checkpoints_DreamerV3-small-we      31.0%    29.0%      30.0%       50,500
+dreamer_weak_seed42_20260124_141543_fi       3.0%     9.0%       6.0%           64
+
+--------------------------------------------------------------------------------
+BEST PERFORMERS
+--------------------------------------------------------------------------------
+Best vs Weak:     results_checkpoints_balanced-finetune-DreamerV3-final-finetune-seed43_weak_seed43_20260125_230625_266k.pth
+                  Win Rate: 87.0%
+
+Best vs Strong:   results_checkpoints_balanced-finetune-DreamerV3-final-finetune-seed43_weak_seed43_20260125_230625_266k.pth
+                  Win Rate: 90.0%
+
+Best Combined:    results_checkpoints_balanced-finetune-DreamerV3-final-finetune-seed43_weak_seed43_20260125_230625_266k.pth
+                  Combined: 88.5% (Weak: 87.0%, Strong: 90.0%)
+
+--------------------------------------------------------------------------------
+DETAILED RESULTS
+--------------------------------------------------------------------------------
+
+Checkpoint: dreamer_weak_seed42_20260124_141543_final.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results/checkpoints/dreamer_weak_seed42_20260124_141543_final.pth
+  Training: 64 gradient steps, 9 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:    3.0% (3 wins)
+    Loss Rate:  45.0% (45 losses)
+    Draw Rate:  52.0% (52 draws)
+    Reward:    -19.25 ± 12.25
+    Avg Steps: 172.9 ± 88.8
+  vs Strong (100 episodes):
+    Win Rate:    9.0% (9 wins)
+    Loss Rate:  32.0% (32 losses)
+    Draw Rate:  59.0% (59 draws)
+    Reward:    -18.08 ± 13.07
+    Avg Steps: 190.3 ± 83.9
+
+Checkpoint: results_checkpoints_DreamerV3-small-weak-seed43_weak_seed43_20260120_122246_50k.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results_checkpoints_DreamerV3-small-weak-seed43_weak_seed43_20260120_122246_50k.pth
+  Training: 50,500 gradient steps, 13,125 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   31.0% (31 wins)
+    Loss Rate:  47.0% (47 losses)
+    Draw Rate:  22.0% (22 draws)
+    Reward:    -3.54 ± 9.17
+    Avg Steps: 126.5 ± 84.3
+  vs Strong (100 episodes):
+    Win Rate:   29.0% (29 wins)
+    Loss Rate:  41.0% (41 losses)
+    Draw Rate:  30.0% (30 draws)
+    Reward:    -4.30 ± 8.98
+    Avg Steps: 134.1 ± 92.1
+
+Checkpoint: best_weak.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/best_weak.pth
+  Training: 68,000 gradient steps, 2,325 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   77.0% (77 wins)
+    Loss Rate:   8.0% (8 losses)
+    Draw Rate:  15.0% (15 draws)
+    Reward:    +5.94 ± 6.59
+    Avg Steps: 109.9 ± 74.4
+  vs Strong (100 episodes):
+    Win Rate:   47.0% (47 wins)
+    Loss Rate:  29.0% (29 losses)
+    Draw Rate:  24.0% (24 draws)
+    Reward:    -0.81 ± 9.65
+    Avg Steps: 121.3 ± 89.3
+
+Checkpoint: results_checkpoints_DreamerV3-dreamsmooth-seed42_weak_seed42_20260122_000848_120k.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results_checkpoints_DreamerV3-dreamsmooth-seed42_weak_seed42_20260122_000848_120k.pth
+  Training: 120,000 gradient steps, 3,950 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   62.0% (62 wins)
+    Loss Rate:  16.0% (16 losses)
+    Draw Rate:  22.0% (22 draws)
+    Reward:    +3.08 ± 7.87
+    Avg Steps: 139.1 ± 83.3
+  vs Strong (100 episodes):
+    Win Rate:   30.0% (30 wins)
+    Loss Rate:  36.0% (36 losses)
+    Draw Rate:  34.0% (34 draws)
+    Reward:    -3.74 ± 8.78
+    Avg Steps: 150.9 ± 88.6
+
+Checkpoint: best_strong.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/best_strong.pth
+  Training: 124,000 gradient steps, 4,075 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   40.0% (40 wins)
+    Loss Rate:  49.0% (49 losses)
+    Draw Rate:  11.0% (11 draws)
+    Reward:    -2.75 ± 9.92
+    Avg Steps: 110.3 ± 71.6
+  vs Strong (100 episodes):
+    Win Rate:   75.0% (75 wins)
+    Loss Rate:  13.0% (13 losses)
+    Draw Rate:  12.0% (12 draws)
+    Reward:    +4.66 ± 7.77
+    Avg Steps: 109.8 ± 75.2
+
+Checkpoint: results_checkpoints_DreamerV3-mixed-selfplay-seed42_weak_seed42_20260124_144054_140k.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results_checkpoints_DreamerV3-mixed-selfplay-seed42_weak_seed42_20260124_144054_140k.pth
+  Training: 140,000 gradient steps, 4,575 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   73.0% (73 wins)
+    Loss Rate:   9.0% (9 losses)
+    Draw Rate:  18.0% (18 draws)
+    Reward:    +5.06 ± 7.10
+    Avg Steps: 121.3 ± 78.1
+  vs Strong (100 episodes):
+    Win Rate:   71.0% (71 wins)
+    Loss Rate:  20.0% (20 losses)
+    Draw Rate:   9.0% (9 draws)
+    Reward:    +3.23 ± 8.95
+    Avg Steps: 106.8 ± 74.1
+
+Checkpoint: results_checkpoints_DreamerV3-mixed-selfplay-seed42_weak_seed42_20260124_144802_188k.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results_checkpoints_DreamerV3-mixed-selfplay-seed42_weak_seed42_20260124_144802_188k.pth
+  Training: 188,000 gradient steps, 6,075 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   73.0% (73 wins)
+    Loss Rate:  14.0% (14 losses)
+    Draw Rate:  13.0% (13 draws)
+    Reward:    +4.64 ± 7.79
+    Avg Steps: 109.5 ± 77.4
+  vs Strong (100 episodes):
+    Win Rate:   77.0% (77 wins)
+    Loss Rate:   9.0% (9 losses)
+    Draw Rate:  14.0% (14 draws)
+    Reward:    +4.95 ± 7.31
+    Avg Steps: 106.8 ± 76.6
+
+Checkpoint: results_checkpoints_DreamerV3-mixed-selfplay-seed42_weak_seed42_20260124_144802_192k.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results_checkpoints_DreamerV3-mixed-selfplay-seed42_weak_seed42_20260124_144802_192k.pth
+  Training: 192,000 gradient steps, 6,200 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   69.0% (69 wins)
+    Loss Rate:  11.0% (11 losses)
+    Draw Rate:  20.0% (20 draws)
+    Reward:    +4.59 ± 7.44
+    Avg Steps: 121.0 ± 80.2
+  vs Strong (100 episodes):
+    Win Rate:   83.0% (83 wins)
+    Loss Rate:   5.0% (5 losses)
+    Draw Rate:  12.0% (12 draws)
+    Reward:    +6.17 ± 6.34
+    Avg Steps: 102.3 ± 77.0
+
+Checkpoint: results_checkpoints_DreamerV3-mixed-selfplay-seed42_weak_seed42_20260124_144802_220k.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results_checkpoints_DreamerV3-mixed-selfplay-seed42_weak_seed42_20260124_144802_220k.pth
+  Training: 220,000 gradient steps, 7,075 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   80.0% (80 wins)
+    Loss Rate:   6.0% (6 losses)
+    Draw Rate:  14.0% (14 draws)
+    Reward:    +6.16 ± 6.20
+    Avg Steps: 111.2 ± 75.9
+  vs Strong (100 episodes):
+    Win Rate:   80.0% (80 wins)
+    Loss Rate:  12.0% (12 losses)
+    Draw Rate:   8.0% (8 draws)
+    Reward:    +5.17 ± 7.58
+    Avg Steps: 99.1 ± 69.4
+
+Checkpoint: results_checkpoints_dreamer_weak_seed43_20260125_133552_240k.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results_checkpoints_dreamer_weak_seed43_20260125_133552_240k.pth
+  Training: 240,000 gradient steps, 7,708 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   75.0% (75 wins)
+    Loss Rate:  13.0% (13 losses)
+    Draw Rate:  12.0% (12 draws)
+    Reward:    +5.11 ± 7.57
+    Avg Steps: 115.7 ± 76.9
+  vs Strong (100 episodes):
+    Win Rate:   79.0% (79 wins)
+    Loss Rate:  12.0% (12 losses)
+    Draw Rate:   9.0% (9 draws)
+    Reward:    +4.98 ± 8.00
+    Avg Steps: 95.2 ± 70.5
+
+Checkpoint: results_checkpoints_dreamer_weak_seed43_20260125_133536_250k.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results_checkpoints_dreamer_weak_seed43_20260125_133536_250k.pth
+  Training: 250,000 gradient steps, 9,833 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   82.0% (82 wins)
+    Loss Rate:  13.0% (13 losses)
+    Draw Rate:   5.0% (5 draws)
+    Reward:    +6.08 ± 7.36
+    Avg Steps: 86.3 ± 63.8
+  vs Strong (100 episodes):
+    Win Rate:   85.0% (85 wins)
+    Loss Rate:  12.0% (12 losses)
+    Draw Rate:   3.0% (3 draws)
+    Reward:    +5.94 ± 7.35
+    Avg Steps: 86.8 ± 63.3
+
+Checkpoint: results_checkpoints_dreamer_weak_seed43_20260125_133536_260k.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results_checkpoints_dreamer_weak_seed43_20260125_133536_260k.pth
+  Training: 260,000 gradient steps, 10,458 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   76.0% (76 wins)
+    Loss Rate:  10.0% (10 losses)
+    Draw Rate:  14.0% (14 draws)
+    Reward:    +5.59 ± 6.91
+    Avg Steps: 109.8 ± 78.7
+  vs Strong (100 episodes):
+    Win Rate:   87.0% (87 wins)
+    Loss Rate:  10.0% (10 losses)
+    Draw Rate:   3.0% (3 draws)
+    Reward:    +6.41 ± 6.64
+    Avg Steps: 80.9 ± 58.8
+
+Checkpoint: results_checkpoints_balanced-finetune-DreamerV3-final-finetune-seed43_weak_seed43_20260125_230625_266k.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results_checkpoints_balanced-finetune-DreamerV3-final-finetune-seed43_weak_seed43_20260125_230625_266k.pth
+  Training: 266,100 gradient steps, 11,995 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   87.0% (87 wins)
+    Loss Rate:   6.0% (6 losses)
+    Draw Rate:   7.0% (7 draws)
+    Reward:    +7.24 ± 5.45
+    Avg Steps: 103.2 ± 69.2
+  vs Strong (100 episodes):
+    Win Rate:   90.0% (90 wins)
+    Loss Rate:   5.0% (5 losses)
+    Draw Rate:   5.0% (5 draws)
+    Reward:    +7.39 ± 5.44
+    Avg Steps: 86.5 ± 63.8
+
+Checkpoint: results_checkpoints_balanced-finetune-DreamerV3-final-finetune-seed43_weak_seed43_20260125_215906_296k.pth
+  Path: /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results_checkpoints_balanced-finetune-DreamerV3-final-finetune-seed43_weak_seed43_20260125_215906_296k.pth
+  Training: 296,800 gradient steps, 12,770 episodes
+
+  vs Weak (100 episodes):
+    Win Rate:   76.0% (76 wins)
+    Loss Rate:  12.0% (12 losses)
+    Draw Rate:  12.0% (12 draws)
+    Reward:    +5.23 ± 7.86
+    Avg Steps: 96.9 ± 76.5
+  vs Strong (100 episodes):
+    Win Rate:   84.0% (84 wins)
+    Loss Rate:   9.0% (9 losses)
+    Draw Rate:   7.0% (7 draws)
+    Reward:    +6.08 ± 6.83
+    Avg Steps: 78.5 ± 63.1
+
+================================================================================
+END OF REPORT
+================================================================================
