@@ -87,7 +87,7 @@ DEFAULT_DREAMER_CHECKPOINT = os.environ.get(
     'DREAMER_CHECKPOINT',
     os.path.join(
         script_dir,
-        "checkpoint_266k.pth"
+        "best_self_play_232k.pth"
     )
 )
 
@@ -256,6 +256,7 @@ class DreamerV3HockeyAgent(Agent):
         # Initialize recurrent state
         self.h = None
         self.z = None
+        self.prev_action = None
         self._step_count = 0
 
         print("=" * 70)
@@ -328,7 +329,8 @@ class DreamerV3HockeyAgent(Agent):
                 print(f"[STEP {self._step_count}] Truncated from {original_dim} to 18-dim")
 
         # Get action from DreamerV3 agent (maintains recurrent state)
-        action, self.h, self.z = self.agent.act(obs_array, self.h, self.z)
+        action, self.h, self.z = self.agent.act(obs_array, self.h, self.z, self.prev_action)
+        self.prev_action = action
 
         # Ensure action is in valid range [-1, 1]
         action = np.clip(action, -1.0, 1.0)
@@ -392,6 +394,7 @@ class DreamerV3HockeyAgent(Agent):
         # IMPORTANT: Reset recurrent state for new game
         self.h = None
         self.z = None
+        self.prev_action = None
         self._step_count = 0
 
     def on_end_game(self, result: bool, stats: list[float]) -> None:

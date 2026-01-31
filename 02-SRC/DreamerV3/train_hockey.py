@@ -64,6 +64,7 @@ def run_episode(env, agent, opponent, training=True, seed=None, render=False):
         obs, _ = env.reset()
 
     h, z = None, None  # Recurrent states
+    prev_action = None  # Track previous action for RSSM conditioning
     total_reward = 0.0
     steps = 0
     transitions = []
@@ -77,8 +78,8 @@ def run_episode(env, agent, opponent, training=True, seed=None, render=False):
             if frame is not None:
                 frames.append(frame)
 
-        # Get agent action
-        action, h, z = agent.act(obs, h, z)
+        # Get agent action (pass previous action for correct RSSM conditioning)
+        action, h, z = agent.act(obs, h, z, prev_action)
 
         # Get opponent action
         obs_opponent = env.obs_agent_two()
@@ -94,6 +95,7 @@ def run_episode(env, agent, opponent, training=True, seed=None, render=False):
 
         total_reward += reward
         obs = next_obs
+        prev_action = action  # Track for next RSSM step
         steps += 1
 
     # Determine outcome
@@ -315,6 +317,11 @@ def parse_args():
     parser.add_argument("--no_aux_tasks", action="store_true",
                         help="Disable auxiliary task heads (goal/distance/shot quality prediction)")
 
+    # Reward/Value prediction mode (Two-Hot vs Gaussian ablation)
+    parser.add_argument("--use_gaussian_heads", action="store_true",
+                        help="Use Gaussian reward/value prediction (NaturalDreamer baseline) instead of Two-Hot Symlog. "
+                             "For ablation study: Gaussian fails on sparse rewards, Two-Hot handles them correctly.")
+
     # Checkpointing and evaluation
     parser.add_argument("--checkpoint_interval", type=int, default=None,
                         help="Checkpoint save interval (gradient steps)")
@@ -451,6 +458,13 @@ def main():
         config.useAuxiliaryTasks = False
         print("Auxiliary task heads disabled")
 
+    # Gaussian heads override (for ablation study)
+    if args.use_gaussian_heads:
+        config.useGaussianHeads = True
+        print("Using Gaussian reward/value heads (NaturalDreamer baseline) - Two-Hot Symlog disabled")
+    else:
+        config.useGaussianHeads = False
+
     # Checkpoint/eval overrides
     if args.checkpoint_interval is not None:
         config.checkpointInterval = args.checkpoint_interval
@@ -520,6 +534,7 @@ def main():
                 "buffer_capacity": config.dreamer.buffer.capacity,
                 "uniform_mix": config.dreamer.priorNet.uniformMix,
                 "use_auxiliary_tasks": config.get('useAuxiliaryTasks', True),
+                "use_gaussian_heads": config.get('useGaussianHeads', False),
                 "gif_interval": config.gifInterval,
                 # Mixed opponents
                 "mixed_opponents": args.mixed_opponents,
@@ -728,7 +743,7 @@ def main():
             # Record result for PFSP
             if self_play_enabled and self_play_manager is not None and self_play_manager.active:
                 winner = 1 if outcome == 'win' else (-1 if outcome == 'loss' else 0)
-                self_play_manager.record_result(winner)
+                self_play_manager.record_result(winner, current_episode=agent.totalEpisodes)
 
                 # Update pool periodically
                 self_play_manager.update_pool(

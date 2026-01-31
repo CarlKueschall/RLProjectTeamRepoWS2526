@@ -14,8 +14,8 @@ from torch.distributions import kl_divergence, Independent, OneHotCategoricalStr
 import os
 
 from networks import (
-    RecurrentModel, PriorNet, PosteriorNet, RewardModel, ContinueModel,
-    EncoderMLP, DecoderMLP, Actor, Critic,
+    RecurrentModel, PriorNet, PosteriorNet, RewardModel, RewardModelGaussian,
+    ContinueModel, EncoderMLP, DecoderMLP, Actor, Critic, CriticGaussian,
     GoalPredictionHead, DistanceHead, ShotQualityHead  # Auxiliary task heads
 )
 from utils import computeLambdaValues, Moments, TwoHotSymlog, symlog
@@ -63,20 +63,49 @@ class Dreamer:
         self.recurrentModel = RecurrentModel(config.recurrentSize, self.latentSize, actionSize, config.recurrentModel).to(device)
         self.priorNet = PriorNet(config.recurrentSize, config.latentLength, config.latentClasses, config.priorNet).to(device)
         self.posteriorNet = PosteriorNet(config.recurrentSize + config.encodedObsSize, config.latentLength, config.latentClasses, config.posteriorNet).to(device)
-        self.rewardPredictor = RewardModel(self.fullStateSize, config.reward).to(device)
+
+        # =================================================================
+        # Reward/Value Prediction Mode (Two-Hot Symlog vs Gaussian)
+        # =================================================================
+        # Two-Hot Symlog (DreamerV3): Discretized bins in symlog space
+        #   - Handles sparse multi-modal rewards {-10, 0, +10}
+        #   - Uses cross-entropy loss
+        #
+        # Gaussian (NaturalDreamer baseline): Normal distribution
+        #   - Assumes unimodal rewards (fails for sparse hockey rewards)
+        #   - Uses negative log likelihood loss
+        #   - Included for ablation study
+        # =================================================================
+        self.useGaussianHeads = getattr(config, 'useGaussianHeads', False)
+
+        if self.useGaussianHeads:
+            # NaturalDreamer baseline: Gaussian reward/value prediction
+            self.rewardPredictor = RewardModelGaussian(self.fullStateSize, config.reward).to(device)
+        else:
+            # DreamerV3: Two-Hot Symlog encoding (default)
+            self.rewardPredictor = RewardModel(self.fullStateSize, config.reward).to(device)
 
         if config.useContinuationPrediction:
             self.continuePredictor = ContinueModel(self.fullStateSize, config.continuation).to(device)
 
         # Behavior model
         self.actor = Actor(self.fullStateSize, actionSize, actionLow, actionHigh, device, config.actor).to(device)
-        self.critic = Critic(self.fullStateSize, config.critic).to(device)
+
+        if self.useGaussianHeads:
+            # NaturalDreamer baseline: Gaussian value prediction
+            self.critic = CriticGaussian(self.fullStateSize, config.critic).to(device)
+        else:
+            # DreamerV3: Two-Hot Symlog encoding (default)
+            self.critic = Critic(self.fullStateSize, config.critic).to(device)
 
         # EMA (slow) critic for regularization (DreamerV3 robustness technique)
         # The slow critic is a REGULARIZER, not a target network for computing lambda returns.
         # It prevents the critic from changing too rapidly (bootstrap divergence prevention).
         # Lambda returns use the MAIN critic; the slow critic provides implicit stability.
-        self.slowCritic = Critic(self.fullStateSize, config.critic).to(device)
+        if self.useGaussianHeads:
+            self.slowCritic = CriticGaussian(self.fullStateSize, config.critic).to(device)
+        else:
+            self.slowCritic = Critic(self.fullStateSize, config.critic).to(device)
         self.slowCritic.load_state_dict(self.critic.state_dict())  # Initialize with same weights
         for param in self.slowCritic.parameters():
             param.requires_grad = False  # Don't train directly - updated via EMA
@@ -208,14 +237,21 @@ class Dreamer:
         reconDist = Independent(Normal(decodedObs, torch.ones_like(decodedObs)), 1)
         reconstructionLoss = -reconDist.log_prob(obsTargets).mean()
 
-        # === Reward Prediction Loss (Two-Hot Symlog with Sparse Event Weighting) ===
-        # Get logits from reward predictor (255 bins)
-        rewardLogits = self.rewardPredictor(fullStates.view(-1, self.fullStateSize))
-        rewardLogits = rewardLogits.view(batchSize, batchLength - 1, -1)  # (B, T-1, 255)
+        # === Reward Prediction Loss ===
         rewardTargets = data.rewards[:, 1:].squeeze(-1)  # (B, T-1)
 
-        # Compute per-sample two-hot loss
-        rewardLossPerSample = self.twoHot.loss(rewardLogits, rewardTargets)  # (B, T-1)
+        if self.useGaussianHeads:
+            # NaturalDreamer baseline: Gaussian negative log likelihood
+            rewardDist = self.rewardPredictor(fullStates.view(-1, self.fullStateSize))
+            # Reshape distribution parameters to match targets
+            rewardLossPerSample = -rewardDist.log_prob(rewardTargets.view(-1))
+            rewardLossPerSample = rewardLossPerSample.view(batchSize, batchLength - 1)
+            rewardLogits = None  # For metrics compatibility
+        else:
+            # DreamerV3: Two-Hot Symlog encoding
+            rewardLogits = self.rewardPredictor(fullStates.view(-1, self.fullStateSize))
+            rewardLogits = rewardLogits.view(batchSize, batchLength - 1, -1)  # (B, T-1, 255)
+            rewardLossPerSample = self.twoHot.loss(rewardLogits, rewardTargets)  # (B, T-1)
 
         # === Inverse Frequency Weighting for Sparse Events ===
         # Sparse events (|reward| > 1) are ~1% of samples but carry critical signal.
@@ -337,9 +373,15 @@ class Dreamer:
         # Reconstruction error per sample (for distribution stats)
         reconError = (decodedObs - obsTargets).pow(2).mean(dim=-1)  # (B, T-1)
 
-        # Reward prediction accuracy (decode from two-hot logits)
+        # Reward prediction accuracy
         with torch.no_grad():
-            predictedRewardMean = self.twoHot.decode(rewardLogits)  # (B, T-1)
+            if self.useGaussianHeads:
+                # Gaussian: get mean from distribution
+                rewardDist = self.rewardPredictor(fullStates.view(-1, self.fullStateSize))
+                predictedRewardMean = rewardDist.mean.view(batchSize, batchLength - 1)
+            else:
+                # Two-Hot: decode from logits
+                predictedRewardMean = self.twoHot.decode(rewardLogits)  # (B, T-1)
         actualRewards = rewardTargets
         rewardPredError = (predictedRewardMean - actualRewards).abs()
 
@@ -521,17 +563,29 @@ class Dreamer:
         logprobs = torch.stack(logprobs[1:], dim=1)    # (B, horizon-1) - skip first
         entropies = torch.stack(entropies[1:], dim=1)  # (B, horizon-1)
 
-        # Get predictions (decode from two-hot logits)
-        rewardLogits = self.rewardPredictor(fullStates[:, :-1].reshape(-1, self.fullStateSize))
-        rewardLogits = rewardLogits.view(fullStates.shape[0], -1, self.twoHotBins)  # (B, H-1, 255)
-        predictedRewards = self.twoHot.decode(rewardLogits)  # (B, H-1)
+        # Get reward predictions
+        if self.useGaussianHeads:
+            # Gaussian: get mean from Normal distribution
+            rewardDist = self.rewardPredictor(fullStates[:, :-1].reshape(-1, self.fullStateSize))
+            predictedRewards = rewardDist.mean.view(fullStates.shape[0], -1)  # (B, H-1)
+        else:
+            # Two-Hot Symlog: decode from logits
+            rewardLogits = self.rewardPredictor(fullStates[:, :-1].reshape(-1, self.fullStateSize))
+            rewardLogits = rewardLogits.view(fullStates.shape[0], -1, self.twoHotBins)  # (B, H-1, 255)
+            predictedRewards = self.twoHot.decode(rewardLogits)  # (B, H-1)
 
         # Get critic values for lambda returns and advantage baseline
         # NOTE: Lambda returns use the MAIN critic, not the slow critic
         # The slow critic is a REGULARIZER (prevents rapid critic changes), not a target network
-        criticLogits = self.critic(fullStates.reshape(-1, self.fullStateSize))
-        criticLogits = criticLogits.view(fullStates.shape[0], -1, self.twoHotBins)  # (B, H, 255)
-        values = self.twoHot.decode(criticLogits)  # (B, H)
+        if self.useGaussianHeads:
+            # Gaussian: get mean from Normal distribution
+            criticDist = self.critic(fullStates.reshape(-1, self.fullStateSize))
+            values = criticDist.mean.view(fullStates.shape[0], -1)  # (B, H)
+        else:
+            # Two-Hot Symlog: decode from logits
+            criticLogits = self.critic(fullStates.reshape(-1, self.fullStateSize))
+            criticLogits = criticLogits.view(fullStates.shape[0], -1, self.twoHotBins)  # (B, H, 255)
+            values = self.twoHot.decode(criticLogits)  # (B, H)
 
         if self.config.useContinuationPrediction:
             continues = self.continuePredictor(fullStates).mean
@@ -560,18 +614,27 @@ class Dreamer:
         actorGradNorm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.config.gradientClip, norm_type=self.config.gradientNormType)
         self.actorOptimizer.step()
 
-        # === Critic Loss (Two-Hot Symlog) ===
-        # Get fresh logits for critic training (with gradient)
-        criticLogitsForLoss = self.critic(fullStates[:, :-1].detach().reshape(-1, self.fullStateSize))
-        criticLogitsForLoss = criticLogitsForLoss.view(fullStates.shape[0], -1, self.twoHotBins)  # (B, H-1, 255)
-        # Two-hot cross-entropy loss with lambda returns as targets
-        criticLoss = self.twoHot.loss(criticLogitsForLoss, lambdaValues.detach()).mean()
+        # === Critic Loss ===
+        if self.useGaussianHeads:
+            # Gaussian: negative log likelihood loss
+            criticDistForLoss = self.critic(fullStates[:, :-1].detach().reshape(-1, self.fullStateSize))
+            criticLossPerSample = -criticDistForLoss.log_prob(lambdaValues.detach().view(-1))
+            criticLoss = criticLossPerSample.mean()
+        else:
+            # Two-Hot Symlog: cross-entropy loss
+            criticLogitsForLoss = self.critic(fullStates[:, :-1].detach().reshape(-1, self.fullStateSize))
+            criticLogitsForLoss = criticLogitsForLoss.view(fullStates.shape[0], -1, self.twoHotBins)  # (B, H-1, 255)
+            criticLoss = self.twoHot.loss(criticLogitsForLoss, lambdaValues.detach()).mean()
 
         # Compute slow critic values for monitoring (track critic stability)
         with torch.no_grad():
-            slowCriticLogits = self.slowCritic(fullStates[:, :-1].detach().reshape(-1, self.fullStateSize))
-            slowCriticLogits = slowCriticLogits.view(fullStates.shape[0], -1, self.twoHotBins)
-            slowValues = self.twoHot.decode(slowCriticLogits)  # (B, H-1)
+            if self.useGaussianHeads:
+                slowCriticDist = self.slowCritic(fullStates[:, :-1].detach().reshape(-1, self.fullStateSize))
+                slowValues = slowCriticDist.mean.view(fullStates.shape[0], -1)  # (B, H-1)
+            else:
+                slowCriticLogits = self.slowCritic(fullStates[:, :-1].detach().reshape(-1, self.fullStateSize))
+                slowCriticLogits = slowCriticLogits.view(fullStates.shape[0], -1, self.twoHotBins)
+                slowValues = self.twoHot.decode(slowCriticLogits)  # (B, H-1)
             # How much has the critic diverged from its slow EMA?
             criticSlowDiff = (values[:, :-1].detach() - slowValues).abs().mean()
 
@@ -715,7 +778,7 @@ class Dreamer:
         return metrics
 
     @torch.no_grad()
-    def act(self, observation, h=None, z=None):
+    def act(self, observation, h=None, z=None, prev_action=None):
         """
         Select action for a single observation.
 
@@ -723,6 +786,8 @@ class Dreamer:
             observation: numpy array (obsSize,)
             h: Recurrent state (optional, for continuing episodes)
             z: Latent state (optional)
+            prev_action: Previous action as numpy array (actionSize,), or None for first step.
+                         Must match training where RSSM receives real previous actions.
 
         Returns:
             action: numpy array (actionSize,)
@@ -739,12 +804,14 @@ class Dreamer:
         obs_t = symlog(obs_t)  # Compress large values
         encodedObs = self.encoder(obs_t)
 
-        # We need a dummy action for first step - use zeros
-        # This matches how worldModelTraining works
-        action_dummy = torch.zeros(1, self.actionSize, device=self.device)
+        # Use real previous action (zeros only at episode start, matching training)
+        if prev_action is None:
+            action_t = torch.zeros(1, self.actionSize, device=self.device)
+        else:
+            action_t = torch.from_numpy(prev_action).float().unsqueeze(0).to(self.device)
 
-        # Update recurrent state
-        h = self.recurrentModel(h, z, action_dummy)
+        # Update recurrent state with previous action (matches worldModelTraining)
+        h = self.recurrentModel(h, z, action_t)
 
         # Get posterior (with observation)
         z, _ = self.posteriorNet(torch.cat((h, encodedObs), dim=-1))

@@ -51,15 +51,18 @@ class DreamerOpponent:
         self.agent = agent
         self.h = None
         self.z = None
+        self.prev_action = None
         self.name = "dreamer_checkpoint"
 
     def act(self, obs):
-        action, self.h, self.z = self.agent.act(obs, self.h, self.z)
+        action, self.h, self.z = self.agent.act(obs, self.h, self.z, self.prev_action)
+        self.prev_action = action
         return action
 
     def reset(self):
         self.h = None
         self.z = None
+        self.prev_action = None
 
 
 def run_eval_episode(env, agent, opponent, render=False):
@@ -74,6 +77,7 @@ def run_eval_episode(env, agent, opponent, render=False):
     """
     obs, _ = env.reset()
     h, z = None, None
+    prev_action = None
     total_reward = 0.0
     steps = 0
     frames = []
@@ -85,7 +89,8 @@ def run_eval_episode(env, agent, opponent, render=False):
             if frame is not None:
                 frames.append(frame)
 
-        action, h, z = agent.act(obs, h, z)
+        action, h, z = agent.act(obs, h, z, prev_action)
+        prev_action = action
         obs_opponent = env.obs_agent_two()
         action_opponent = opponent.act(obs_opponent)
         next_obs, reward, done, truncated, info = env.step(np.hstack([action, action_opponent]))

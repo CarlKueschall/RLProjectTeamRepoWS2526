@@ -85,7 +85,7 @@ class PosteriorNet(nn.Module):
 
 class RewardModel(nn.Module):
     """
-    Reward predictor using Two-Hot Symlog encoding.
+    Reward predictor using Two-Hot Symlog encoding (DreamerV3).
 
     Instead of predicting a Normal distribution (which fails for multi-modal
     rewards like 0 vs ±10), we predict a categorical distribution over 255 bins
@@ -112,6 +112,40 @@ class RewardModel(nn.Module):
     def forward(self, x):
         """Returns logits of shape (*, bins)."""
         return self.network(x)
+
+
+class RewardModelGaussian(nn.Module):
+    """
+    Reward predictor using Gaussian distribution (NaturalDreamer baseline).
+
+    This is the original NaturalDreamer approach: outputs mean and log_std,
+    creates a Normal distribution, and uses negative log likelihood as loss.
+
+    LIMITATION: Gaussian assumes unimodal rewards. For hockey's sparse
+    reward distribution {-10, 0, +10}, this fails because:
+    1. The mean gets pulled toward 0 (most common)
+    2. Cannot represent the bimodal +10/-10 for goal events
+    3. Gradients are weak for rare events
+
+    Used for ablation study to demonstrate Two-Hot Symlog's advantage.
+    """
+
+    def __init__(self, inputSize, config):
+        super().__init__()
+        self.config = config
+        self.network = sequentialModel1D(
+            inputSize,
+            [self.config.hiddenSize] * self.config.numLayers,
+            2,  # Output: mean and log_std
+            self.config.activation
+        )
+
+    def forward(self, x):
+        """Returns Normal distribution over rewards."""
+        mean, logStd = self.network(x).chunk(2, dim=-1)
+        # Bound std to reasonable range [0.1, 10]
+        logStd = torch.clamp(logStd, min=-2.3, max=2.3)
+        return Normal(mean.squeeze(-1), torch.exp(logStd).squeeze(-1))
 
 
 class ContinueModel(nn.Module):
@@ -217,7 +251,7 @@ class Actor(nn.Module):
 
 class Critic(nn.Module):
     """
-    Critic network using Two-Hot Symlog encoding.
+    Critic network using Two-Hot Symlog encoding (DreamerV3).
 
     Instead of predicting a Normal distribution for values, we predict a
     categorical distribution over 255 bins in symlog space. This is critical
@@ -247,6 +281,38 @@ class Critic(nn.Module):
     def forward(self, x):
         """Returns logits of shape (*, bins)."""
         return self.network(x)
+
+
+class CriticGaussian(nn.Module):
+    """
+    Critic network using Gaussian distribution (NaturalDreamer baseline).
+
+    This is the original NaturalDreamer approach: outputs mean and log_std,
+    creates a Normal distribution, and uses negative log likelihood as loss.
+
+    LIMITATION: Gaussian assumes smooth, unimodal value distributions.
+    For hockey, value functions can have sharp transitions (e.g., "about to
+    score" vs "just missed"), which Gaussian struggles to represent.
+
+    Used for ablation study to demonstrate Two-Hot Symlog's advantage.
+    """
+
+    def __init__(self, inputSize, config):
+        super().__init__()
+        self.config = config
+        self.network = sequentialModel1D(
+            inputSize,
+            [self.config.hiddenSize] * self.config.numLayers,
+            2,  # Output: mean and log_std
+            self.config.activation
+        )
+
+    def forward(self, x):
+        """Returns Normal distribution over values."""
+        mean, logStd = self.network(x).chunk(2, dim=-1)
+        # Bound std to reasonable range [0.1, 10]
+        logStd = torch.clamp(logStd, min=-2.3, max=2.3)
+        return Normal(mean.squeeze(-1), torch.exp(logStd).squeeze(-1))
 
 
 # =============================================================================

@@ -48,6 +48,7 @@ class SelfPlayOpponent:
         # Recurrent states for episode
         self.h = None
         self.z = None
+        self.prev_action = None
 
     def act(self, obs):
         """
@@ -59,13 +60,15 @@ class SelfPlayOpponent:
         Returns:
             action: Action (4 dims)
         """
-        action, self.h, self.z = self.agent.act(obs, self.h, self.z)
+        action, self.h, self.z = self.agent.act(obs, self.h, self.z, self.prev_action)
+        self.prev_action = action
         return action
 
     def reset(self):
         """Reset recurrent states for new episode."""
         self.h = None
         self.z = None
+        self.prev_action = None
 
 
 class SelfPlayManager:
@@ -129,6 +132,16 @@ class SelfPlayManager:
         self.opponent_results = {}  # {path: deque of results}
         self.opponent_games = {}  # {path: total games}
         self.opponent_episodes = {}  # {path: episode when added}
+
+        # Age-stratified self-play win rate tracking
+        # Pool is FIFO: index 0 = oldest, index -1 = newest
+        # We split into thirds: oldest, middle, newest
+        self.age_stratified_results = {
+            'oldest': deque(maxlen=200),
+            'middle': deque(maxlen=200),
+            'newest': deque(maxlen=200),
+        }
+        self.overall_sp_results = deque(maxlen=500)
 
         # Anchor balance tracking
         self.anchor_weak_count = 0
@@ -348,12 +361,13 @@ class SelfPlayManager:
         """
         return self.current_opponent
 
-    def record_result(self, winner):
+    def record_result(self, winner, current_episode=None):
         """
         Record game result against current opponent for PFSP tracking.
 
         Args:
             winner: 1 for win, -1 for loss, 0 for draw
+            current_episode: Current training episode (for age-stratified metrics)
         """
         if self.last_opponent_type != 'self-play':
             return
@@ -361,6 +375,20 @@ class SelfPlayManager:
         if self.current_opponent_path in self.opponent_results:
             self.opponent_results[self.current_opponent_path].append(winner)
             self.opponent_games[self.current_opponent_path] += 1
+
+        # Age-stratified tracking: classify opponent into tercile by pool position
+        # Pool is FIFO: index 0 = oldest, index -1 = newest
+        pool_size = len(self.pool)
+        idx = self.current_opponent_idx
+        if pool_size > 0 and 0 <= idx < pool_size:
+            tercile_size = pool_size / 3.0
+            if idx < tercile_size:
+                self.age_stratified_results['oldest'].append(winner)
+            elif idx < 2 * tercile_size:
+                self.age_stratified_results['middle'].append(winner)
+            else:
+                self.age_stratified_results['newest'].append(winner)
+            self.overall_sp_results.append(winner)
 
     def reset_opponent(self):
         """Reset opponent's recurrent state for new episode."""
@@ -419,5 +447,26 @@ class SelfPlayManager:
             if self.current_opponent_idx >= 0:
                 stats['selfplay/current_opponent_idx'] = self.current_opponent_idx
                 stats['selfplay/current_opponent_episode'] = self.current_opponent_episode
+
+            # Age-stratified win rates
+            for tercile in ('oldest', 'middle', 'newest'):
+                results = self.age_stratified_results[tercile]
+                if len(results) >= 5:
+                    wins = sum(1 for r in results if r == 1)
+                    stats[f'selfplay/winrate_{tercile}_third'] = wins / len(results)
+
+            if len(self.overall_sp_results) >= 5:
+                wins = sum(1 for r in self.overall_sp_results if r == 1)
+                stats['selfplay/winrate_vs_pool_overall'] = wins / len(self.overall_sp_results)
+
+            # Pool age info (in episodes)
+            if self.pool and self.opponent_episodes:
+                ages = []
+                for path in self.pool:
+                    if path in self.opponent_episodes:
+                        ages.append(self.opponent_episodes[path])
+                if ages:
+                    stats['selfplay/oldest_opponent_episode'] = min(ages)
+                    stats['selfplay/newest_opponent_episode'] = max(ages)
 
         return stats

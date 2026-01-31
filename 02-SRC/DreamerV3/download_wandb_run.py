@@ -28,7 +28,7 @@ from collections import defaultdict
 # METRIC CATEGORIES - Comprehensive DreamerV3 Metrics
 # =============================================================================
 #
-# These are all the metrics logged by our DreamerV3 implementation.
+# These are ALL metrics logged by our DreamerV3 implementation.
 # Organized by category for easy analysis.
 #
 # -----------------------------------------------------------------------------
@@ -42,11 +42,13 @@ from collections import defaultdict
 #   mean_reward          - Rolling mean reward (last 100)
 #   wins, losses, draws  - Cumulative counts
 #   buffer_size          - Replay buffer size
+#   opponent_weak_count      - Episodes vs weak opponent
+#   opponent_strong_count    - Episodes vs strong opponent
+#   opponent_selfplay_count  - Episodes vs self-play pool
 #
 # episode/
 #   length_mean/std/min/max    - Episode duration stats
 #   reward_mean/std            - Sparse reward stats
-#   shaped_reward_mean         - PBRS contribution
 #   win_rate_100               - Win rate last 100 episodes
 #   draw_rate_100              - Timeout rate
 #
@@ -56,9 +58,22 @@ from collections import defaultdict
 #   episodes_per_hour          - Episode throughput
 #   gradient_steps_per_second  - Training speed
 #
+# -----------------------------------------------------------------------------
+# DUAL EVALUATION (separate weak/strong eval)
+# -----------------------------------------------------------------------------
 # eval/
-#   win_rate, mean_reward      - Evaluation performance
-#   wins, losses, draws        - Eval outcome counts
+#   weak_win_rate              - Win rate vs weak opponent
+#   weak_mean_reward           - Mean reward vs weak
+#   weak_wins/losses/draws     - Outcome counts vs weak
+#
+#   strong_win_rate            - Win rate vs strong opponent
+#   strong_mean_reward         - Mean reward vs strong
+#   strong_wins/losses/draws   - Outcome counts vs strong
+#
+#   combined_win_rate          - Average of weak and strong win rates
+#
+#   gif_weak                   - GIF vs weak opponent
+#   gif_strong                 - GIF vs strong opponent
 #
 # -----------------------------------------------------------------------------
 # WORLD MODEL (is the model learning the environment?)
@@ -68,7 +83,7 @@ from collections import defaultdict
 #   recon_loss           - Observation reconstruction loss
 #   reward_loss          - Reward prediction loss
 #   kl_loss              - KL divergence loss
-#   continue_loss        - Episode termination prediction loss
+#   continue_loss        - Episode termination prediction loss (conditional)
 #
 #   recon_error_mean/std/max   - Reconstruction quality distribution
 #   reward_pred_error_mean/std - Reward prediction accuracy
@@ -78,8 +93,25 @@ from collections import defaultdict
 #   latent_entropy             - Diversity of latent space (higher=better)
 #   prior_posterior_kl         - World model uncertainty
 #
-#   continue_pred_mean         - Predicted continue probability
-#   continue_actual_mean       - Actual continue rate
+#   continue_pred_mean         - Predicted continue probability (conditional)
+#   continue_actual_mean       - Actual continue rate (conditional)
+#
+# -----------------------------------------------------------------------------
+# AUXILIARY TASKS (conditional: when useAuxiliaryTasks=True)
+# -----------------------------------------------------------------------------
+# aux/
+#   total_loss                 - Combined auxiliary loss
+#   goal_loss                  - Goal prediction BCE loss
+#   goal_accuracy              - Goal prediction accuracy
+#   goal_positive_rate         - Actual goal event rate
+#   goal_pred_positive_rate    - Predicted goal event rate
+#   puck_goal_dist_loss        - Puck-to-goal distance regression loss
+#   puck_goal_dist_error       - Distance prediction error
+#   puck_goal_dist_actual_mean - Actual mean distance
+#   puck_goal_dist_pred_mean   - Predicted mean distance
+#   shot_quality_loss          - Shot quality regression loss
+#   shot_quality_actual_mean   - Actual mean shot quality
+#   shot_quality_pred_mean     - Predicted mean shot quality
 #
 # -----------------------------------------------------------------------------
 # BEHAVIOR / ACTOR-CRITIC (is the policy learning?)
@@ -91,13 +123,17 @@ from collections import defaultdict
 #   entropy_mean/std/min/max   - Policy entropy distribution
 #   logprobs_mean/std          - Action log probabilities
 #
+#   mean_reg_loss              - Actor mean regularization loss
+#   actor_mean_abs             - Mean absolute actor output
+#
 #   advantages_mean/std/min/max      - Policy gradient signal
 #   advantages_abs_mean              - Signal magnitude
 #
 # values/
 #   mean/std/min/max           - Critic value predictions
-#   lambda_returns_mean/std/min/max  - TD(λ) targets
+#   lambda_returns_mean/std/min/max  - TD(lambda) targets
 #   norm_low/high/scale        - Value normalization stats
+#   critic_slow_diff           - EMA critic distance (stability)
 #
 # -----------------------------------------------------------------------------
 # IMAGINATION (what does the agent "see" when imagining?)
@@ -115,7 +151,10 @@ from collections import defaultdict
 # actions/
 #   mean/std/min/max           - Action distribution stats
 #   abs_mean                   - Action magnitude
-#   dim0/1/2/3_mean            - Per-dimension action means
+#   dim0_mean                  - Movement dimension 0
+#   dim1_mean                  - Movement dimension 1
+#   dim2_mean                  - Movement dimension 2
+#   dim3_mean                  - Movement dimension 3
 #
 # -----------------------------------------------------------------------------
 # GRADIENTS (is training stable?)
@@ -124,6 +163,16 @@ from collections import defaultdict
 #   world_model_norm           - World model gradient norm
 #   actor_norm                 - Actor gradient norm
 #   critic_norm                - Critic gradient norm
+#
+# -----------------------------------------------------------------------------
+# DIAGNOSTICS (entropy-advantage balance and return normalization)
+# -----------------------------------------------------------------------------
+# diagnostics/
+#   advantage_contribution     - Advantage term magnitude in actor loss
+#   entropy_contribution       - Entropy term magnitude in actor loss
+#   entropy_advantage_ratio    - Ratio of entropy to advantage
+#   return_range_S             - Return normalization range (should grow)
+#   return_range_at_floor      - 1.0 if range is at minimum (bad)
 #
 # -----------------------------------------------------------------------------
 # SPARSE REWARD SIGNAL (is the agent learning from sparse rewards?)
@@ -141,6 +190,10 @@ from collections import defaultdict
 #   nonsparse_pred_error       - Prediction error on dense rewards
 #   sparse_vs_nonsparse_error_ratio - Is sparse harder to predict?
 #
+#   sparse_weight_applied      - Weight used for sparse reward emphasis
+#   unweighted_reward_loss     - Reward loss before weighting
+#   weighted_reward_loss       - Reward loss after weighting
+#
 #   lambda_return_abs_mean     - Lambda return magnitude (should be >0)
 #   lambda_return_nonzero_frac - Fraction with signal
 #   lambda_return_significant_frac - Fraction with strong signal
@@ -150,39 +203,6 @@ from collections import defaultdict
 #
 #   advantage_nonzero_frac     - Fraction of meaningful advantages
 #   advantage_significant_frac - Fraction of strong advantages
-#
-# -----------------------------------------------------------------------------
-# PBRS COMPONENTS (reward shaping breakdown)
-# -----------------------------------------------------------------------------
-# pbrs/
-#   episode_total              - Total PBRS reward per episode
-#   episode_mean               - Mean PBRS per step
-#   chase_total                - Chase component contribution
-#   attack_total               - Attack component contribution
-#   chase_ratio                - Fraction from chase
-#   attack_ratio               - Fraction from attack
-#
-# -----------------------------------------------------------------------------
-# REWARD COMPOSITION (balance between sparse and shaped)
-# -----------------------------------------------------------------------------
-# reward_composition/
-#   sparse_fraction            - % of total from sparse (should be >0.5)
-#   pbrs_fraction              - % of total from PBRS (should be <0.5)
-#   sparse_mean                - Avg sparse reward
-#   pbrs_mean                  - Avg PBRS reward
-#   total_mean                 - Avg total reward
-#   pbrs_to_sparse_ratio       - |PBRS|/|sparse| (should be <1)
-#
-# -----------------------------------------------------------------------------
-# REWARD HACKING DETECTION (is the agent gaming PBRS?)
-# -----------------------------------------------------------------------------
-# reward_hacking/
-#   pbrs_std                   - PBRS variance
-#   sparse_std                 - Sparse reward variance
-#   pbrs_winrate_correlation   - PBRS-win correlation (should be >0)
-#   pbrs_when_win              - Avg PBRS in winning episodes
-#   pbrs_when_loss             - Avg PBRS in losing episodes
-#   loss_pbrs_minus_win_pbrs   - Should be <0 (more PBRS when winning)
 #
 # -----------------------------------------------------------------------------
 # SELF-PLAY (curriculum learning through self-play)
@@ -209,22 +229,12 @@ from collections import defaultdict
 #   current_opponent_idx       - Current pool opponent index
 #   current_opponent_episode   - Episode when current opponent was saved
 #
-# -----------------------------------------------------------------------------
-# DUAL EVALUATION (separate weak/strong eval)
-# -----------------------------------------------------------------------------
-# eval/
-#   weak_win_rate              - Win rate vs weak opponent
-#   weak_mean_reward           - Mean reward vs weak
-#   weak_wins/losses/draws     - Outcome counts vs weak
-#
-#   strong_win_rate            - Win rate vs strong opponent
-#   strong_mean_reward         - Mean reward vs strong
-#   strong_wins/losses/draws   - Outcome counts vs strong
-#
-#   combined_win_rate          - Average of weak and strong win rates
-#
-#   gif_weak                   - GIF vs weak opponent
-#   gif_strong                 - GIF vs strong opponent
+#   winrate_oldest_third       - Win rate vs oldest 1/3 of pool
+#   winrate_middle_third       - Win rate vs middle 1/3 of pool
+#   winrate_newest_third       - Win rate vs newest 1/3 of pool
+#   winrate_vs_pool_overall    - Overall win rate against all pool opponents
+#   oldest_opponent_episode    - Episode when oldest pool member was saved
+#   newest_opponent_episode    - Episode when newest pool member was saved
 #
 # =============================================================================
 
@@ -446,11 +456,12 @@ def format_run_data(run, include_metrics=None, max_chars=100000, fraction=1.0, m
         group_order = [
             'stats', 'episode', 'time', 'eval',  # Progress
             'selfplay',  # Self-play metrics
-            'world',  # World model
+            'world', 'aux',  # World model + auxiliary tasks
             'behavior', 'values',  # Actor-critic
             'imagination',  # Imagination
             'actions',  # Actions
             'gradients',  # Gradients
+            'diagnostics',  # Entropy-advantage balance
             'sparse_signal',  # Sparse rewards
             'pbrs', 'reward_composition', 'reward_hacking',  # Reward analysis
             'aux',  # Auxiliary tasks
