@@ -11,6 +11,7 @@ This file was developed with assistance from Claude Code.
 import os
 import pathlib
 import glob
+import csv
 from collections import deque
 import numpy as np
 import torch
@@ -88,7 +89,9 @@ class SelfPlayManager:
                  agent_class=None, obs_size=18, action_size=4,
                  action_low=None, action_high=None, config=None,
                  bootstrap_dir=None, bootstrap_glob="*.pth",
-                 bootstrap_max=0, bootstrap_strategy="uniform"):
+                 bootstrap_max=0, bootstrap_strategy="uniform",
+                 bootstrap_weights_csv=None, bootstrap_weight_column="blend_score",
+                 prior_weight_alpha=0.0):
         """
         Initialize self-play manager.
 
@@ -109,6 +112,9 @@ class SelfPlayManager:
             bootstrap_glob: Glob pattern for bootstrap checkpoints
             bootstrap_max: Max number of external checkpoints to seed at activation (0 disables)
             bootstrap_strategy: Selection strategy when bootstrap set is larger than bootstrap_max
+            bootstrap_weights_csv: Optional CSV with checkpoint quality weights
+            bootstrap_weight_column: Column in CSV used as checkpoint weight
+            prior_weight_alpha: Blend exponent for static prior in PFSP sampling (0 disables)
         """
         self.pool_size = pool_size
         self.save_interval = save_interval
@@ -128,6 +134,10 @@ class SelfPlayManager:
         self.bootstrap_glob = bootstrap_glob
         self.bootstrap_max = max(0, int(bootstrap_max))
         self.bootstrap_strategy = bootstrap_strategy
+        self.bootstrap_weights_csv = bootstrap_weights_csv
+        self.bootstrap_weight_column = bootstrap_weight_column
+        self.prior_weight_alpha = max(0.0, float(prior_weight_alpha))
+        self.bootstrap_source_weights = self._load_bootstrap_weights()
 
         # Self-play state
         self.active = False
@@ -144,6 +154,7 @@ class SelfPlayManager:
         self.opponent_games = {}  # {path: total games}
         self.opponent_episodes = {}  # {path: episode when added}
         self.opponent_sources = {}  # {path: original source path if bootstrapped}
+        self.opponent_sampling_prior = {}  # {path: static quality prior}
 
         # Age-stratified self-play win rate tracking
         # Pool is FIFO: index 0 = oldest, index -1 = newest
@@ -190,7 +201,7 @@ class SelfPlayManager:
         seed_path = selfplay_dir / f'selfplay_seed_ep{episode}.pth'
         agent_state = agent.state()
         torch.save({'agent_state': agent_state, 'episode': episode}, seed_path)
-        self._add_to_pool(str(seed_path), episode)
+        self._add_to_pool(str(seed_path), episode, prior_weight=1.0)
 
         # Optional: seed pool with external checkpoints for immediate diversity.
         if self.bootstrap_dir and self.bootstrap_max > 0:
@@ -209,12 +220,73 @@ class SelfPlayManager:
         print(f"Pool size: {self.pool_size}, Save interval: {self.save_interval}")
         print("=" * 70 + "\n")
 
-    def _add_to_pool(self, path, episode):
+    def _add_to_pool(self, path, episode, prior_weight=1.0):
         """Add checkpoint path to pool with tracking."""
         self.pool.append(path)
         self.opponent_results[path] = deque(maxlen=100)
         self.opponent_games[path] = 0
         self.opponent_episodes[path] = episode
+        self.opponent_sampling_prior[path] = max(float(prior_weight), 1e-6)
+
+    def _load_bootstrap_weights(self):
+        """Load optional bootstrap weights from CSV for biased league sampling."""
+        if not self.bootstrap_weights_csv:
+            return {}
+
+        csv_path = pathlib.Path(self.bootstrap_weights_csv).expanduser()
+        if not csv_path.is_absolute():
+            csv_path = pathlib.Path(os.getcwd()) / csv_path
+        if not csv_path.exists():
+            print(f"Self-play bootstrap weights CSV not found (skip): {csv_path}")
+            return {}
+
+        weights = {}
+        try:
+            with csv_path.open("r", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    raw_path = (
+                        row.get("candidate_path")
+                        or row.get("source_path")
+                        or row.get("path")
+                        or row.get("checkpoint_path")
+                    )
+                    if not raw_path:
+                        continue
+
+                    try:
+                        w = float(row.get(self.bootstrap_weight_column, "1.0"))
+                    except (TypeError, ValueError):
+                        w = 1.0
+                    w = max(w, 1e-6)
+
+                    abs_path = pathlib.Path(raw_path).expanduser()
+                    if not abs_path.is_absolute():
+                        abs_path = pathlib.Path(os.getcwd()) / abs_path
+                    abs_str = str(abs_path.resolve())
+                    weights[abs_str] = w
+                    weights[pathlib.Path(raw_path).name] = w
+        except Exception as e:
+            print(f"Failed to load bootstrap weights CSV {csv_path}: {e}")
+            return {}
+
+        print(
+            f"Loaded {len(weights)} bootstrap weight entries "
+            f"from {csv_path.name} (column={self.bootstrap_weight_column})"
+        )
+        return weights
+
+    def _lookup_source_weight(self, source_path):
+        """Resolve a prior weight for a source checkpoint path."""
+        if not self.bootstrap_source_weights:
+            return 1.0
+        src_abs = str(pathlib.Path(source_path).resolve())
+        if src_abs in self.bootstrap_source_weights:
+            return float(self.bootstrap_source_weights[src_abs])
+        src_name = pathlib.Path(source_path).name
+        if src_name in self.bootstrap_source_weights:
+            return float(self.bootstrap_source_weights[src_name])
+        return 1.0
 
     def should_activate(self, episode, start_episode):
         """Check if self-play should activate."""
@@ -258,6 +330,8 @@ class SelfPlayManager:
                 del self.opponent_episodes[removed_path]
                 if removed_path in self.opponent_sources:
                     del self.opponent_sources[removed_path]
+                if removed_path in self.opponent_sampling_prior:
+                    del self.opponent_sampling_prior[removed_path]
 
         return removed_path
 
@@ -276,6 +350,18 @@ class SelfPlayManager:
         if strategy == "random":
             idx = np.random.choice(len(paths), size=self.bootstrap_max, replace=False)
             return [paths[i] for i in sorted(idx.tolist())]
+        if strategy == "ranked":
+            ranked = sorted(
+                paths,
+                key=lambda p: self._lookup_source_weight(p),
+                reverse=True,
+            )
+            return ranked[:self.bootstrap_max]
+        if strategy == "weighted":
+            w = np.array([max(self._lookup_source_weight(p), 1e-8) for p in paths], dtype=np.float64)
+            w = w / w.sum()
+            idx = np.random.choice(len(paths), size=self.bootstrap_max, replace=False, p=w)
+            return [paths[i] for i in idx.tolist()]
 
         # Default: uniformly cover the trajectory.
         idx = np.linspace(0, len(paths) - 1, self.bootstrap_max, dtype=int)
@@ -343,6 +429,7 @@ class SelfPlayManager:
                 continue
             try:
                 agent_state, src_episode = self._checkpoint_to_agent_state(src_abs)
+                source_weight = self._lookup_source_weight(src_abs)
                 base = pathlib.Path(src_abs).name
                 dst = bootstrap_dir / f"bootstrap_{current_episode}_{idx:03d}_{base}"
                 torch.save(
@@ -350,10 +437,11 @@ class SelfPlayManager:
                         'agent_state': agent_state,
                         'episode': src_episode,
                         'source_checkpoint': src_abs,
+                        'source_weight': source_weight,
                     },
                     dst,
                 )
-                self._add_to_pool(str(dst), src_episode)
+                self._add_to_pool(str(dst), src_episode, prior_weight=source_weight)
                 self.opponent_sources[str(dst)] = src_abs
                 added += 1
 
@@ -367,6 +455,8 @@ class SelfPlayManager:
                         del self.opponent_episodes[removed]
                     if removed in self.opponent_sources:
                         del self.opponent_sources[removed]
+                    if removed in self.opponent_sampling_prior:
+                        del self.opponent_sampling_prior[removed]
             except Exception as e:
                 print(f"Failed to bootstrap self-play opponent from {src_abs}: {e}")
 
@@ -431,15 +521,17 @@ class SelfPlayManager:
         valid_paths = []
 
         for path in self.pool:
+            prior = max(float(self.opponent_sampling_prior.get(path, 1.0)), 1e-6)
+            prior_term = prior ** self.prior_weight_alpha if self.prior_weight_alpha > 0 else 1.0
             if path in self.opponent_results and len(self.opponent_results[path]) >= 5:
                 # Compute win rate from recent results
                 results = list(self.opponent_results[path])
                 wins = sum(1 for r in results if r == 1)
                 winrate = wins / len(results)
-                weight = pfsp_weight(winrate, mode=self.pfsp_mode)
+                weight = pfsp_weight(winrate, mode=self.pfsp_mode) * prior_term
             else:
-                # Not enough data, use uniform
-                weight = 1.0
+                # Not enough PFSP data yet: bias by static prior if available.
+                weight = prior_term
 
             weights.append(max(weight, 0.01))  # Minimum weight to ensure sampling
             valid_paths.append(path)
@@ -605,5 +697,11 @@ class SelfPlayManager:
                 if ages:
                     stats['selfplay/oldest_opponent_episode'] = min(ages)
                     stats['selfplay/newest_opponent_episode'] = max(ages)
+            if self.opponent_sampling_prior:
+                priors = [self.opponent_sampling_prior.get(p, 1.0) for p in self.pool]
+                if priors:
+                    stats['selfplay/prior_weight_mean'] = float(np.mean(priors))
+                    stats['selfplay/prior_weight_min'] = float(np.min(priors))
+                    stats['selfplay/prior_weight_max'] = float(np.max(priors))
 
         return stats

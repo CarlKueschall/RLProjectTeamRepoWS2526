@@ -33,7 +33,7 @@
 \cfoot{}
 
 \title{World-Model Based Reinforcement Learning for Hockey:\\
-        DreamerV3 with 2-Phase Training Curriculum}
+        DreamerV3 with Adaptive Opponent Curriculum}
 \author{Carl Kueschall\\
         University of T\"ubingen}
 \date{Winter Semester 2025/26}
@@ -52,9 +52,9 @@
 \medskip
 The hockey environment~\cite{martius2024} presents a challenging continuous control problem in an adversarial setting. Two agents compete in an air-hockey game with 18-dimensional state observations encoding positions, velocities, and puck state, while each player controls 4 continuous action dimensions. Episodes last up to 250 timesteps with extremely sparse rewards: $+10$ for scoring, $-10$ for conceding, and $0$ otherwise. This sparsity makes credit assignment difficult---agents must learn complex behaviors (positioning, puck control, shooting, defending) from reward signals that occur only at episode boundaries.
 
-We implement DreamerV3~\cite{hafner2024}, a world-model based reinforcement learning algorithm that addresses sparse rewards by learning entirely in ``imagination.'' The agent first learns a world model from real experience, then trains its policy through simulated rollouts in learned latent space. Our implementation builds upon the NaturalDreamer codebase\footnote{\url{https://github.com/InexperiencedMe/NaturalDreamer}}, with significant modifications for the hockey domain: Two-Hot Symlog encoding for sparse reward prediction, DreamSmooth~\cite{dreamsmooth2023} temporal reward smoothing, mixed opponent training, and a 2-phase curriculum that first saturates performance against fixed bots, then adds self-play from a strong checkpoint to achieve best results.
+I implement DreamerV3~\cite{hafner2024}, a world-model based reinforcement learning algorithm that addresses sparse rewards by learning entirely in ``imagination.'' The agent first learns a world model from real experience, then trains its policy through simulated rollouts in learned latent space. My implementation builds upon the NaturalDreamer codebase\footnote{\url{https://github.com/InexperiencedMe/NaturalDreamer}}, with significant modifications for hockey: Two-Hot Symlog for sparse reward prediction, DreamSmooth~\cite{dreamsmooth2023} temporal reward smoothing, PFSP self-play, and an adaptive opponent curriculum. A key project realization was that late-stage performance depends less on fixed bots and more on recursive opponent-pool management and curated league diversity.
 
-\textbf{Contributions:} DreamerV3 implementation with Two-Hot Symlog, DreamSmooth, mixed opponent training, and PFSP self-play---achieving 93.5\% combined win rate (90\% weak, 97\% strong) and top pre-tournament leaderboard performance.
+\textbf{Contributions:} (1) DreamerV3 hockey implementation with Two-Hot Symlog and DreamSmooth; (2) adaptive opponent curriculum with effective compute split of roughly 20\% anchor-only, 20\% bootstrap self-play, and 60\% league-dominant self-play; (3) robust checkpoint-selection tooling using worst-case and quantile metrics, not only mean win rate; (4) strong late checkpoints (556k/612k/634k) that consistently outperform older baselines in summit cross-play.
 
 % ============================================================================
 % SECTION 2: METHODS
@@ -86,13 +86,27 @@ Table~\ref{tab:modifications} summarizes our domain-specific modifications. \tex
 \midrule
 Two-Hot Symlog & MSE fails on sparse rewards & 255 bins in symlog space \\
 DreamSmooth & Temporal credit assignment & $\tilde{r}_t = \alpha r_t + (1-\alpha)\tilde{r}_{t+1}$, $\alpha=0.5$ \\
-Mixed Opponents & Overfitting to single opponent & 50\% weak / 50\% strong per episode \\
-Self-Play + PFSP & Limited diversity & 20-checkpoint pool, variance-weighted selection \\
+Anchor Opponents & Prevent catastrophic forgetting & 10\% weak + 10\% strong in late phase \\
+Self-Play + PFSP & Limited diversity & 48-checkpoint pool, variance-weighted PFSP, periodic insertion \\
 \bottomrule
 \end{tabular}
 \caption{Key modifications from baseline DreamerV3 for the hockey domain.}
 \label{tab:modifications}
 \end{table}
+
+\subsubsection{Recursive Opponent-Pool Management}
+
+The final training policy is controlled by opponent sampling rather than reward shaping. Let $\rho$ be the anchor probability; then
+\[
+\mathbb{P}(\text{anchor})=\rho,\quad \mathbb{P}(\text{self-play})=1-\rho.
+\]
+In late runs we set $\rho=0.2$, yielding an empirical distribution close to 80/10/10 (self-play/weak/strong). This keeps fixed-bot competence while maximizing exposure to diverse, hard opponents.
+
+To avoid selecting brittle checkpoints, I rank candidates with robustness-aware metrics from cross-play:
+\[
+\text{RobustScore}=0.60\cdot \text{CP}_{\min}+0.25\cdot \text{Fixed}_{\text{combined}}+0.15\cdot \text{CP}_{\text{mean}},
+\]
+and in later tooling also use $\text{CP}_{q20}$ (20th percentile) for stability under non-transitive matchups.
 
 \subsubsection{Behavior Learning}
 
@@ -107,30 +121,53 @@ with $\eta = 3 \times 10^{-4}$ fixed.
 % ============================================================================
 \section{Experimental Evaluation}\label{sec:experiments}
 
-\subsection{2-Phase Training Curriculum}
+\subsection{From 2-Phase Baseline to Adaptive 3-Stage Curriculum}
 
-We use a 2-phase curriculum (Table~\ref{tab:training-phases}). \textbf{Phase 1} trains against mixed opponents (50\% weak, 50\% strong) \emph{without} self-play until performance saturates. We select a strong checkpoint at 180k gradient steps and resume in a new run. \textbf{Phase 2} adds self-play from episode 1: a pool of 20 past checkpoints with PFSP (variance mode) opponent selection and 50\% anchor / 50\% pool mix. The same learning rates and replay ratio (32) are used in both phases.
+The early project used a 2-phase recipe (mixed fixed bots, then self-play) and reached a strong fixed-bot baseline at 336k. The final push revealed a clearer compute-allocation structure (Table~\ref{tab:training-phases}): fixed-bot training is necessary but quickly saturates, while most late gains come from league-dominant self-play with curated opponents.
 
 \begin{table}[h]
 \centering
 \small
-\begin{tabular}{lccccc}
+\begin{tabular}{lcccc}
 \toprule
-\textbf{Phase} & \textbf{Time} & \textbf{RR} & \textbf{LR (Actor)} & \textbf{Opponents} & \textbf{Combined Win Rate} \\
+\textbf{Stage} & \textbf{Compute Share} & \textbf{Main Opponents} & \textbf{Purpose} & \textbf{Outcome} \\
 \midrule
-1: Mixed only & $\sim$39h & 32 & $1 \times 10^{-4}$ & Weak + Strong (no self-play) & 0\% $\rightarrow$ $\sim$95\% \\
-2: + Self-Play & $\sim$20h & 32 & $1 \times 10^{-4}$ & Mixed + Pool (20 checkpoints) & $\sim$90\% $\rightarrow$ \textbf{93.5\%} \\
+A: Anchor competence & $\sim$20\% & Weak + strong fixed bots & Learn fundamentals, stabilize world model & Fast gain vs.\ fixed bots \\
+B: Bootstrap self-play & $\sim$20\% & Internal self-play + anchors & Introduce adversarial adaptation & Stronger checkpoints (e.g.\ 474k/556k) \\
+C: Curated league self-play & $\sim$60\% & 80\% league, 10\% weak, 10\% strong & Robustness against diverse opponents & Best late checkpoints (612k/634k) \\
 \bottomrule
 \end{tabular}
-\caption{2-phase training curriculum. RR = replay ratio. Phase 2 resumes from 180k checkpoint. Best checkpoint at 336k steps.\footnote{Both phases: RR=32, LR world/actor/critic $3\times10^{-4}$/$1\times10^{-4}$/$1\times10^{-4}$, DreamSmooth $\alpha$=0.5, mixed weak prob 0.5. Phase 1: warmup 100; Phase 2: warmup 200, pool 20, PFSP variance, weak\_ratio 0.5, save interval 500.}}
+\caption{Practical training-time allocation learned during the final push.}
 \label{tab:training-phases}
 \end{table}
 
-The top panel of Figure~\ref{fig:metrics-ablation} shows \texttt{eval/combined\_win\_rate} across both runs. The Phase 1 run (orange) saturates near 95\% by $\sim$200k steps. Phase 2 (red) begins at 180k already high; \texttt{combined\_win\_rate} does not show dramatic further gain because the metric is evaluated against fixed weak/strong bots, which Phase 1 already mastered. The benefit of self-play is therefore \emph{not} visible in this metric.
+In the representative late run (\_weak\_seed42\_20260224\_040000, 474k$\rightarrow$639k in 10.7h), opponent sampling matched target behavior: self-play ratio $\approx0.80$, anchor ratio $\approx0.20$, and balanced weak/strong anchors. The self-play pool grew to 48 tracked opponents. Pool metrics improved substantially: overall pool win rate reached 0.804 and newest-third win rate rose to 0.725, indicating continued progress against recent opponents.
+
+\subsection{Summit Cross-Play and Checkpoint Selection}
+
+I evaluate checkpoints with matrix cross-play against fixed bots plus a curated opponent bank. Results show clear improvement over older baselines, but also non-transitive behavior: ranking between 556k/612k/634k changes with seed and opponent set, while all three outperform 357k and 474k.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Matrix Snapshot} & \textbf{Top CP} & \textbf{Robust Score} & \textbf{CP Worst} & \textbf{Notes} \\
+\midrule
+2026-02-24 (09:27) & 556k & 0.6670 & 0.5330 & 3-candidate set \\
+2026-02-24 (12:59) & 612k & 0.7196 & 0.6000 & extended opponent set \\
+2026-02-24 (14:23) & 634k & 0.6664 & 0.5330 & 6-candidate set (556/612/622/634 + baselines) \\
+\bottomrule
+\end{tabular}
+\caption{Late-stage summit matrix results (30 episodes per fixed and checkpoint matchup).}
+\label{tab:late-matrix}
+\end{table}
+
+The main lesson is methodological: fixed-bot win rate saturates early and becomes weakly informative, while \texttt{CP\_worst} and lower-quantile cross-play metrics identify robustness gaps and guide better pool curation. I therefore introduced automated shortlist selection (\texttt{eval\_select\_pool.py}) that ranks and greedily selects checkpoints by quality+diversity.
 
 \subsection{Self-Play Metrics and Ablation Studies}
 
-Self-play progress is visible in pool-vs-pool metrics (Figure~\ref{fig:metrics-ablation}, middle row): win rate vs. oldest third rises 50\%$\rightarrow$97\%; vs. newest third 0\%$\rightarrow$80\%; vs. pool overall 50\%$\rightarrow$87\%. Later checkpoints clearly beat earlier ones. Ablation studies (bottom) validate key modifications: DreamSmooth and Two-Hot Symlog each contribute to final performance.
+Self-play progress remains visible in pool metrics (Figure~\ref{fig:metrics-ablation}, middle row), while ablations (bottom row) validate Two-Hot and DreamSmooth as enabling components for sparse reward learning.
 
 \begin{figure}[htbp]
 \centering
@@ -152,23 +189,24 @@ Self-play progress is visible in pool-vs-pool metrics (Figure~\ref{fig:metrics-a
 \label{fig:metrics-ablation}
 \end{figure}
 
-\subsection{Final Benchmark Performance}
+\subsection{Fixed-Bot Benchmark Saturation}
 
-Table~\ref{tab:benchmark} presents evaluation of the best checkpoint (336k steps) over 100 games per opponent with deterministic policy (seed 42). Performance against the strong bot (97\%) exceeds the weak bot (90\%); we hypothesize the strong bot's predictable play is easier to exploit than the weak bot's suboptimal variance.
+Table~\ref{tab:benchmark} shows that fixed-bot performance is high both for the earlier 336k benchmark and for late checkpoints, supporting the claim that fixed-bot metrics alone are no longer decisive in late training.
 
 \begin{table}[h]
 \centering
 \begin{tabular}{lcccc}
 \toprule
-\textbf{Opponent} & \textbf{Win Rate} & \textbf{Tie Rate} & \textbf{Loss Rate} & \textbf{Avg Reward} \\
+\textbf{Checkpoint} & \textbf{Eval Setup} & \textbf{Weak Win} & \textbf{Strong Win} & \textbf{Combined} \\
 \midrule
-Weak Bot & 90\% & 7\% & 3\% & +8.16 \\
-Strong Bot & 97\% & 0\% & 3\% & +8.73 \\
+336k (baseline) & 100 eps/opponent & 90\% & 97\% & 93.5\% \\
+556k (late run) & 30 eps/opponent & 96.7\% & 96.5\% & 96.5\% \\
+634k (late run) & 30 eps/opponent & 96.7\% & 96.7\% & 96.7\% \\
 \midrule
-\textbf{Combined} & \textbf{93.5\%} & 3.5\% & 3.0\% & +8.45 \\
+\multicolumn{5}{l}{\footnotesize Late-run values from summit matrix snapshots; lower episode count than baseline benchmark.} \\
 \bottomrule
 \end{tabular}
-\caption{Final benchmark (336k checkpoint, 100 games per opponent, deterministic, seed 42).}
+\caption{Fixed-bot performance saturates; cross-play robustness becomes the key discriminator.}
 \label{tab:benchmark}
 \end{table}
 
@@ -177,9 +215,11 @@ Strong Bot & 97\% & 0\% & 3\% & +8.73 \\
 % ============================================================================
 \section{Discussion}\label{sec:discussion}
 
-\textbf{Key Findings.} Two-Hot Symlog is critical---MSE fails on sparse $\{-10, 0, +10\}$ rewards. DreamSmooth accelerates learning by propagating goal signals backward. The 2-phase curriculum is effective: Phase 1 saturates performance against fixed bots without self-play; Phase 2 adds self-play from a strong checkpoint, and improvement is visible in self-play metrics (win rate vs. pool) rather than in \texttt{combined\_win\_rate} against fixed opponents. Mixed opponent training prevents overfitting to a single bot type. PFSP variance mode balances exposure to diverse opponents.
+\textbf{Key Findings and Lessons Learned.} First, Two-Hot Symlog and DreamSmooth are necessary base components for sparse-reward hockey. Second, the dominant late-stage factor is opponent curriculum design: after fixed-bot competence is reached, most additional compute should be invested in self-play against a curated league. In my final runs, this effectively became a 20/20/60 allocation (anchor/bootstrap/curated-league) and produced stronger checkpoints than the earlier 2-phase baseline. Third, recursive opponent management (periodic checkpoint insertion, PFSP sampling, and matrix-based curation) is what unlocked peak performance, not further optimization on weak/strong bots.
 
-\textbf{Limitations.} Evaluation is limited to weak and strong bots; the tournament will reveal generalization. $\sim$59h total training constrains hyperparameter search. \textbf{Future Work.} Population-based training; model-based planning during evaluation; transfer to other adversarial domains.
+\textbf{Limitations.} Matrix evaluations still use relatively small episode budgets in many snapshots (often 30), so ranking among close late checkpoints has variance. Non-transitivity remains visible, so a single ``best'' checkpoint may depend on opponent distribution. Some runs also revealed tooling constraints (e.g., incompatible legacy checkpoints) that required explicit filtering.
+
+\textbf{Future Work.} Run higher-confidence bidirectional matrix evaluations (100+ episodes per matchup, multiple seeds), maintain a continuously refreshed league from multiple seeds, and integrate online tournament feedback into checkpoint promotion criteria.
 
 % ============================================================================
 % AI USAGE DECLARATION

@@ -393,8 +393,14 @@ def parse_args():
     parser.add_argument("--self_play_bootstrap_max", type=int, default=0,
                         help="Max bootstrap checkpoints loaded into self-play pool at activation (0 disables)")
     parser.add_argument("--self_play_bootstrap_strategy", type=str, default="uniform",
-                        choices=["uniform", "recent", "oldest", "random"],
+                        choices=["uniform", "recent", "oldest", "random", "ranked", "weighted"],
                         help="Bootstrap checkpoint selection strategy when more files than max")
+    parser.add_argument("--self_play_bootstrap_weights_csv", type=str, default=None,
+                        help="Optional CSV with checkpoint weights (e.g. recommended_pool.csv)")
+    parser.add_argument("--self_play_bootstrap_weight_column", type=str, default="blend_score",
+                        help="CSV column used as prior quality weight (default: blend_score)")
+    parser.add_argument("--self_play_prior_alpha", type=float, default=0.0,
+                        help="Exponent for static checkpoint prior in PFSP sampling (0 disables)")
     parser.add_argument("--use_pfsp", action="store_true",
                         help="Enable Prioritized Fictitious Self-Play opponent selection")
     parser.add_argument("--pfsp_mode", type=str, default="variance",
@@ -585,6 +591,9 @@ def main():
                 "self_play_bootstrap_glob": args.self_play_bootstrap_glob,
                 "self_play_bootstrap_max": args.self_play_bootstrap_max,
                 "self_play_bootstrap_strategy": args.self_play_bootstrap_strategy,
+                "self_play_bootstrap_weights_csv": args.self_play_bootstrap_weights_csv,
+                "self_play_bootstrap_weight_column": args.self_play_bootstrap_weight_column,
+                "self_play_prior_alpha": args.self_play_prior_alpha,
                 "use_pfsp": args.use_pfsp,
                 "pfsp_mode": args.pfsp_mode,
             }
@@ -708,6 +717,9 @@ def main():
             bootstrap_glob=args.self_play_bootstrap_glob,
             bootstrap_max=args.self_play_bootstrap_max,
             bootstrap_strategy=args.self_play_bootstrap_strategy,
+            bootstrap_weights_csv=args.self_play_bootstrap_weights_csv,
+            bootstrap_weight_column=args.self_play_bootstrap_weight_column,
+            prior_weight_alpha=args.self_play_prior_alpha,
         )
         print(f"\nSelf-play enabled:")
         print(f"  Activation episode: {args.self_play_start}")
@@ -717,6 +729,10 @@ def main():
         if args.self_play_bootstrap_dir and args.self_play_bootstrap_max > 0:
             print(f"  Bootstrap dir: {args.self_play_bootstrap_dir}")
             print(f"  Bootstrap max: {args.self_play_bootstrap_max} ({args.self_play_bootstrap_strategy})")
+            if args.self_play_bootstrap_weights_csv:
+                print(f"  Bootstrap weights CSV: {args.self_play_bootstrap_weights_csv}")
+                print(f"  Bootstrap weight column: {args.self_play_bootstrap_weight_column}")
+        print(f"  Prior alpha: {args.self_play_prior_alpha}")
         print(f"  PFSP: {args.use_pfsp} (mode: {args.pfsp_mode})")
 
     # Resume if requested

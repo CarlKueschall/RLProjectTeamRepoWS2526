@@ -87,7 +87,7 @@ DEFAULT_DREAMER_CHECKPOINT = os.environ.get(
     'DREAMER_CHECKPOINT',
     os.path.join(
         script_dir,
-        "612k.pth"
+        "666k.pth"
     )
 )
 
