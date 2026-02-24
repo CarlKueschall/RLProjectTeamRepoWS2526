@@ -5,6 +5,16 @@ This is a simple example implementation for a client of the comprl hockey game. 
 wraps an agent from the `hockey` package and implements a script to run it as a client
 that connects to the comprl server.
 
+## Best Checkpoint: `best_selfplay_336k.pth`
+
+| Opponent | Win Rate | Loss | Draw | Avg Reward |
+|----------|----------|------|------|------------|
+| Weak Bot | 90.0% | 3.0% | 7.0% | +8.16 |
+| Strong Bot | 97.0% | 3.0% | 0.0% | +8.73 |
+| **Combined** | **93.5%** | 3.0% | 3.5% | +8.45 |
+
+*100 episodes each, seed 42. Reproduce: `cd ../DreamerV3 && python test_hockey.py --checkpoint ../comprl-hockey-agent/best_selfplay_336k.pth --opponent weak --episodes 100`*
+
 To run the example agent, you first need to install the dependencies:
 
 ```

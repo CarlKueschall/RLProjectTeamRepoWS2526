@@ -1,0 +1,19 @@
+\begin{thebibliography}{1}
+
+\bibitem{hafner2024}
+D.~Hafner, J.~Pasukonis, J.~Ba, and T.~Lillicrap.
+\newblock Mastering diverse domains through world models.
+\newblock {\em arXiv preprint arXiv:2301.04104}, 2024.
+
+\bibitem{martius2024}
+G.~Martius, P.~Kolev, M.~Zhobro, and S.~Ramen.
+\newblock Hockey environment.
+\newblock \url{https://github.com/martius-lab/hockey-env}, 2024.
+
+\bibitem{dreamsmooth2023}
+V.~Wu, J.~Aslanides, J.~Ba, and D.~Hafner.
+\newblock Dreamsmooth: Improving model-based reinforcement learning via reward
+  smoothing.
+\newblock {\em arXiv preprint arXiv:2311.01450}, 2023.
+
+\end{thebibliography}

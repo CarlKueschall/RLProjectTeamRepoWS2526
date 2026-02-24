@@ -33,6 +33,7 @@ plt.rcParams.update({
 })
 
 FIGURES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '03-RESULTS', 'REPORT', 'INPUT', 'figures')
+REPORT_FIGURES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '03-RESULTS', 'REPORT', 'figures')
 
 
 def ensure_dir(path):
@@ -148,59 +149,59 @@ def generate_placeholder_ablation_dreamsmooth():
     print(f"Saved: ablation_dreamsmooth_reward.png")
 
 
-def generate_placeholder_ablation_auxiliary():
-    """Generate placeholder Auxiliary Tasks ablation figures."""
-    ensure_dir(FIGURES_DIR)
-    np.random.seed(44)
+def generate_placeholder_selfplay_and_ablations():
+    """Generate compact placeholder figures for self-play metrics and ablations (2x3 grid)."""
+    ensure_dir(REPORT_FIGURES_DIR)
+    np.random.seed(42)
 
-    steps = np.linspace(0, 150, 100)
+    def _simple_plot(ax, title, y_label, y_range=(0, 1)):
+        """Minimal placeholder plot for consistent 4:3 aspect."""
+        x = np.linspace(0, 1, 50)
+        y = 0.5 + 0.4 * np.sin(3 * x) + np.random.randn(50) * 0.05
+        ax.plot(x, np.clip(y, *y_range), 'b-', linewidth=1.5)
+        ax.set_title(title, fontsize=9)
+        ax.set_ylabel(y_label, fontsize=8)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(y_range)
+        ax.tick_params(labelsize=7)
+        ax.grid(True, alpha=0.3)
 
-    # WITH Auxiliary Tasks
-    with_aux = 85 * (1 - np.exp(-steps/45)) + np.random.randn(100) * 4
+    # Self-play metrics (3 panels)
+    for name, title in [
+        ('selfplay_oldest_placeholder', 'Win rate vs. oldest third'),
+        ('selfplay_newest_placeholder', 'Win rate vs. newest third'),
+        ('selfplay_pool_placeholder', 'Win rate vs. pool overall'),
+    ]:
+        fig, ax = plt.subplots(figsize=(3.2, 2.4))
+        _simple_plot(ax, title, 'Win rate', (0, 1))
+        plt.tight_layout()
+        plt.savefig(os.path.join(REPORT_FIGURES_DIR, f'{name}.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Saved: {name}.png")
 
-    # WITHOUT Auxiliary Tasks - slightly worse
-    without_aux = 75 * (1 - np.exp(-steps/50)) + np.random.randn(100) * 5
-
-    # Win rate plot
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(steps, smooth(np.clip(with_aux, 0, 100), 5), 'b-', linewidth=2, label='With Auxiliary Tasks')
-    ax.plot(steps, smooth(np.clip(without_aux, 0, 100), 5), 'r--', linewidth=2, label='Without Auxiliary Tasks')
-    ax.set_xlabel('Gradient Steps (thousands)')
-    ax.set_ylabel('Win Rate (%)')
-    ax.set_title('Auxiliary Tasks Ablation: Win Rate')
-    ax.set_ylim(0, 100)
-    ax.legend(loc='lower right')
-    ax.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(FIGURES_DIR, 'ablation_auxiliary_winrate.png'))
-    plt.close()
-    print(f"Saved: ablation_auxiliary_winrate.png")
-
-    # World model loss plot
-    with_aux_loss = 3 * np.exp(-steps/30) + 0.5 + np.random.randn(100) * 0.1
-    without_aux_loss = 3 * np.exp(-steps/40) + 0.7 + np.random.randn(100) * 0.12
-
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(steps, smooth(with_aux_loss, 5), 'b-', linewidth=2, label='With Auxiliary Tasks')
-    ax.plot(steps, smooth(without_aux_loss, 5), 'r--', linewidth=2, label='Without Auxiliary Tasks')
-    ax.set_xlabel('Gradient Steps (thousands)')
-    ax.set_ylabel('World Model Loss')
-    ax.set_title('Auxiliary Tasks Ablation: World Model Quality')
-    ax.legend(loc='upper right')
-    ax.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(FIGURES_DIR, 'ablation_auxiliary_worldloss.png'))
-    plt.close()
-    print(f"Saved: ablation_auxiliary_worldloss.png")
+    # Ablation panels (2 panels)
+    for name, title in [
+        ('ablation_dreamsmooth_placeholder', 'DreamSmooth vs. no DreamSmooth'),
+        ('ablation_twohot_placeholder', 'Two-Hot vs. MSE'),
+    ]:
+        fig, ax = plt.subplots(figsize=(3.2, 2.4))
+        _simple_plot(ax, title, 'Win rate', (0, 1))
+        plt.tight_layout()
+        plt.savefig(os.path.join(REPORT_FIGURES_DIR, f'{name}.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Saved: {name}.png")
 
 
 def generate_all_placeholders():
     """Generate all placeholder figures."""
     print("Generating placeholder figures for report...")
-    print(f"Output directory: {FIGURES_DIR}")
+    print(f"Training/ablation output: {FIGURES_DIR}")
+    print(f"Self-play/ablation grid output: {REPORT_FIGURES_DIR}")
     print()
 
     generate_placeholder_training_curve()
     generate_placeholder_ablation_dreamsmooth()
-    generate_placeholder_ablation_auxiliary()
+    generate_placeholder_selfplay_and_ablations()
 
     print()
     print("All placeholder figures generated!")

@@ -256,7 +256,7 @@ def main():
     # Create and load agent
     agent = Dreamer(observation_size, action_size, action_low, action_high, device, config.dreamer)
     try:
-        agent.loadCheckpoint(args.checkpoint)
+        agent.loadCheckpoint(args.checkpoint, load_optimizers=False)
     except RuntimeError as e:
         print(f"ERROR: Failed to load checkpoint: {e}")
         print("This likely means the checkpoint was saved with a different architecture version.")
@@ -269,7 +269,7 @@ def main():
     if args.opponent_checkpoint:
         opponent_agent = Dreamer(observation_size, action_size, action_low, action_high, device, config.dreamer)
         try:
-            opponent_agent.loadCheckpoint(args.opponent_checkpoint)
+            opponent_agent.loadCheckpoint(args.opponent_checkpoint, load_optimizers=False)
         except RuntimeError as e:
             print(f"ERROR: Failed to load opponent checkpoint: {e}")
             env.close()

@@ -1,20 +1,32 @@
 # RL Hockey Project
 
-Authors: Serhat Alpay, Carl Kueschall
+Author: Carl Kueschall
 
 Reinforcement Learning project for training agents to play hockey using DreamerV3 (world-model based) and TD3 algorithms with self-play.
 
 ## Benchmark Results
 
-**Best Checkpoint: 266k gradient steps**
+**Best Checkpoint: `02-SRC/comprl-hockey-agent/best_selfplay_336k.pth`** (336,800 gradient steps)
 
-| Opponent | Win Rate |
-|----------|----------|
-| Weak Bot | 87% |
-| Strong Bot | 90% |
-| **Combined** | **88.5%** |
+| Opponent | Win Rate | Loss Rate | Draw Rate | Avg Reward |
+|----------|----------|-----------|-----------|------------|
+| Weak Bot | 90.0% | 3.0% | 7.0% | +8.16 |
+| Strong Bot | 97.0% | 3.0% | 0.0% | +8.73 |
+| **Combined** | **93.5%** | 3.0% | 3.5% | +8.45 |
 
-Training completed using a **3-phase approach** over ~54 hours total compute time.
+*Evaluated 100 episodes per opponent, seed 42, deterministic policy.*
+
+**Reproduce:**
+```bash
+conda activate py310
+cd 02-SRC/DreamerV3
+python test_hockey.py --checkpoint ../comprl-hockey-agent/best_selfplay_336k.pth --opponent weak --episodes 100 --seed 42
+python test_hockey.py --checkpoint ../comprl-hockey-agent/best_selfplay_336k.pth --opponent strong --episodes 100 --seed 42
+```
+
+Training completed using a **2-phase curriculum** over ~59 hours total compute time:
+- **Phase 1** (~39h): Mixed opponents (50% weak / 50% strong), no self-play, 0→~394k gradient steps
+- **Phase 2** (~20h): Resume from 180k checkpoint, add self-play (pool 20, PFSP variance, 50% anchor), 180k→357k steps
 
 ## Quick Start
 
@@ -94,7 +106,6 @@ python train_hockey.py \
 - **World Model**: RSSM with categorical latents (16x16 = 256 dim stochastic state)
 - **Imagination Training**: Actor-critic trained entirely in latent space rollouts
 - **Two-Hot Symlog**: Discretized reward/value prediction for sparse reward handling
-- **Auxiliary Tasks**: Goal prediction, distance, and shot quality heads improve representations
 - **Slow Critic (EMA)**: Exponential moving average for stable bootstrap targets
 - **DreamSmooth**: Optional temporal reward smoothing (arXiv:2311.01450)
 - **Self-Play**: PFSP opponent selection from checkpoint pool
@@ -114,7 +125,7 @@ python train_hockey.py \
 02-SRC/DreamerV3/           # PRIMARY - Active development
 ├── train_hockey.py          # Main training script
 ├── dreamer.py               # Dreamer agent (world model + behavior)
-├── networks.py              # Neural network components (incl. auxiliary task heads)
+├── networks.py              # Neural network components (MLP encoder/decoder, reward/value predictor)
 ├── buffer.py                # Replay buffer for sequences (with DreamSmooth support)
 ├── utils.py                 # Helpers (lambda returns, moments, TwoHotSymlog)
 ├── opponents/               # Opponent management
@@ -199,24 +210,42 @@ World-model based RL agent that learns entirely in imagination. Based on Dreamer
 
 Training logs to Weights & Biases with:
 - **World Model**: reconstruction loss, reward loss, KL divergence
-- **Auxiliary Tasks**: goal prediction loss, distance loss, shot quality loss
 - **Behavior**: actor loss, critic loss, entropy, advantages
 - **Stats**: win rate, episode rewards, buffer size
 - **Visualization**: Periodic gameplay GIFs
 
 ---
 
-## Training Methodology: 3-Phase Approach
+## Training Methodology: 2-Phase Approach
 
-The benchmark performance was achieved through a carefully designed 3-phase training curriculum:
+The benchmark performance was achieved through a 2-phase curriculum:
 
-### Phase 1: Mixed Opponents + Self-Play (30 hours)
+### Phase 1: Mixed Opponents Only (~39 hours)
 
-Initial training with diverse opponents to build robust fundamentals.
+Train on fixed weak/strong opponents (50/50) to saturate baseline benchmark performance.
 
 ```bash
 python train_hockey.py \
     --seed 42 \
+    --replay_ratio 32 \
+    --warmup_episodes 100 \
+    --lr_world 0.0003 \
+    --lr_actor 0.0001 \
+    --lr_critic 0.0001 \
+    --entropy_scale 0.0003 \
+    --use_dreamsmooth \
+    --mixed_opponents \
+    --mixed_weak_prob 0.5
+```
+
+### Phase 2: Resume at 180k + Self-Play (~20 hours)
+
+Resume from a strong 180k checkpoint and add self-play diversity while preserving fixed-opponent exposure.
+
+```bash
+python train_hockey.py \
+    --seed 42 \
+    --resume <phase1_180k_checkpoint.pth> \
     --replay_ratio 32 \
     --warmup_episodes 200 \
     --lr_world 0.0003 \
@@ -224,83 +253,23 @@ python train_hockey.py \
     --lr_critic 0.0001 \
     --entropy_scale 0.0003 \
     --use_dreamsmooth \
-    --dreamsmooth_alpha 0.5 \
     --mixed_opponents \
     --mixed_weak_prob 0.5 \
-    --self_play_start 1000 \
-    --self_play_pool_size 15 \
+    --self_play_start 1 \
+    --self_play_pool_size 20 \
     --use_pfsp \
-    --pfsp_mode variance
+    --pfsp_mode variance \
+    --weak_ratio 0.5 \
+    --self_play_save_interval 500
 ```
-
-**Key characteristics:**
-- Mixed opponents: 50% weak bot, 50% strong bot
-- Self-play activates at episode 1000 with PFSP (variance mode)
-- High replay ratio (32) for sample efficiency
-- DreamSmooth enabled for sparse reward handling
-- Ran for ~268k gradient steps, 8,581 episodes
-- Win rate progressed from ~13% to ~72%
-
-### Phase 2: Mixed Opponents Only (8 hours)
-
-After Phase 1 plateaued, removed self-play to focus on beating the fixed bots.
-
-```bash
-python train_hockey.py \
-    --seed 43 \
-    --resume results/checkpoints/.../192k.pth \
-    --replay_ratio 16 \
-    --lr_world 0.0002 \
-    --lr_actor 0.0001 \
-    --lr_critic 0.0001 \
-    --use_dreamsmooth \
-    --mixed_opponents \
-    --mixed_weak_prob 0.5
-```
-
-**Key changes from Phase 1:**
-- No self-play (focus on weak/strong bots)
-- Reduced replay ratio (16 vs 32)
-- Reduced world model LR (0.0002 vs 0.0003)
-- Resumed from 192k checkpoint (Phase 1)
-- Ran from 192k to ~270k gradient steps
-- Win rate: ~75-85%
-
-### Phase 3: Fine-Tuning (16 hours)
-
-Final polishing with conservative learning rates for stable convergence.
-
-```bash
-python train_hockey.py \
-    --seed 43 \
-    --resume results/checkpoints/.../260k.pth \
-    --replay_ratio 4 \
-    --lr_world 0.0002 \
-    --lr_actor 0.00005 \
-    --lr_critic 0.00005 \
-    --use_dreamsmooth \
-    --mixed_opponents \
-    --mixed_weak_prob 0.5
-```
-
-**Key changes from Phase 2:**
-- Much lower replay ratio (4) for more real environment experience
-- Halved actor/critic LRs (0.00005 vs 0.0001)
-- Resumed from 260k checkpoint (Phase 2)
-- Ran from 260k to ~340k gradient steps, ~30k episodes
-- **Best checkpoint at 266k: 87% weak, 90% strong, 88.5% combined**
 
 ### Training Insights
 
-1. **Self-play bootstrap, then remove**: Self-play helps early training but can become destabilizing once the agent is strong. Removing it in Phase 2 helped focus on the target opponents.
-
-2. **Gradual LR reduction**: Each phase reduced learning rates to allow finer-grained optimization without overshooting.
-
-3. **Replay ratio tradeoff**: High replay ratio (32) for initial learning, then progressively lower (16 → 4) to balance gradient updates with fresh experience.
-
-4. **DreamSmooth throughout**: Essential for handling sparse goal rewards across all phases.
-
-5. **Mixed opponents always**: Training against both weak and strong bots prevents overfitting to a single opponent type.
+1. **Mixed opponents first**: weak+strong anchors are enough to drive strong fixed-bot performance early.
+2. **Self-play second**: adding PFSP self-play after a strong checkpoint improves robustness and opponent diversity.
+3. **DreamSmooth remains essential** for sparse rewards.
+4. **Stable optimizer hierarchy matters**: keep actor LR <= critic LR.
+5. **Best final checkpoint**: 336.8k steps, 90% weak / 97% strong / 93.5% combined.
 
 ---
 

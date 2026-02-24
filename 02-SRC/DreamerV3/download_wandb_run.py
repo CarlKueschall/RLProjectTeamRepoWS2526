@@ -97,23 +97,6 @@ from collections import defaultdict
 #   continue_actual_mean       - Actual continue rate (conditional)
 #
 # -----------------------------------------------------------------------------
-# AUXILIARY TASKS (conditional: when useAuxiliaryTasks=True)
-# -----------------------------------------------------------------------------
-# aux/
-#   total_loss                 - Combined auxiliary loss
-#   goal_loss                  - Goal prediction BCE loss
-#   goal_accuracy              - Goal prediction accuracy
-#   goal_positive_rate         - Actual goal event rate
-#   goal_pred_positive_rate    - Predicted goal event rate
-#   puck_goal_dist_loss        - Puck-to-goal distance regression loss
-#   puck_goal_dist_error       - Distance prediction error
-#   puck_goal_dist_actual_mean - Actual mean distance
-#   puck_goal_dist_pred_mean   - Predicted mean distance
-#   shot_quality_loss          - Shot quality regression loss
-#   shot_quality_actual_mean   - Actual mean shot quality
-#   shot_quality_pred_mean     - Predicted mean shot quality
-#
-# -----------------------------------------------------------------------------
 # BEHAVIOR / ACTOR-CRITIC (is the policy learning?)
 # -----------------------------------------------------------------------------
 # behavior/
@@ -456,7 +439,7 @@ def format_run_data(run, include_metrics=None, max_chars=100000, fraction=1.0, m
         group_order = [
             'stats', 'episode', 'time', 'eval',  # Progress
             'selfplay',  # Self-play metrics
-            'world', 'aux',  # World model + auxiliary tasks
+            'world',  # World model
             'behavior', 'values',  # Actor-critic
             'imagination',  # Imagination
             'actions',  # Actions
@@ -464,7 +447,6 @@ def format_run_data(run, include_metrics=None, max_chars=100000, fraction=1.0, m
             'diagnostics',  # Entropy-advantage balance
             'sparse_signal',  # Sparse rewards
             'pbrs', 'reward_composition', 'reward_hacking',  # Reward analysis
-            'aux',  # Auxiliary tasks
         ]
 
         # Add any groups not in order

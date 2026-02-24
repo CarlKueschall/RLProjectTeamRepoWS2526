@@ -87,7 +87,7 @@ DEFAULT_DREAMER_CHECKPOINT = os.environ.get(
     'DREAMER_CHECKPOINT',
     os.path.join(
         script_dir,
-        "best_self_play_232k.pth"
+        "612k.pth"
     )
 )
 
@@ -286,12 +286,13 @@ class DreamerV3HockeyAgent(Agent):
         if 'continuePredictor' in checkpoint:
             self.agent.continuePredictor.load_state_dict(checkpoint['continuePredictor'])
 
-        # Load auxiliary task heads if available
-        if 'goalPredictor' in checkpoint:
+        # Load auxiliary task heads only if both checkpoint and agent have them
+        # (old checkpoints may contain aux heads; current Dreamer may not)
+        if 'goalPredictor' in checkpoint and hasattr(self.agent, 'goalPredictor'):
             self.agent.goalPredictor.load_state_dict(checkpoint['goalPredictor'])
-        if 'puckGoalDistPredictor' in checkpoint:
+        if 'puckGoalDistPredictor' in checkpoint and hasattr(self.agent, 'puckGoalDistPredictor'):
             self.agent.puckGoalDistPredictor.load_state_dict(checkpoint['puckGoalDistPredictor'])
-        if 'shotQualityPredictor' in checkpoint:
+        if 'shotQualityPredictor' in checkpoint and hasattr(self.agent, 'shotQualityPredictor'):
             self.agent.shotQualityPredictor.load_state_dict(checkpoint['shotQualityPredictor'])
 
         # Get training stats if available

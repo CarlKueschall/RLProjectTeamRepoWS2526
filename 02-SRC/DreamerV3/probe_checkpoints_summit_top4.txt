@@ -1,0 +1,6 @@
+# Relative paths from 02-SRC/DreamerV3
+# Used by --probe_checkpoints_file for robustness-aware evaluation.
+checkpoints/summit-evaluation/opponents/320k_0130_193448.pth
+checkpoints/summit-evaluation/opponents/336k_0130_193448.pth
+checkpoints/summit-evaluation/opponents/340k_0130_193448.pth
+checkpoints/summit-evaluation/opponents/357k_0130_193448.pth

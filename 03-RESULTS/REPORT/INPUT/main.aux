@@ -1,0 +1,56 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{martius2024}
+\citation{hafner2024}
+\citation{dreamsmooth2023}
+\citation{hafner2024}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:intro}{{1}{1}{Introduction}{section.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Methods}{1}{section.2}\protected@file@percent }
+\newlabel{sec:method}{{2}{1}{Methods}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}DreamerV3: World-Model Based RL}{1}{subsection.2.1}\protected@file@percent }
+\newlabel{subsec:dreamer-method}{{2.1}{1}{DreamerV3: World-Model Based RL}{subsection.2.1}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.1.1}Background}{1}{subsubsection.2.1.1}\protected@file@percent }
+\citation{hafner2024}
+\citation{dreamsmooth2023}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.1.2}World Model Architecture}{2}{subsubsection.2.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.1.3}Key Modifications for Hockey}{2}{subsubsection.2.1.3}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Key modifications from baseline DreamerV3 for the hockey domain.}}{2}{table.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{tab:modifications}{{1}{2}{Key modifications from baseline DreamerV3 for the hockey domain}{table.caption.1}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {2.1.4}Behavior Learning}{2}{subsubsection.2.1.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Experimental Evaluation}{2}{section.3}\protected@file@percent }
+\newlabel{sec:experiments}{{3}{2}{Experimental Evaluation}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}2-Phase Training Curriculum}{2}{subsection.3.1}\protected@file@percent }
+\bibstyle{abbrv}
+\bibdata{main}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces 2-phase training curriculum. RR = replay ratio. Phase 2 resumes from 180k checkpoint. Best checkpoint at 336k steps.\let \reserved@d =[\def \par }}{3}{table.caption.2}\protected@file@percent }
+\newlabel{tab:training-phases}{{2}{3}{2-phase training curriculum. RR = replay ratio. Phase 2 resumes from 180k checkpoint. Best checkpoint at 336k steps.\footnote {Both phases: RR=32, LR world/actor/critic $3\times 10^{-4}$/$1\times 10^{-4}$/$1\times 10^{-4}$, DreamSmooth $\alpha $=0.5, mixed weak prob 0.5. Phase 1: warmup 100; Phase 2: warmup 200, pool 20, PFSP variance, weak\_ratio 0.5, save interval 500.}}{table.caption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Self-Play Metrics and Ablation Studies}{3}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Final Benchmark Performance}{3}{subsection.3.3}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Final benchmark (336k checkpoint, 100 games per opponent, deterministic, seed 42).}}{3}{table.caption.4}\protected@file@percent }
+\newlabel{tab:benchmark}{{3}{3}{Final benchmark (336k checkpoint, 100 games per opponent, deterministic, seed 42)}{table.caption.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Discussion}{3}{section.4}\protected@file@percent }
+\newlabel{sec:discussion}{{4}{3}{Discussion}{section.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}AI Usage Declaration}{3}{section.5}\protected@file@percent }
+\newlabel{sec:ai-usage}{{5}{3}{AI Usage Declaration}{section.5}{}}
+\newlabel{fig:benchmark-composition}{{1a}{4}{Combined win rate vs.\ weak+strong bots}{figure.caption.3}{}}
+\newlabel{sub@fig:benchmark-composition}{{a}{4}{Combined win rate vs.\ weak+strong bots}{figure.caption.3}{}}
+\newlabel{fig:sp-oldest}{{1b}{4}{Win rate vs.\ oldest third}{figure.caption.3}{}}
+\newlabel{sub@fig:sp-oldest}{{b}{4}{Win rate vs.\ oldest third}{figure.caption.3}{}}
+\newlabel{fig:sp-newest}{{1c}{4}{Win rate vs.\ newest third}{figure.caption.3}{}}
+\newlabel{sub@fig:sp-newest}{{c}{4}{Win rate vs.\ newest third}{figure.caption.3}{}}
+\newlabel{fig:sp-pool}{{1d}{4}{Win rate vs.\ pool overall}{figure.caption.3}{}}
+\newlabel{sub@fig:sp-pool}{{d}{4}{Win rate vs.\ pool overall}{figure.caption.3}{}}
+\newlabel{fig:abl-ds}{{1e}{4}{DreamSmooth vs.\ no DreamSmooth}{figure.caption.3}{}}
+\newlabel{sub@fig:abl-ds}{{e}{4}{DreamSmooth vs.\ no DreamSmooth}{figure.caption.3}{}}
+\newlabel{fig:abl-twohot}{{1f}{4}{Two-Hot vs.\ MSE}{figure.caption.3}{}}
+\newlabel{sub@fig:abl-twohot}{{f}{4}{Two-Hot vs.\ MSE}{figure.caption.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Top: Combined win rate vs.\ fixed bots across phases. Middle: Self-play metrics (win rate vs.\ pool thirds). Bottom: Ablation studies (DreamSmooth, Two-Hot). Placeholders replace with actual figures.}}{4}{figure.caption.3}\protected@file@percent }
+\newlabel{fig:metrics-ablation}{{1}{4}{Top: Combined win rate vs.\ fixed bots across phases. Middle: Self-play metrics (win rate vs.\ pool thirds). Bottom: Ablation studies (DreamSmooth, Two-Hot). Placeholders replace with actual figures}{figure.caption.3}{}}
+\bibcite{hafner2024}{1}
+\bibcite{martius2024}{2}
+\bibcite{dreamsmooth2023}{3}
+\gdef \@abspage@last{5}

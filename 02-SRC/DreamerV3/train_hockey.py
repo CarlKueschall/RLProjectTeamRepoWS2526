@@ -6,7 +6,6 @@ This file was developed with assistance from Claude Code.
 
 Based on NaturalDreamer, adapted for hockey with:
 - 18-dim vector observations (MLP encoder/decoder)
-- Auxiliary tasks for world model representation learning
 - Opponent management (weak/strong/self-play)
 - W&B logging and metrics tracking
 - GIF recording for visualization
@@ -16,6 +15,7 @@ import argparse
 import os
 import time
 from datetime import datetime
+from collections import deque
 
 import numpy as np
 import torch
@@ -45,6 +45,30 @@ def create_opponent(opponent_type: str):
         return FixedOpponent(weak=False)
     else:
         raise ValueError(f"Unknown opponent type: {opponent_type}")
+
+
+class DreamerCheckpointOpponent:
+    """Wrap a Dreamer checkpoint as an evaluation opponent."""
+
+    def __init__(self, checkpoint_path, observation_size, action_size, action_low, action_high, device, config):
+        self.path = checkpoint_path
+        self.name = os.path.basename(checkpoint_path)
+        self.agent = Dreamer(observation_size, action_size, action_low, action_high, device, config)
+        # Evaluation only: do not require optimizer param-group compatibility.
+        self.agent.loadCheckpoint(checkpoint_path, load_optimizers=False)
+        self.h = None
+        self.z = None
+        self.prev_action = None
+
+    def act(self, obs):
+        action, self.h, self.z = self.agent.act(obs, self.h, self.z, self.prev_action)
+        self.prev_action = action
+        return action
+
+    def reset(self):
+        self.h = None
+        self.z = None
+        self.prev_action = None
 
 
 def run_episode(env, agent, opponent, training=True, seed=None, render=False):
@@ -313,10 +337,6 @@ def parse_args():
     # Buffer
     parser.add_argument("--buffer_capacity", type=int, default=None, help="Replay buffer capacity")
 
-    # Auxiliary tasks
-    parser.add_argument("--no_aux_tasks", action="store_true",
-                        help="Disable auxiliary task heads (goal/distance/shot quality prediction)")
-
     # Reward/Value prediction mode (Two-Hot vs Gaussian ablation)
     parser.add_argument("--use_gaussian_heads", action="store_true",
                         help="Use Gaussian reward/value prediction (NaturalDreamer baseline) instead of Two-Hot Symlog. "
@@ -328,6 +348,14 @@ def parse_args():
     parser.add_argument("--eval_interval", type=int, default=None,
                         help="Evaluation interval (gradient steps)")
     parser.add_argument("--eval_episodes", type=int, default=None, help="Episodes per evaluation")
+    parser.add_argument("--probe_checkpoints_file", type=str, default=None,
+                        help="Optional newline-separated checkpoint list for robustness probe evaluation")
+    parser.add_argument("--probe_episodes", type=int, default=10,
+                        help="Episodes per probe checkpoint evaluation (default: 10)")
+    parser.add_argument("--probe_max_checkpoints", type=int, default=8,
+                        help="Maximum number of probe opponents kept loaded at once (default: 8)")
+    parser.add_argument("--opponent_window_size", type=int, default=200,
+                        help="Rolling window size for opponent distribution stats (default: 200)")
 
     # GIF recording
     parser.add_argument("--gif_interval", type=int, default=None,
@@ -358,6 +386,15 @@ def parse_args():
                         help="Episodes between adding new opponents to pool")
     parser.add_argument("--self_play_weak_ratio", type=float, default=0.3,
                         help="Probability of training against anchor (weak/strong) vs pool")
+    parser.add_argument("--self_play_bootstrap_dir", type=str, default=None,
+                        help="Optional directory of external checkpoints to seed self-play pool at activation")
+    parser.add_argument("--self_play_bootstrap_glob", type=str, default="*.pth",
+                        help="Glob pattern for bootstrap checkpoints (default: *.pth)")
+    parser.add_argument("--self_play_bootstrap_max", type=int, default=0,
+                        help="Max bootstrap checkpoints loaded into self-play pool at activation (0 disables)")
+    parser.add_argument("--self_play_bootstrap_strategy", type=str, default="uniform",
+                        choices=["uniform", "recent", "oldest", "random"],
+                        help="Bootstrap checkpoint selection strategy when more files than max")
     parser.add_argument("--use_pfsp", action="store_true",
                         help="Enable Prioritized Fictitious Self-Play opponent selection")
     parser.add_argument("--pfsp_mode", type=str, default="variance",
@@ -453,11 +490,6 @@ def main():
         config.dreamer.buffer.dreamsmoothAlpha = args.dreamsmooth_alpha
         print(f"DreamSmooth enabled with alpha={args.dreamsmooth_alpha}")
 
-    # Auxiliary tasks override
-    if args.no_aux_tasks:
-        config.useAuxiliaryTasks = False
-        print("Auxiliary task heads disabled")
-
     # Gaussian heads override (for ablation study)
     if args.use_gaussian_heads:
         config.useGaussianHeads = True
@@ -533,9 +565,14 @@ def main():
                 "free_nats": config.dreamer.freeNats,
                 "buffer_capacity": config.dreamer.buffer.capacity,
                 "uniform_mix": config.dreamer.priorNet.uniformMix,
-                "use_auxiliary_tasks": config.get('useAuxiliaryTasks', True),
                 "use_gaussian_heads": config.get('useGaussianHeads', False),
                 "gif_interval": config.gifInterval,
+                "eval_interval": config.evalInterval,
+                "eval_episodes": config.numEvaluationEpisodes,
+                "probe_checkpoints_file": args.probe_checkpoints_file,
+                "probe_episodes": args.probe_episodes,
+                "probe_max_checkpoints": args.probe_max_checkpoints,
+                "opponent_window_size": args.opponent_window_size,
                 # Mixed opponents
                 "mixed_opponents": args.mixed_opponents,
                 "mixed_weak_prob": args.mixed_weak_prob,
@@ -544,6 +581,10 @@ def main():
                 "self_play_pool_size": args.self_play_pool_size,
                 "self_play_save_interval": args.self_play_save_interval,
                 "self_play_weak_ratio": args.self_play_weak_ratio,
+                "self_play_bootstrap_dir": args.self_play_bootstrap_dir,
+                "self_play_bootstrap_glob": args.self_play_bootstrap_glob,
+                "self_play_bootstrap_max": args.self_play_bootstrap_max,
+                "self_play_bootstrap_strategy": args.self_play_bootstrap_strategy,
                 "use_pfsp": args.use_pfsp,
                 "pfsp_mode": args.pfsp_mode,
             }
@@ -573,12 +614,81 @@ def main():
     eval_opponent_weak = create_opponent("weak")
     eval_opponent_strong = create_opponent("strong")
 
-    # Create agent
-    agent = Dreamer(observationSize, actionSize, actionLow, actionHigh, device, config.dreamer)
-
-    # Setup self-play manager (if enabled)
+    # Setup self-play manager state early so probe refresh can safely reference it.
     self_play_enabled = args.self_play_start is not None
     self_play_manager = None
+
+    # Optional probe checkpoint opponents for robustness-aware model selection.
+    # These are loaded lazily: if file/checkpoints are not present at startup
+    # (common on clusters), they are retried and accumulated during training.
+    probe_opponents = {}  # path -> DreamerCheckpointOpponent
+    probe_pending_paths = set()
+    probe_file_missing_warned = False
+
+    def _add_probe_path(raw_path):
+        p = raw_path.strip()
+        if not p or p.startswith("#"):
+            return
+        # Allow relative paths in probe files.
+        if not os.path.isabs(p):
+            p = os.path.abspath(p)
+        if p not in probe_opponents:
+            probe_pending_paths.add(p)
+
+    def refresh_probe_opponents():
+        nonlocal probe_file_missing_warned
+
+        # 1) Refresh from probe list file if available
+        if args.probe_checkpoints_file:
+            probe_file = args.probe_checkpoints_file
+            if os.path.exists(probe_file):
+                with open(probe_file, "r") as f:
+                    for line in f.readlines():
+                        _add_probe_path(line)
+            elif not probe_file_missing_warned:
+                print(f"Probe file not found yet (will retry): {probe_file}")
+                probe_file_missing_warned = True
+
+        # 2) Also accumulate from self-play pool once active
+        if self_play_enabled and self_play_manager is not None and self_play_manager.active:
+            for p in self_play_manager.pool:
+                _add_probe_path(p)
+
+        # 3) Attempt to materialize pending checkpoints
+        if not probe_pending_paths:
+            return
+
+        max_probe = max(1, args.probe_max_checkpoints)
+        for p in sorted(list(probe_pending_paths)):
+            if p in probe_opponents:
+                probe_pending_paths.discard(p)
+                continue
+            if len(probe_opponents) >= max_probe:
+                break
+            if not os.path.exists(p):
+                continue  # keep pending for future retries
+            try:
+                probe_opponents[p] = DreamerCheckpointOpponent(
+                    checkpoint_path=p,
+                    observation_size=observationSize,
+                    action_size=actionSize,
+                    action_low=actionLow,
+                    action_high=actionHigh,
+                    device=device,
+                    config=config.dreamer,
+                )
+                probe_pending_paths.discard(p)
+                print(f"Loaded probe opponent: {os.path.basename(p)} ({len(probe_opponents)}/{max_probe})")
+            except Exception as e:
+                # Keep pending and retry later (file may be partially copied/temporary).
+                print(f"Probe load failed for {p} (will retry): {e}")
+
+    if args.probe_checkpoints_file:
+        print(f"Probe checkpoint source enabled: {args.probe_checkpoints_file}")
+    refresh_probe_opponents()
+
+    # Create agent
+    agent = Dreamer(observationSize, actionSize, actionLow, actionHigh, device, config.dreamer)
 
     if self_play_enabled:
         self_play_manager = SelfPlayManager(
@@ -594,19 +704,38 @@ def main():
             action_low=actionLow,
             action_high=actionHigh,
             config=config.dreamer,
+            bootstrap_dir=args.self_play_bootstrap_dir,
+            bootstrap_glob=args.self_play_bootstrap_glob,
+            bootstrap_max=args.self_play_bootstrap_max,
+            bootstrap_strategy=args.self_play_bootstrap_strategy,
         )
         print(f"\nSelf-play enabled:")
         print(f"  Activation episode: {args.self_play_start}")
         print(f"  Pool size: {args.self_play_pool_size}")
         print(f"  Save interval: {args.self_play_save_interval}")
         print(f"  Weak ratio: {args.self_play_weak_ratio}")
+        if args.self_play_bootstrap_dir and args.self_play_bootstrap_max > 0:
+            print(f"  Bootstrap dir: {args.self_play_bootstrap_dir}")
+            print(f"  Bootstrap max: {args.self_play_bootstrap_max} ({args.self_play_bootstrap_strategy})")
         print(f"  PFSP: {args.use_pfsp} (mode: {args.pfsp_mode})")
 
     # Resume if requested
     if args.resume:
         if os.path.exists(args.resume) or os.path.exists(args.resume + '.pth'):
-            agent.loadCheckpoint(args.resume)
-            print(f"Resumed from: {args.resume}")
+            try:
+                agent.loadCheckpoint(args.resume, load_optimizers=True)
+                print(f"Resumed from: {args.resume} (with optimizer state)")
+            except ValueError as e:
+                # Common when checkpoint was produced with a slightly different parameter
+                # grouping (e.g., architecture/task-head changes). Fallback to model-only
+                # resume so training can continue from weights and counters.
+                if "parameter group" in str(e):
+                    print("Warning: optimizer state is incompatible with current model setup.")
+                    print("Falling back to model-only resume (optimizers reinitialized).")
+                    agent.loadCheckpoint(args.resume, load_optimizers=False)
+                    print(f"Resumed from: {args.resume} (model-only)")
+                else:
+                    raise
         else:
             print(f"Warning: Checkpoint not found: {args.resume}")
 
@@ -668,6 +797,7 @@ def main():
     episode_lengths = []
     episode_outcomes = {'win': 0, 'loss': 0, 'draw': 0}
     opponent_type_counts = {'weak': 0, 'strong': 0, 'self-play': 0}
+    recent_opponent_types = deque(maxlen=max(1, args.opponent_window_size))
     recent_wins = []
     recent_lengths = []
     start_time = time.time()
@@ -718,8 +848,12 @@ def main():
                     # Reset opponent state for new episode
                     self_play_manager.reset_opponent()
 
-            # Mixed opponents (before self-play activates, or if no self-play)
-            if use_mixed and current_opponent_type == config.opponent:
+            # Mixed opponents should only apply before self-play activation (or when disabled).
+            # Once self-play is active, opponent selection must come exclusively from the
+            # self-play manager to preserve configured anchor/self-play ratios.
+            if use_mixed and current_opponent_type == config.opponent and not (
+                self_play_enabled and self_play_manager is not None and self_play_manager.active
+            ):
                 # Self-play not active yet (or disabled) — use mixed opponents
                 if np.random.random() < mixed_weak_prob:
                     current_opponent = eval_opponent_weak
@@ -757,6 +891,7 @@ def main():
             episode_outcomes[outcome] += 1
             if current_opponent_type in opponent_type_counts:
                 opponent_type_counts[current_opponent_type] += 1
+            recent_opponent_types.append(current_opponent_type)
 
             # Rolling windows for recent stats
             recent_wins.append(1 if outcome == 'win' else 0)
@@ -800,6 +935,8 @@ def main():
                     "stats/opponent_weak_count": opponent_type_counts['weak'],
                     "stats/opponent_strong_count": opponent_type_counts['strong'],
                     "stats/opponent_selfplay_count": opponent_type_counts['self-play'],
+                    "stats/probe_loaded_count": len(probe_opponents),
+                    "stats/probe_pending_count": len(probe_pending_paths),
 
                     # Episode-level stats
                     "episode/length_mean": mean_length,
@@ -819,6 +956,18 @@ def main():
                     "time/episodes_per_hour": agent.totalEpisodes / (elapsed / 3600) if elapsed > 0 else 0,
                     "time/gradient_steps_per_second": agent.totalGradientSteps / elapsed if elapsed > 0 else 0,
                 }
+                # Rolling opponent distribution (diagnoses sampling drift/mismatch quickly)
+                if recent_opponent_types:
+                    win = len(recent_opponent_types)
+                    w = sum(1 for x in recent_opponent_types if x == 'weak') / win
+                    s = sum(1 for x in recent_opponent_types if x == 'strong') / win
+                    sp = sum(1 for x in recent_opponent_types if x == 'self-play') / win
+                    log_dict.update({
+                        "stats/opponent_recent_window": win,
+                        "stats/opponent_recent_weak_frac": w,
+                        "stats/opponent_recent_strong_frac": s,
+                        "stats/opponent_recent_selfplay_frac": sp,
+                    })
                 log_dict.update(worldModelMetrics)
                 log_dict.update(behaviorMetrics)
 
@@ -841,6 +990,8 @@ def main():
         # === Evaluation (against both weak and strong) ===
         if agent.totalGradientSteps % config.get('evalInterval', 1000) == 0:
             eval_metrics = {}
+            # Refresh probes dynamically before each evaluation pass.
+            refresh_probe_opponents()
 
             # Evaluate against weak opponent
             weak_metrics = evaluate_against_opponent(
@@ -861,7 +1012,40 @@ def main():
             strong_wr = strong_metrics['eval/strong_win_rate']
             eval_metrics['eval/combined_win_rate'] = (weak_wr + strong_wr) / 2
 
-            print(f"  EVAL: Weak={weak_wr:.1%}, Strong={strong_wr:.1%}, Combined={(weak_wr + strong_wr)/2:.1%}")
+            # Optional probe checkpoint evaluation (robustness proxy)
+            probe_wrs = []
+            if probe_opponents:
+                for probe in probe_opponents.values():
+                    probe_metrics = evaluate_against_opponent(
+                        env, agent, probe, args.probe_episodes, f"probe_{probe.name}"
+                    )
+                    # keep only scalar key names reasonably short for W&B
+                    probe_wr_key = f"eval/probe_wr/{probe.name}"
+                    eval_metrics[probe_wr_key] = probe_metrics[f"eval/probe_{probe.name}_win_rate"]
+                    probe_wrs.append(probe_metrics[f"eval/probe_{probe.name}_win_rate"])
+
+                if probe_wrs:
+                    probe_min = float(np.min(probe_wrs))
+                    probe_mean = float(np.mean(probe_wrs))
+                    eval_metrics['eval/probe_min_win_rate'] = probe_min
+                    eval_metrics['eval/probe_mean_win_rate'] = probe_mean
+                    eval_metrics['eval/robust_score'] = (
+                        0.60 * probe_min
+                        + 0.25 * eval_metrics['eval/combined_win_rate']
+                        + 0.15 * probe_mean
+                    )
+
+            msg = (
+                f"  EVAL: Weak={weak_wr:.1%}, Strong={strong_wr:.1%}, "
+                f"Combined={(weak_wr + strong_wr)/2:.1%}"
+            )
+            if probe_wrs:
+                msg += (
+                    f", ProbeMin={eval_metrics['eval/probe_min_win_rate']:.1%}, "
+                    f"ProbeMean={eval_metrics['eval/probe_mean_win_rate']:.1%}, "
+                    f"Robust={eval_metrics['eval/robust_score']:.3f}"
+                )
+            print(msg)
 
             if use_wandb:
                 wandb.log(eval_metrics, step=agent.totalGradientSteps)

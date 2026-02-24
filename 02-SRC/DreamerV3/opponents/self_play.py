@@ -10,6 +10,7 @@ This file was developed with assistance from Claude Code.
 
 import os
 import pathlib
+import glob
 from collections import deque
 import numpy as np
 import torch
@@ -85,7 +86,9 @@ class SelfPlayManager:
     def __init__(self, pool_size=10, save_interval=500, weak_ratio=0.3,
                  device=None, use_pfsp=True, pfsp_mode="variance",
                  agent_class=None, obs_size=18, action_size=4,
-                 action_low=None, action_high=None, config=None):
+                 action_low=None, action_high=None, config=None,
+                 bootstrap_dir=None, bootstrap_glob="*.pth",
+                 bootstrap_max=0, bootstrap_strategy="uniform"):
         """
         Initialize self-play manager.
 
@@ -102,6 +105,10 @@ class SelfPlayManager:
             action_low: Action lower bounds
             action_high: Action upper bounds
             config: Agent config for creating opponents
+            bootstrap_dir: Optional directory with external checkpoints for initial pool seeding
+            bootstrap_glob: Glob pattern for bootstrap checkpoints
+            bootstrap_max: Max number of external checkpoints to seed at activation (0 disables)
+            bootstrap_strategy: Selection strategy when bootstrap set is larger than bootstrap_max
         """
         self.pool_size = pool_size
         self.save_interval = save_interval
@@ -117,6 +124,10 @@ class SelfPlayManager:
         self.action_low = action_low
         self.action_high = action_high
         self.config = config
+        self.bootstrap_dir = bootstrap_dir
+        self.bootstrap_glob = bootstrap_glob
+        self.bootstrap_max = max(0, int(bootstrap_max))
+        self.bootstrap_strategy = bootstrap_strategy
 
         # Self-play state
         self.active = False
@@ -132,6 +143,7 @@ class SelfPlayManager:
         self.opponent_results = {}  # {path: deque of results}
         self.opponent_games = {}  # {path: total games}
         self.opponent_episodes = {}  # {path: episode when added}
+        self.opponent_sources = {}  # {path: original source path if bootstrapped}
 
         # Age-stratified self-play win rate tracking
         # Pool is FIFO: index 0 = oldest, index -1 = newest
@@ -147,6 +159,8 @@ class SelfPlayManager:
         self.anchor_weak_count = 0
         self.anchor_strong_count = 0
         self.selfplay_count = 0
+        self.bootstrap_added_count = 0
+        self.bootstrap_attempted = False
 
     def activate(self, episode, checkpoints_dir, agent):
         """
@@ -178,10 +192,18 @@ class SelfPlayManager:
         torch.save({'agent_state': agent_state, 'episode': episode}, seed_path)
         self._add_to_pool(str(seed_path), episode)
 
+        # Optional: seed pool with external checkpoints for immediate diversity.
+        if self.bootstrap_dir and self.bootstrap_max > 0:
+            added = self._bootstrap_pool(episode, selfplay_dir)
+            self.bootstrap_added_count += added
+
         print("\n" + "=" * 70)
         print(f"SELF-PLAY ACTIVATED AT EPISODE {episode}!")
         print("=" * 70)
-        print(f"Pool seeded with 1 opponent")
+        print(f"Pool seeded with {len(self.pool)} opponents")
+        if self.bootstrap_dir and self.bootstrap_max > 0:
+            print(f"Bootstrap dir: {self.bootstrap_dir}")
+            print(f"Bootstrap added: {self.bootstrap_added_count}/{self.bootstrap_max}")
         print(f"PFSP enabled: {self.use_pfsp} (mode: {self.pfsp_mode})")
         print(f"Weak ratio: {self.weak_ratio} (prob of anchor vs self-play)")
         print(f"Pool size: {self.pool_size}, Save interval: {self.save_interval}")
@@ -234,8 +256,121 @@ class SelfPlayManager:
                 del self.opponent_results[removed_path]
                 del self.opponent_games[removed_path]
                 del self.opponent_episodes[removed_path]
+                if removed_path in self.opponent_sources:
+                    del self.opponent_sources[removed_path]
 
         return removed_path
+
+    def _select_bootstrap_paths(self, paths):
+        """Select bootstrap checkpoint paths according to configured strategy."""
+        if not paths or self.bootstrap_max <= 0:
+            return []
+        if len(paths) <= self.bootstrap_max:
+            return paths
+
+        strategy = (self.bootstrap_strategy or "uniform").lower()
+        if strategy == "recent":
+            return paths[-self.bootstrap_max:]
+        if strategy == "oldest":
+            return paths[:self.bootstrap_max]
+        if strategy == "random":
+            idx = np.random.choice(len(paths), size=self.bootstrap_max, replace=False)
+            return [paths[i] for i in sorted(idx.tolist())]
+
+        # Default: uniformly cover the trajectory.
+        idx = np.linspace(0, len(paths) - 1, self.bootstrap_max, dtype=int)
+        return [paths[i] for i in sorted(set(idx.tolist()))]
+
+    def _checkpoint_to_agent_state(self, source_path):
+        """
+        Convert an external checkpoint into an agent_state compatible with restore_state().
+        Supports both:
+          - self-play checkpoints {'agent_state': ..., 'episode': ...}
+          - full Dreamer training checkpoints (loaded with loadCheckpoint)
+        """
+        checkpoint = torch.load(source_path, map_location=self.device, weights_only=False)
+
+        if isinstance(checkpoint, dict) and 'agent_state' in checkpoint:
+            return checkpoint['agent_state'], int(checkpoint.get('episode', 0))
+
+        # Fallback for full training checkpoints.
+        agent = self.agent_class(
+            self.obs_size,
+            self.action_size,
+            self.action_low,
+            self.action_high,
+            self.device,
+            self.config,
+        )
+        try:
+            agent.loadCheckpoint(source_path, load_optimizers=False)
+        except TypeError:
+            # Backward-compat fallback for older signatures.
+            agent.loadCheckpoint(source_path)
+        agent_state = agent.state()
+        ext_episode = 0
+        if isinstance(checkpoint, dict):
+            ext_episode = int(checkpoint.get('totalEpisodes', checkpoint.get('episode', 0)))
+        return agent_state, ext_episode
+
+    def _bootstrap_pool(self, current_episode, selfplay_dir):
+        """Seed self-play pool from an external checkpoint directory."""
+        self.bootstrap_attempted = True
+        bootstrap_root = pathlib.Path(self.bootstrap_dir).expanduser()
+        if not bootstrap_root.is_absolute():
+            bootstrap_root = pathlib.Path(os.getcwd()) / bootstrap_root
+        if not bootstrap_root.exists():
+            print(f"Self-play bootstrap dir not found (skip): {bootstrap_root}")
+            return 0
+
+        pattern = str(bootstrap_root / self.bootstrap_glob)
+        all_paths = sorted(glob.glob(pattern))
+        if not all_paths:
+            print(f"No bootstrap checkpoints found with pattern: {pattern}")
+            return 0
+
+        selected = self._select_bootstrap_paths(all_paths)
+        if not selected:
+            return 0
+
+        bootstrap_dir = pathlib.Path(selfplay_dir) / "bootstrap"
+        bootstrap_dir.mkdir(parents=True, exist_ok=True)
+        added = 0
+
+        for idx, src in enumerate(selected):
+            src_abs = str(pathlib.Path(src).resolve())
+            if any(v == src_abs for v in self.opponent_sources.values()):
+                continue
+            try:
+                agent_state, src_episode = self._checkpoint_to_agent_state(src_abs)
+                base = pathlib.Path(src_abs).name
+                dst = bootstrap_dir / f"bootstrap_{current_episode}_{idx:03d}_{base}"
+                torch.save(
+                    {
+                        'agent_state': agent_state,
+                        'episode': src_episode,
+                        'source_checkpoint': src_abs,
+                    },
+                    dst,
+                )
+                self._add_to_pool(str(dst), src_episode)
+                self.opponent_sources[str(dst)] = src_abs
+                added += 1
+
+                if len(self.pool) > self.pool_size:
+                    removed = self.pool.pop(0)
+                    if removed in self.opponent_results:
+                        del self.opponent_results[removed]
+                    if removed in self.opponent_games:
+                        del self.opponent_games[removed]
+                    if removed in self.opponent_episodes:
+                        del self.opponent_episodes[removed]
+                    if removed in self.opponent_sources:
+                        del self.opponent_sources[removed]
+            except Exception as e:
+                print(f"Failed to bootstrap self-play opponent from {src_abs}: {e}")
+
+        return added
 
     def select_opponent(self):
         """
@@ -407,6 +542,8 @@ class SelfPlayManager:
             'selfplay/pool_size': len(self.pool),
             'selfplay/weak_ratio_target': self.weak_ratio,
             'selfplay/episodes_since_activation': 0,
+            'selfplay/bootstrap_added_count': self.bootstrap_added_count,
+            'selfplay/bootstrap_attempted': 1.0 if self.bootstrap_attempted else 0.0,
         }
 
         if self.active:

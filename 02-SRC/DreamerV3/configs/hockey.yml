@@ -85,44 +85,6 @@ selfPlayStart: 0                 # Episode to start self-play (0 = disabled)
                                  # Not yet implemented in simplified version
 
 # -----------------------------------------------------------------------------
-# AUXILIARY TASKS (World Model Representation Learning)
-# -----------------------------------------------------------------------------
-# Auxiliary tasks help the world model learn goal-relevant representations
-# without corrupting the reward signal.
-#
-# DreamerV3 is designed to handle sparse rewards via imagination. Instead of
-# using PBRS (which corrupts rewards), we use auxiliary prediction tasks to
-# improve the latent representations directly.
-#
-# Three complementary tasks at different abstraction levels:
-#   1. Goal Prediction:   "Will a goal happen in next K steps?" (binary)
-#   2. Puck-Goal Distance: "How far is puck from opponent goal?" (regression)
-#   3. Shot Quality:      "How good is current scoring opportunity?" (regression)
-#
-# These tasks force the latent state to encode scoring-relevant features
-# without changing what the reward predictor needs to learn.
-# -----------------------------------------------------------------------------
-
-useAuxiliaryTasks: True          # Enable auxiliary prediction tasks
-                                 # Recommended: True (helps world model learn goal dynamics)
-
-auxTaskScale: 1.0                # Weight multiplier for auxiliary losses
-                                 # 1.0 = equal weight to main world model losses
-                                 # Reduce if auxiliary tasks dominate training
-
-goalPredictionHorizon: 25        # Look-ahead window for goal prediction task
-                                 # "Will a goal happen in next K steps?"
-                                 # 25 steps ≈ 2-3 seconds of gameplay
-
-goalRewardThreshold: 1.0         # Reward magnitude that counts as "goal event"
-                                 # Hockey rewards are ±2.5 for goals
-                                 # With DreamSmooth (alpha=0.5), smoothed peak ≈ 1.25
-                                 # Threshold must be < 2.5 to detect goals!
-
-auxHiddenSize: 128               # Hidden layer size for auxiliary task heads
-                                 # Smaller than main networks (256) since simpler tasks
-
-# -----------------------------------------------------------------------------
 # LOGGING (Weights & Biases)
 # -----------------------------------------------------------------------------
 
