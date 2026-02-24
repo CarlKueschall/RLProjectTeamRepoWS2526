@@ -189,7 +189,7 @@ def run_one_job(test_script: Path, config: str, seed: int, device: str, job: dic
 
 def main():
     args = parse_args()
-    root = Path(__file__).resolve().parent
+    root = Path(__file__).resolve().parent.parent  # DreamerV3/
     test_script = root / "test_hockey.py"
     output_root = (root / args.output_dir).resolve()
     timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
+DREAMER_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$DREAMER_DIR"
 
 # Robust conda activation without sourcing user shell rc files.
 if [[ -n "${CONDA_EXE:-}" ]]; then
@@ -37,7 +38,7 @@ if [[ ! -f "$CHECKPOINT" ]]; then
   exit 1
 fi
 
-python3 prepare_league_pool.py \
+python3 scripts/prepare_league_pool.py \
   --recommended-csv "$RECOMMENDED_CSV" \
   --source-dir "$OPPONENTS_DIR" \
   --out-dir "$LEAGUE_DIR" \

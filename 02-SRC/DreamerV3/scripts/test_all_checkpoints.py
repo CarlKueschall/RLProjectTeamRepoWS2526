@@ -14,16 +14,23 @@ This script:
 
 Usage:
     conda activate py310
-    python TEMP_test_all.py                    # Test all checkpoints
-    python TEMP_test_all.py --episodes 50      # Fewer episodes per test
-    python TEMP_test_all.py --checkpoints best_weak.pth best_strong.pth  # Specific checkpoints
-    python TEMP_test_all.py --no-record        # Skip video recording
+    cd 02-SRC/DreamerV3
+    python scripts/test_all_checkpoints.py                    # Test all checkpoints
+    python scripts/test_all_checkpoints.py --episodes 50      # Fewer episodes per test
+    python scripts/test_all_checkpoints.py --checkpoints best_weak.pth best_strong.pth  # Specific checkpoints
+    python scripts/test_all_checkpoints.py --no-record        # Skip video recording
 """
 
 import argparse
 import os
 import sys
 import json
+
+# Ensure DreamerV3 root is on path when run as scripts/test_all_checkpoints.py
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_dreamer_root = os.path.dirname(_script_dir)
+if _dreamer_root not in sys.path:
+    sys.path.insert(0, _dreamer_root)
 import time
 from datetime import datetime
 from pathlib import Path
@@ -666,6 +673,13 @@ def find_checkpoints(base_dir: str, specific_checkpoints: Optional[List[str]] = 
             if f.endswith('.pth'):
                 checkpoints.append(os.path.join(results_dir, f))
 
+    # Check checkpoints/training subdirectory
+    training_dir = os.path.join(base_dir, 'checkpoints', 'training')
+    if os.path.exists(training_dir):
+        for f in os.listdir(training_dir):
+            if f.endswith('.pth'):
+                checkpoints.append(os.path.join(training_dir, f))
+
     return checkpoints
 
 
@@ -697,8 +711,8 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Setup
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    # Setup (base_dir = DreamerV3 root for checkpoint discovery)
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     output_dir = os.path.join(base_dir, args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
 

@@ -21,7 +21,7 @@
 | Discussion | ✅ Complete |
 | AI usage declaration | ✅ Complete |
 | Bibliography | ✅ Complete (`INPUT/main.bib`) |
-| Placeholder figures | Run `python generate_report_figures.py --placeholder` |
+| Placeholder figures | Run `python scripts/generate_report_figures.py --placeholder` (from DreamerV3/) |
 | Ablation runs | ✅ DreamSmooth + Two-Hot complete |
 | Real figures from ablations | 🔲 TODO |
 

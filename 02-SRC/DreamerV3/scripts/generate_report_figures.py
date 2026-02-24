@@ -32,8 +32,8 @@ plt.rcParams.update({
     'savefig.bbox': 'tight',
 })
 
-FIGURES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '03-RESULTS', 'REPORT', 'INPUT', 'figures')
-REPORT_FIGURES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '03-RESULTS', 'REPORT', 'figures')
+FIGURES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '..', '03-RESULTS', 'REPORT', 'INPUT', 'figures')
+REPORT_FIGURES_DIR = os.path.join(os.path.dirname(__file__), '..', '..', '..', '03-RESULTS', 'REPORT', 'figures')
 
 
 def ensure_dir(path):

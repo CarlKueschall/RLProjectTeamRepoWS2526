@@ -1,5 +1,8 @@
 #!/bin/bash
 # Ablation Study Scripts for DreamerV3 Hockey Report
+# Run from DreamerV3/ or sbatch/; script cd's to DreamerV3
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
 #
 # These ablations demonstrate the value of our key modifications:
 # 1. DreamSmooth (temporal reward smoothing)

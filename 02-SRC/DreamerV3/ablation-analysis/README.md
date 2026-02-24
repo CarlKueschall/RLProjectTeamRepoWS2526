@@ -47,6 +47,6 @@ After running `python analyze_ablations.py`:
 
 ## Usage
 
-1. Place W&B run exports in `input/` (e.g. via `download_wandb_run.py`).
+1. Place W&B run exports in `input/` (e.g. via `scripts/download_wandb_run.py`).
 2. Run `python analyze_ablations.py` to parse and extract metrics.
 3. Read the markdown reports in `output/` for analysis and report text.

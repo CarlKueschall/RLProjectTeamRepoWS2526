@@ -55,7 +55,7 @@ if [ ! -f "${RECOMMENDED_CSV}" ]; then
 fi
 
 # Build curated league directory (symlinks + weights) from recommended pool.
-python3 prepare_league_pool.py \
+python3 scripts/prepare_league_pool.py \
   --recommended-csv "${RECOMMENDED_CSV}" \
   --source-dir "${OPPONENTS_DIR}" \
   --out-dir "${LEAGUE_DIR}" \

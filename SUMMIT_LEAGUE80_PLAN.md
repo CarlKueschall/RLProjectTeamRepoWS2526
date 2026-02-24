@@ -37,7 +37,7 @@ rsync -av \
 
 2. Upload resume checkpoint into DreamerV3 root (same dir as `train_hockey.py`):
 ```bash
-scp /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/results_checkpoints__weak_seed42_20260223_031428_474k.pth \
+scp /Users/carlkueschall/workspace/RLProjectHockey/02-SRC/DreamerV3/checkpoints/training/results_checkpoints__weak_seed42_20260223_031428_474k.pth \
   stud432@login3.tcml.uni-tuebingen.de:~/02-SRC/DreamerV3/
 ```
 
@@ -54,7 +54,7 @@ scp /Users/carlkueschall/workspace/RLProjectHockey/99-ARCHIVE/TD3/results_checkp
 
 4. Verify remote files:
 ```bash
-ssh stud432@login3.tcml.uni-tuebingen.de "ls -lh ~/02-SRC/DreamerV3 | rg 'results_checkpoints__weak_seed42_20260223_031428_474k.pth' && ls -lh ~/02-SRC/DreamerV3/checkpoints/summit-evaluation/opponents | wc -l"
+ssh stud432@login3.tcml.uni-tuebingen.de "ls -lh ~/02-SRC/DreamerV3/checkpoints/training | rg 'results_checkpoints__weak_seed42_20260223_031428_474k.pth' && ls -lh ~/02-SRC/DreamerV3/checkpoints/summit-evaluation/opponents | wc -l"
 ```
 
 5. Submit training job:

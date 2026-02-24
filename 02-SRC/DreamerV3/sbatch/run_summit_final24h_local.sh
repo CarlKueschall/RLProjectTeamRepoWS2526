@@ -16,7 +16,7 @@ source /opt/homebrew/Caskroom/miniconda/base/etc/profile.d/conda.sh
 conda activate py310
 
 # Configurable knobs via env vars
-RESUME_CKPT="${RESUME_CKPT:-357k_0130_193448.pth}"
+RESUME_CKPT="${RESUME_CKPT:-checkpoints/training/357k_0130_193448.pth}"
 SEED="${SEED:-42}"
 RUN_NAME="${RUN_NAME:-summit-final24h-local-seed${SEED}-$(date +%Y%m%d_%H%M%S)}"
 DEVICE="${DEVICE:-mps}"   # use cuda on Linux GPU boxes
@@ -79,7 +79,7 @@ python train_hockey.py \
     --use_pfsp \
     --pfsp_mode variance \
     \
-    --probe_checkpoints_file probe_checkpoints_summit_top4.txt \
+    --probe_checkpoints_file checkpoints/probe_checkpoints_summit_top4.txt \
     --probe_episodes 8 \
     --opponent_window_size 200 \
     \

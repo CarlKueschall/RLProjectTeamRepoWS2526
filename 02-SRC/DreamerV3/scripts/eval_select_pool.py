@@ -637,7 +637,7 @@ def write_summary_csv(path: Path, rows, fieldnames):
 
 def main():
     args = parse_args()
-    root = Path(__file__).resolve().parent
+    root = Path(__file__).resolve().parent.parent  # DreamerV3/
     test_script = root / "test_hockey.py"
 
     if args.checkpoints_file:
