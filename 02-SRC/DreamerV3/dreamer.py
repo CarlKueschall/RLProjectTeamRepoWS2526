@@ -4,8 +4,8 @@ DreamerV3 Agent for Hockey (Low-dimensional observations).
 Based on NaturalDreamer, adapted for 18-dim vector observations.
 Simple, clean implementation following KISS principle.
 
-AI Usage Declaration:
-This file was developed with assistance from Claude Code.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 """
 
 import torch

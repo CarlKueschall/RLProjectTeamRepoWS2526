@@ -1,16 +1,9 @@
 """
-DreamerV3 Hockey Training Package.
-
-This package implements DreamerV3 for the laser-hockey-gym environment,
-based on the Robot Air Hockey Challenge 2023 winning approach.
-
-Key features:
-- Sparse rewards only (no reward shaping exploitation)
-- World model with imagination-based credit assignment
-- Self-play with PFSP for robust generalization
-
-AI Usage Declaration:
-This file was developed with assistance from Claude Code.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 """
+
+# DreamerV3 for laser-hockey-gym. Sparse rewards only, world model + imagination,
+# self-play with PFSP. Based on Robot Air Hockey Challenge 2023 winning approach.
 
 __version__ = "0.1.0"

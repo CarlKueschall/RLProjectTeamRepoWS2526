@@ -1,3 +1,8 @@
+"""
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
+"""
+
 import gymnasium as gym
 import torch
 import argparse
@@ -20,10 +25,10 @@ def main(configFile):
     checkpointFilenameBase  = os.path.join(config.folderNames.checkpointsFolder,    runName)
     videoFilenameBase       = os.path.join(config.folderNames.videosFolder,         runName)
     ensureParentFolders(metricsFilename, plotFilename, checkpointFilenameBase, videoFilenameBase)
-    
+
     env             = CleanGymWrapper(GymPixelsProcessingWrapper(gym.wrappers.ResizeObservation(gym.make(config.environmentName), (64, 64))))
     envEvaluation   = CleanGymWrapper(GymPixelsProcessingWrapper(gym.wrappers.ResizeObservation(gym.make(config.environmentName, render_mode="rgb_array"), (64, 64))))
-    
+
     observationShape, actionSize, actionLow, actionHigh = getEnvProperties(env)
     print(f"envProperties: obs {observationShape}, action size {actionSize}, actionLow {actionLow}, actionHigh {actionHigh}")
 

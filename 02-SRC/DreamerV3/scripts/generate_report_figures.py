@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """
-Generate figures for the DreamerV3 Hockey Report.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 
-This script creates publication-quality figures from W&B run data.
-Figures are saved to 03-RESULTS/REPORT/INPUT/figures/
-
-Usage:
-    python generate_report_figures.py --wandb_entity YOUR_ENTITY --wandb_project rl-hockey
-    python generate_report_figures.py --placeholder  # Generate placeholder figures
+Figures for DreamerV3 report. Reads W&B data, writes to 03-RESULTS/REPORT/INPUT/figures/
 """
 
 import argparse

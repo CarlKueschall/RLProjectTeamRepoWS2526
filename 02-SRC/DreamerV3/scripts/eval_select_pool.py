@@ -1,29 +1,10 @@
 #!/usr/bin/env python3
 """
-Fast checkpoint league selection for self-play pool curation.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 
-Goal:
-- Evaluate many checkpoints quickly.
-- Produce a concrete shortlist to include in self-play pool.
-
-Method (2-stage):
-1) Stage 1 (fast screening):
-   - Fixed-bot eval (weak/strong) for each checkpoint.
-   - Sparse checkpoint-vs-checkpoint directed matches.
-   - Rank by robust screening score.
-2) Stage 2 (focused refinement on top-K):
-   - Denser checkpoint-vs-checkpoint matches (optionally bidirectional).
-   - Build final robustness summary and pairwise score matrix.
-3) Pool recommendation:
-   - Greedy selection maximizing quality + diversity.
-
-Outputs:
-- stage1_matches.csv
-- stage1_summary.csv
-- stage2_matches.csv (unless --skip-stage2)
-- final_summary.csv
-- recommended_pool.txt
-- recommended_pool.md
+Fast checkpoint league selection for self-play pool. Two-stage: screen with
+fixed-bot + sparse cp-vs-cp, then refine on top-K. Outputs recommended_pool.
 """
 
 import argparse

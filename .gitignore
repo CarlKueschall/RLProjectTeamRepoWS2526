@@ -18,6 +18,8 @@ env/
 *.swp
 *.swo
 
+#obsidian 
+.obsidian/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb

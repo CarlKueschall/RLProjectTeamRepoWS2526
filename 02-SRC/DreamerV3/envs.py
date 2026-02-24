@@ -1,5 +1,11 @@
+"""
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
+"""
+
 import gymnasium as gym
 import numpy as np
+
 
 def getEnvProperties(env):
     assert isinstance(env.action_space, gym.spaces.Box), "Sorry, supporting only continuous action space for now"
@@ -8,6 +14,7 @@ def getEnvProperties(env):
     actionLow = env.action_space.low.tolist()
     actionHigh = env.action_space.high.tolist()
     return observationShape, actionSize, actionLow, actionHigh
+
 
 class GymPixelsProcessingWrapper(gym.ObservationWrapper):
     def __init__(self, env):
@@ -19,7 +26,7 @@ class GymPixelsProcessingWrapper(gym.ObservationWrapper):
     def observation(self, observation):
         observation = np.transpose(observation, (2, 0, 1))/255.0
         return observation
-    
+
 class CleanGymWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)

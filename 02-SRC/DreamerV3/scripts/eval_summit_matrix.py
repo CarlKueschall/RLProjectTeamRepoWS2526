@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
-Summit evaluation matrix runner.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 
-Runs:
-1) Fixed-bot benchmark per candidate (weak + strong)
-2) Cross-play matrix: candidates vs opponent checkpoints
-
-Outputs:
-- all_matches.csv
-- candidate_summary.csv
-- candidate_ranking.md
+Summit eval matrix. Fixed-bot benchmark + cross-play. Outputs all_matches.csv,
+candidate_summary.csv, candidate_ranking.md
 """
 
 import argparse

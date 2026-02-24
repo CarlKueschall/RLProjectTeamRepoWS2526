@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Parse W&B ablation run files and extract key metrics for report generation.
-Outputs structured JSON and CSV for downstream analysis.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 """
+
+# Parse W&B ablation run files, extract metrics. Outputs JSON and CSV.
 
 import re
 import json

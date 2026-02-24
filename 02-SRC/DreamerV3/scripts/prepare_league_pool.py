@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Prepare a clean league directory from recommended_pool.csv.
-
-Creates symlinks/copies for selected checkpoints and writes helper files:
-- league_checkpoints.txt
-- league_weights.csv
 """
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
+"""
+
+# Builds a league dir from recommended_pool.csv. Symlinks or copies the chosen
+# checkpoints and writes league_checkpoints.txt + league_weights.csv for the training scripts.
 
 from __future__ import annotations
 
@@ -15,17 +16,17 @@ from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Prepare league directory from recommended pool CSV")
+    p = argparse.ArgumentParser(description="Build league dir from recommended pool CSV")
     p.add_argument("--recommended-csv", type=Path, required=True,
                    help="Path to recommended_pool.csv")
     p.add_argument("--out-dir", type=Path, required=True,
-                   help="Output directory for curated league pool")
+                   help="Where to put the curated league pool")
     p.add_argument("--top-k", type=int, default=0,
                    help="Keep only top-k rows (0 = all)")
     p.add_argument("--source-dir", type=Path, default=None,
-                   help="Optional fallback directory to resolve checkpoints by basename")
+                   help="Fallback dir to resolve checkpoints by basename if path in CSV is missing")
     p.add_argument("--link-mode", choices=["symlink", "hardlink", "copy"], default="symlink",
-                   help="How to materialize files in output dir")
+                   help="symlink, hardlink, or copy")
     return p.parse_args()
 
 
@@ -90,7 +91,6 @@ def main() -> None:
             }
         )
 
-    # Preserve rank order
     league_rows.sort(key=lambda r: r["rank"])
 
     checkpoints_txt = out_dir / "league_checkpoints.txt"

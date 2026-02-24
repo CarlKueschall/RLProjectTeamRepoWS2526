@@ -1,8 +1,6 @@
 """
-Opponent management for DreamerV3 Hockey training.
-
-AI Usage Declaration:
-This file was developed with assistance from Claude Code.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 """
 
 from .base import BaseOpponent

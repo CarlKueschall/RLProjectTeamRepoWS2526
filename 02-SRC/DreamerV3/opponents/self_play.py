@@ -4,8 +4,8 @@ Self-Play Manager for DreamerV3 Hockey Training.
 Manages opponent pool and selection for curriculum learning through self-play.
 Works with DreamerV3 agents using state()/restore_state() for serialization.
 
-AI Usage Declaration:
-This file was developed with assistance from Claude Code.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 """
 
 import os

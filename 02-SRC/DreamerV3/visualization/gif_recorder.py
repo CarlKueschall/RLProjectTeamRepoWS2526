@@ -1,8 +1,6 @@
 """
-GIF recording utilities for DreamerV3 evaluation visualization.
-
-AI Usage Declaration:
-This file was developed with assistance from Claude Code.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 """
 
 import os
@@ -12,21 +10,7 @@ import numpy as np
 
 
 def create_gif_dreamer(env, agent, num_episodes=3, max_timesteps=250):
-    """
-    Record multiple episodes and stitch them horizontally into a single GIF.
-
-    Designed for DreamerV3's HockeyEnvDreamer interface.
-
-    Args:
-        env: HockeyEnvDreamer environment (handles opponent internally)
-        agent: HockeyDreamer agent with act(obs, deterministic) interface
-        num_episodes: Number of episodes to record
-        max_timesteps: Maximum timesteps per episode
-
-    Returns:
-        gif_frames: List of horizontally stitched RGB frames
-        results: List of episode results (1=win, -1=loss, 0=draw)
-    """
+    """Record episodes, stitch horizontally. DreamerV3 interface."""
     from .frame_capture import record_episode_frames_dreamer
 
     try:
@@ -86,16 +70,6 @@ def create_gif_dreamer(env, agent, num_episodes=3, max_timesteps=250):
 
 
 def save_gif_dreamer(frames, results, step, opponent_name, metric_name="eval/gameplay_gif"):
-    """
-    Save GIF frames to W&B for DreamerV3 evaluation.
-
-    Args:
-        frames: List of RGB frames (stitched)
-        results: List of episode results
-        step: Current training step
-        opponent_name: Name of opponent (e.g., "weak", "strong")
-        metric_name: W&B metric name
-    """
     if frames is None or len(frames) == 0:
         return
 
@@ -144,21 +118,7 @@ def save_gif_dreamer(frames, results, step, opponent_name, metric_name="eval/gam
 
 def create_gif_for_wandb(env, agent, opponent, mode, max_timesteps, num_episodes=3, eps=0.0,
                          self_play_opponent=None):
-    ######################################################
-    # Record multiple episodes and stitch them horizontally into a single GIF.
-    
-    #Arguments:
-    #env: Hockey environment
-    #agent: TD3 agent
-    # opponent: Opponent agent
-    # mode: Game mode
-    # max_timesteps: Max steps per episode
-    # num_episodes: Number of episodes to record
-    # eps: Exploration epsilon
-    # self_play_opponent: Self-play opponent network (if in self-play stage)
-    #Returns:
-    # gif_frames: List of horizontally stitched RGB frames
-    # results: List of episode results (win/loss/tie)
+    # Record episodes, stitch horizontally. TD3 interface.
     from .frame_capture import record_episode_frames
 
     try:
@@ -170,8 +130,6 @@ def create_gif_for_wandb(env, agent, opponent, mode, max_timesteps, num_episodes
     all_episode_frames = []
     results = []
 
-    #########################################################
-    # Record each episode
     for _ in range(num_episodes):
         frames, winner = record_episode_frames(
             env, agent, opponent, mode, max_timesteps, eps,
@@ -181,27 +139,20 @@ def create_gif_for_wandb(env, agent, opponent, mode, max_timesteps, num_episodes
         results.append(winner)
 
     if not all_episode_frames or not all_episode_frames[0]:
-        return None, results  # no frames to work with
+        return None, results
 
-    #########################################################
-    # Find the max number of frames across all episodes
     max_frames = 0
     for frames in all_episode_frames:
         frame_count = len(frames)
         if frame_count > max_frames:
             max_frames = frame_count
 
-    #########################################################
-    # Pad shorter episodes by repeating last frame
-    #########################################################
     for frames in all_episode_frames:
         if len(frames) < max_frames and len(frames) > 0:
             last_frame = frames[-1]
             while len(frames) < max_frames:
-                frames.append(last_frame)  # pad with last frame so all episodes same length
+                frames.append(last_frame)
 
-    #########################################################
-    # Stitch frames horizontally
     stitched_frames = []
     for frame_idx in range(max_frames):
         episode_frames_at_idx = []
@@ -210,50 +161,33 @@ def create_gif_for_wandb(env, agent, opponent, mode, max_timesteps, num_episodes
                 episode_frames_at_idx.append(ep_frames[frame_idx])
 
         if episode_frames_at_idx:
-            #########################################################
-            # Convert to PIL images and stitch horizontally
             pil_images = []
             for f in episode_frames_at_idx:
                 pil_img = Image.fromarray(f)
                 pil_images.append(pil_img)
 
-            # Calculate total width and max height
             total_width = 0
             for img in pil_images:
-                total_width += img.width  # add up all widths
-            
+                total_width += img.width
+
             max_height = 0
             for img in pil_images:
                 img_height = img.height
                 if img_height > max_height:
-                    max_height = img_height  # take tallest one
+                    max_height = img_height
 
-            #########################################################
-            # Create stitched image
-            #########################################################
             stitched = Image.new('RGB', (total_width, max_height))
             x_offset = 0
             for img in pil_images:
                 stitched.paste(img, (x_offset, 0))
-                x_offset += img.width  # move over for next image
+                x_offset += img.width
 
             stitched_frames.append(np.array(stitched))
-        #########################################################
 
     return stitched_frames, results
 
 
-#########################################################
-#########################################################
 def save_gif_to_wandb(frames, results, episode_num, run_name, metric_name="behavior/gameplay_gif"):
-    #########################################################
-    # Save GIF frames to W&B.
-    #Arguments:
-    # frames: List of RGB frames (stitched)
-    # results: List of episode results
-    # episode_num: Current episode number
-    # run_name: W&B run name
-    # metric_name: W&B metric name (e.g., "behavior/gameplay_gif_vs_target")
     if frames is None or len(frames) == 0:
         return
 
@@ -265,16 +199,12 @@ def save_gif_to_wandb(frames, results, episode_num, run_name, metric_name="behav
         return
 
     try:
-        #########################################################
-        # Create temp file for GIF
         with tempfile.NamedTemporaryFile(suffix='.gif', delete=False) as tmp:
             tmp_path = tmp.name
 
         # Save as GIF (15 fps for smooth playback)
         imageio.mimsave(tmp_path, frames, fps=15, loop=0)
 
-        #########################################################
-        # Create caption with results
         result_strs = []
         for i, r in enumerate(results):
             if r == 1:
@@ -284,19 +214,13 @@ def save_gif_to_wandb(frames, results, episode_num, run_name, metric_name="behav
             else:
                 result_strs.append(f"Ep{i+1}:TIE")  # tie or timeout
         caption = f"Episode {episode_num} | {' | '.join(result_strs)}"
-
-        #########################################################
-        # Log to W&B
-        #########################################################
         wandb.log({
             metric_name: wandb.Video(tmp_path, fps=15, format="gif", caption=caption)
         })
 
-        # Clean up temp file
-        os.unlink(tmp_path)  # delete temp file after uploading
+        os.unlink(tmp_path)
 
         print(f"GIF recorded at episode {episode_num}: {', '.join(result_strs)}")
 
     except Exception as e:
         print(f"GIF recording failed: {e}")
-#########################################################

@@ -3,8 +3,8 @@ COMPRL Tournament Client for DreamerV3 Hockey Agent.
 
 This client connects trained DreamerV3 agents to the competition server.
 
-AI Usage Declaration:
-This file was developed with assistance from Claude Code.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 """
 
 from __future__ import annotations

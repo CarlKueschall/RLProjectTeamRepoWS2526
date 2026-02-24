@@ -1,8 +1,8 @@
 """
 DreamerV3 Training Script for Hockey.
 
-AI Usage Declaration:
-This file was developed with assistance from Claude Code.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 
 Based on NaturalDreamer, adapted for hockey with:
 - 18-dim vector observations (MLP encoder/decoder)

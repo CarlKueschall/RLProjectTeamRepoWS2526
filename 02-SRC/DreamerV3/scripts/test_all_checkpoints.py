@@ -2,8 +2,8 @@
 """
 Comprehensive Checkpoint Testing Script for DreamerV3 Hockey Agents.
 
-AI Usage Declaration:
-This file was developed with assistance from Claude Code.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 
 This script:
 1. Discovers all .pth checkpoints in the DreamerV3 directory

@@ -1,6 +1,6 @@
 """
-AI Usage Declaration:
-This file was developed with assistance from Claude Code.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 
 W&B Run Data Downloader for DreamerV3 Hockey
 

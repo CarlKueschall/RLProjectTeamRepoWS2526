@@ -1,8 +1,8 @@
 """
 DreamerV3 Evaluation Script for Hockey.
 
-AI Usage Declaration:
-This file was developed with assistance from Claude Code.
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
 
 Usage:
     # Evaluate against weak opponent
