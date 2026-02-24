@@ -45,7 +45,7 @@ echo "  league dir: ${LEAGUE_DIR}"
 }
 
 # Rebuild local league directory from recommended pool (same as sbatch)
-python3 prepare_league_pool.py \
+python3 scripts/prepare_league_pool.py \
   --recommended-csv "${RECOMMENDED_CSV}" \
   --source-dir checkpoints/summit-evaluation/opponents \
   --out-dir "${LEAGUE_DIR}" \
