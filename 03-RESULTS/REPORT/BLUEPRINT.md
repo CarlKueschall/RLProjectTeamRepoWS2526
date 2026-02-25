@@ -20,8 +20,8 @@
 | Experiments section | ✅ Complete |
 | Discussion | ✅ Complete |
 | AI usage declaration | ✅ Complete |
-| Bibliography | ✅ Complete (`INPUT/main.bib`) |
-| Placeholder figures | Run `python scripts/generate_report_figures.py --placeholder` (from DreamerV3/) |
+| Bibliography | ✅ Complete (`main.bib`) |
+| Figures | ✅ In `figures/` (Overleaf-ready flat structure) |
 | Ablation runs | ✅ DreamSmooth + Two-Hot complete |
 | Real figures from ablations | 🔲 TODO |
 
@@ -82,7 +82,7 @@ Integrate generated ablation tables/figures from `02-SRC/DreamerV3/ablation-anal
 ## Checklist Before Submission
 
 - [x] Ablation placeholders resolved (DreamSmooth + Two-Hot)
-- [ ] Training curve figure exists (`INPUT/figures/training_curve_placeholder.png`)
+- [x] Training curve / benchmark figure exists (`figures/final_benchmark_eval_progression_stitch.png`)
 - [ ] Page count ≤ 5 (excluding references)
 - [ ] All claims supported by evidence
 - [ ] Proofreading complete
