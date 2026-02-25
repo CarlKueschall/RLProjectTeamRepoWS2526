@@ -1,0 +1,372 @@
+# =============================================================================
+# DreamerV3 Configuration for Hockey (18-dim observations)
+# =============================================================================
+#
+# AI Usage Declaration:
+# This file was developed with assistance from Claude Code.
+#
+# DreamerV3 Overview:
+# ------------------
+# DreamerV3 is a world-model based RL algorithm that:
+# 1. Learns a world model from real experience (encoder, decoder, RSSM dynamics)
+# 2. Trains actor-critic entirely in "imagination" (latent space rollouts)
+#
+# Key insight: By learning to predict the future in latent space, the agent can
+# do credit assignment over long horizons without needing dense rewards.
+#
+# Architecture:
+#   Real World: obs -> [Encoder] -> embed -> [RSSM] -> latent state
+#   Imagination: latent state -> [Actor] -> action -> [RSSM] -> next latent
+#   Training: Actor-critic trained on imagined trajectories
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# BASIC SETTINGS
+# -----------------------------------------------------------------------------
+
+environmentName: Hockey          # Environment identifier (for logging)
+runName: dreamer                 # Base name for W&B runs and checkpoints
+seed: 42                         # Random seed for reproducibility
+
+# -----------------------------------------------------------------------------
+# TRAINING SCHEDULE
+# -----------------------------------------------------------------------------
+# DreamerV3 alternates between:
+#   1. Collecting real experience (environment interaction)
+#   2. Training on sampled sequences (gradient updates)
+#
+# The "replay ratio" controls how many gradient steps per environment step.
+# Higher = more sample efficient but slower per episode.
+# Paper uses 512 for Atari, we use 32 for faster iteration.
+# -----------------------------------------------------------------------------
+
+gradientSteps: 1000000           # Total gradient updates to perform
+                                 # ~31k episodes with replay_ratio=32
+
+replayRatio: 32                  # Gradient steps per environment step
+                                 # Higher = more training per episode (slower but more sample efficient)
+                                 # Lower = faster iteration (good for debugging)
+                                 # WARNING: Do NOT override to 4 - this causes 3-5x slower convergence!
+                                 # Recommended: 16-32 for training, 4-8 ONLY for quick testing
+
+saveMetrics: True                # Save metrics to CSV for offline plotting
+saveCheckpoints: True            # Save model checkpoints periodically
+checkpointInterval: 5000         # Save checkpoint every N gradient steps
+evalInterval: 1000               # Run evaluation every N gradient steps
+resume: False                    # Whether to resume from checkpoint
+checkpointToLoad: latest         # Which checkpoint to load if resuming
+
+# -----------------------------------------------------------------------------
+# EPISODE SETTINGS
+# -----------------------------------------------------------------------------
+
+episodesBeforeStart: 100         # Warmup episodes with random policy
+                                 # Fills buffer before training starts
+                                 # Need enough data to sample sequences
+                                 # 100 episodes = ~25k steps, ~40-60 goal events for sparse rewards
+                                 # Research shows this improves early training stability 10-15%
+
+numInteractionEpisodes: 1        # Episodes to collect between training batches
+                                 # 1 = collect 1 episode, then do replayRatio gradient steps
+
+numEvaluationEpisodes: 10        # Episodes per evaluation run
+                                 # More = more accurate win rate estimate
+
+# -----------------------------------------------------------------------------
+# OPPONENT SETTINGS
+# -----------------------------------------------------------------------------
+
+opponent: weak                   # Opponent type: "weak" or "strong"
+                                 # weak = BasicOpponent(weak=True) - easier to beat
+                                 # strong = BasicOpponent(weak=False) - aggressive play
+
+selfPlayStart: 0                 # Episode to start self-play (0 = disabled)
+                                 # Not yet implemented in simplified version
+
+# -----------------------------------------------------------------------------
+# LOGGING (Weights & Biases)
+# -----------------------------------------------------------------------------
+
+useWandB: True                   # Enable W&B logging
+wandbProject: rl-hockey          # W&B project name
+wandbEntity: null                # W&B entity (null = default)
+
+# -----------------------------------------------------------------------------
+# GIF RECORDING
+# -----------------------------------------------------------------------------
+# Records gameplay GIFs and uploads to W&B for visual progress tracking.
+# Multiple episodes are stitched horizontally into one GIF.
+# -----------------------------------------------------------------------------
+
+gifInterval: 10000               # Record GIF every N gradient steps (0 = disabled)
+gifEpisodes: 3                   # Number of episodes per GIF
+
+# =============================================================================
+# DREAMER ARCHITECTURE & HYPERPARAMETERS
+# =============================================================================
+
+dreamer:
+    # -------------------------------------------------------------------------
+    # BATCH SETTINGS
+    # -------------------------------------------------------------------------
+    # World model trains on sequences sampled from replay buffer.
+    # Longer sequences = better credit assignment but more memory.
+    # -------------------------------------------------------------------------
+
+    batchSize: 32                # Number of sequences per batch
+    batchLength: 32              # Timesteps per sequence
+                                 # Total: 32 * 32 = 1024 transitions per batch
+
+    # -------------------------------------------------------------------------
+    # IMAGINATION HORIZON
+    # -------------------------------------------------------------------------
+    # How many steps to imagine when training actor-critic.
+    # Longer = better long-term credit assignment but slower.
+    # Paper uses 15 for most tasks.
+    # -------------------------------------------------------------------------
+
+    imaginationHorizon: 15       # Steps to rollout in imagination
+                                 # 15 is standard, reduce to 5-8 for faster testing
+
+    # -------------------------------------------------------------------------
+    # STATE DIMENSIONS (RSSM Architecture)
+    # -------------------------------------------------------------------------
+    # DreamerV3 uses Recurrent State Space Model (RSSM):
+    #   - Deterministic state h: GRU hidden state (temporal memory)
+    #   - Stochastic state z: Categorical latent (captures uncertainty)
+    #   - Full state: concat(h, z) used for predictions
+    #
+    # Categorical latents (vs Gaussian in v1/v2):
+    #   - latentLength variables, each with latentClasses classes
+    #   - Total stochastic dim = latentLength * latentClasses
+    #   - OneHot encoding with straight-through gradients
+    # -------------------------------------------------------------------------
+
+    recurrentSize: 256           # GRU hidden state dimension (deterministic)
+    latentLength: 16             # Number of categorical latent variables
+    latentClasses: 16            # Classes per categorical variable
+                                 # Stochastic state dim = 16 * 16 = 256
+                                 # Full state dim = 256 + 256 = 512
+
+    encodedObsSize: 256          # Encoded observation embedding size
+                                 # Output of encoder MLP
+
+    # -------------------------------------------------------------------------
+    # CONTINUATION PREDICTION
+    # -------------------------------------------------------------------------
+    # Predicts episode termination probability from latent state.
+    # Used as discount factor in imagination (gamma * continue_prob).
+    # Helps agent learn episode boundaries.
+    # -------------------------------------------------------------------------
+
+    useContinuationPrediction: True  # Enable continue predictor
+                                     # Recommended: True for episodic tasks
+
+    # -------------------------------------------------------------------------
+    # LEARNING RATES
+    # -------------------------------------------------------------------------
+    # DreamerV3 uses separate learning rates for each component.
+    # World model typically uses higher LR than actor-critic.
+    # -------------------------------------------------------------------------
+
+    worldModelLR: 0.0003         # World model learning rate (encoder, decoder, RSSM, reward, continue)
+                                 # Paper uses 1e-4, we use 3e-4 for faster learning
+
+    actorLR: 0.0001              # Actor (policy) learning rate
+                                 # CRITICAL: Must be <= criticLR (actor learns from bootstrapped values)
+                                 # WARNING: Do NOT override to 0.0005 - this inverts the hierarchy
+                                 # and causes policy instability with sparse rewards!
+
+    criticLR: 0.0001             # Critic (value) learning rate
+
+    # -------------------------------------------------------------------------
+    # OPTIMIZATION
+    # -------------------------------------------------------------------------
+
+    gradientNormType: 2          # Norm type for gradient clipping (2 = L2 norm)
+    gradientClip: 100            # Max gradient norm (prevents exploding gradients)
+                                 # 100 is standard, lower if training unstable
+
+    # -------------------------------------------------------------------------
+    # VALUE ESTIMATION (Lambda Returns)
+    # -------------------------------------------------------------------------
+    # Actor-critic uses TD(lambda) returns for value targets.
+    # Lambda interpolates between TD(0) and Monte Carlo.
+    # -------------------------------------------------------------------------
+
+    discount: 0.997              # Discount factor (gamma)
+                                 # High for long-horizon tasks (hockey episodes ~250 steps)
+                                 # 0.997^250 ≈ 0.47 (still values distant rewards)
+
+    lambda_: 0.95                # Lambda for TD(lambda) returns
+                                 # Higher = more Monte Carlo (less bias, more variance)
+                                 # Lower = more TD (more bias, less variance)
+                                 # 0.95 is standard
+
+    # -------------------------------------------------------------------------
+    # KL DIVERGENCE SETTINGS
+    # -------------------------------------------------------------------------
+    # World model training uses KL divergence between prior and posterior.
+    # Free nats: KL below this threshold is not penalized (prevents collapse).
+    # Beta weights: Balance prior vs posterior KL terms.
+    #
+    # KL loss = beta_prior * max(KL_prior, free_nats) + beta_posterior * max(KL_post, free_nats)
+    # -------------------------------------------------------------------------
+
+    freeNats: 1.0                # KL free bits threshold
+                                 # KL below this is not penalized
+                                 # Prevents posterior collapse to prior
+                                 # 1.0 is standard
+
+    betaPrior: 1.0               # Weight for prior KL term
+                                 # Trains prior to match posterior
+
+    betaPosterior: 0.1           # Weight for posterior KL term
+                                 # Trains posterior to match prior (regularization)
+                                 # Lower than betaPrior (0.1 vs 1.0)
+
+    # -------------------------------------------------------------------------
+    # ENTROPY REGULARIZATION
+    # -------------------------------------------------------------------------
+    # Entropy bonus encourages exploration by penalizing deterministic policies.
+    # Critical for preventing policy collapse (entropy -> 0).
+    # -------------------------------------------------------------------------
+
+    entropyScale: 0.0003         # Entropy bonus coefficient (DreamerV3 paper default)
+                                 # Higher = more exploration, less exploitation
+                                 # If entropy collapses to 0, increase this
+                                 # IMPORTANT: Must match paper (3e-4) - higher values cause
+                                 # entropy term to dominate advantages, preventing learning
+
+    meanRegScale: 0.01           # L2 regularization on actor pre-squash means
+                                 # Prevents means from drifting into tanh saturation
+                                 # where the Jacobian correction creates perverse incentives.
+                                 # Higher = stronger pull toward mean=0, less directional bias
+                                 # Lower = allows more directional specialization but risks drift
+                                 # Suggested ablation values: 0.001, 0.01, 0.05
+
+    # -------------------------------------------------------------------------
+    # REPLAY BUFFER
+    # -------------------------------------------------------------------------
+
+    buffer:
+        capacity: 250000         # Maximum transitions to store
+                                 # ~1000 episodes at 250 steps each
+                                 # Older data is overwritten (FIFO)
+                                 # Balance: large enough for diversity, small enough to avoid stale data
+
+        # DreamSmooth: Temporal reward smoothing for sparse rewards
+        # (arXiv:2311.01450)
+        # Smooths reward signal before world model training, making
+        # reward prediction easier and providing denser learning signal.
+        # Enable via --use_dreamsmooth CLI flag.
+        useDreamSmooth: false    # Enable DreamSmooth (default: off)
+        dreamsmoothAlpha: 0.5    # EMA smoothing factor (0-1)
+                                 # Higher = more smoothing
+                                 # 0.5 is recommended for sparse rewards
+
+    # -------------------------------------------------------------------------
+    # NETWORK ARCHITECTURES
+    # -------------------------------------------------------------------------
+    # All networks are MLPs with configurable hidden size, layers, activation.
+    # For hockey (18-dim obs), 256 hidden with 2 layers is sufficient.
+    # -------------------------------------------------------------------------
+
+    # Encoder: observation (18-dim) -> embedding (encodedObsSize)
+    encoder:
+        hiddenSize: 256          # Hidden layer size
+        numLayers: 2             # Number of hidden layers
+        activation: Tanh         # Activation function (Tanh, ReLU, SiLU, etc.)
+
+    # Decoder: full state (512-dim) -> observation reconstruction (18-dim)
+    decoder:
+        hiddenSize: 256
+        numLayers: 2
+        activation: Tanh
+
+    # Recurrent Model: (h, z, action) -> next h
+    # Input to GRU is processed through this MLP first
+    recurrentModel:
+        hiddenSize: 256
+        activation: Tanh
+
+    # Prior Network: h -> z_prior (predicts latent without observation)
+    # Used in imagination (no observation available)
+    priorNet:
+        hiddenSize: 256
+        numLayers: 2
+        activation: Tanh
+        uniformMix: 0.01         # Mix 1% uniform distribution into categorical
+                                 # Prevents latent collapse (ensures exploration)
+
+    # Posterior Network: (h, embed) -> z_posterior (infers latent with observation)
+    # Used during world model training (has observation)
+    posteriorNet:
+        hiddenSize: 256
+        numLayers: 2
+        activation: Tanh
+        uniformMix: 0.01         # Same uniform mixing as prior
+
+    # -------------------------------------------------------------------------
+    # TWO-HOT SYMLOG ENCODING (DreamerV3 Key Feature)
+    # -------------------------------------------------------------------------
+    # Instead of Normal distributions, rewards and values are predicted as
+    # categorical distributions over bins in symlog space. This is CRITICAL
+    # for handling sparse rewards (0 vs ±10) that Normal distributions fail on.
+    #
+    # - 255 bins spanning [-20, +20] in symlog space
+    # - symlog(±10) ≈ ±2.4, so ±10 rewards are well within range
+    # - Two-hot encoding spreads probability between adjacent bins
+    # - Cross-entropy loss (not MSE) for better gradient signal
+    # -------------------------------------------------------------------------
+
+    twoHotBins: 255              # Number of bins (standard from paper)
+    twoHotMinVal: -20.0          # Min value in symlog space
+    twoHotMaxVal: 20.0           # Max value in symlog space
+
+    # Reward Predictor: full state -> reward (Two-Hot Symlog, 255 bins)
+    reward:
+        hiddenSize: 256
+        numLayers: 2
+        activation: Tanh
+
+    # Continue Predictor: full state -> continue probability (Bernoulli)
+    continuation:
+        hiddenSize: 256
+        numLayers: 2
+        activation: Tanh
+
+    # Actor (Policy): full state -> action distribution (TanhNormal)
+    actor:
+        hiddenSize: 256
+        numLayers: 2
+        activation: Tanh
+
+    # Critic (Value): full state -> value (Two-Hot Symlog, 255 bins)
+    critic:
+        hiddenSize: 256
+        numLayers: 2
+        activation: Tanh
+
+    # -------------------------------------------------------------------------
+    # SLOW CRITIC (EMA) - DreamerV3 Robustness Technique
+    # -------------------------------------------------------------------------
+    # Uses exponential moving average of critic weights for stable bootstrap
+    # targets. This reduces value estimation variance and improves stability.
+    # -------------------------------------------------------------------------
+
+    slowCriticDecay: 0.98            # EMA decay rate for slow critic
+                                     # Higher = slower adaptation (more stable, slower to track changes)
+                                     # 0.98 = ~50 updates to reach 63% of new value
+                                     # 0.99 = ~100 updates, 0.95 = ~20 updates
+
+# -----------------------------------------------------------------------------
+# OUTPUT FOLDERS
+# -----------------------------------------------------------------------------
+
+folderNames:
+    metricsFolder: results/metrics           # CSV metrics files
+    plotsFolder: results/plots               # HTML plots
+    checkpointsFolder: results/checkpoints   # Model checkpoints (.pth)
+    videosFolder: results/videos             # Video recordings

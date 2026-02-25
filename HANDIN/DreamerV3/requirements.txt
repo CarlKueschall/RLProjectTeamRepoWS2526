@@ -1,0 +1,7 @@
+# DreamerV3 training dependencies
+torch>=2.0
+numpy
+pyyaml
+wandb
+gymnasium
+hockey @ git+https://github.com/martius-lab/hockey-env.git

@@ -1,0 +1,533 @@
+"""
+This file was developed with assistance from AI: autocomplete and discussion
+about the contents and behavior of the code.
+
+W&B Run Data Downloader for DreamerV3 Hockey
+
+Downloads complete run data from W&B for analysis.
+Outputs a text file that can be shared for debugging.
+
+Usage:
+    python download_wandb_run.py --run_name "DreamerV3-small-weak-seed43"
+    python download_wandb_run.py --run_id "abc123xyz"
+    python download_wandb_run.py --run_name "..." --max_chars 50000
+
+    # For long runs, use --fraction to reduce data (e.g., 10% of points):
+    python download_wandb_run.py --run_name "..." --fraction 0.1
+    python download_wandb_run.py --run_name "..." --fraction 0.05 --max_points 100
+"""
+
+import argparse
+import numpy as np
+import wandb
+from pathlib import Path
+from collections import defaultdict
+
+
+# =============================================================================
+# METRIC CATEGORIES - Comprehensive DreamerV3 Metrics
+# =============================================================================
+#
+# These are ALL metrics logged by our DreamerV3 implementation.
+# Organized by category for easy analysis.
+#
+# -----------------------------------------------------------------------------
+# TRAINING PROGRESS (what you check first)
+# -----------------------------------------------------------------------------
+# stats/
+#   gradient_steps       - Total gradient updates
+#   env_steps            - Total environment steps
+#   episodes             - Total episodes completed
+#   win_rate             - Rolling win rate (last 100)
+#   mean_reward          - Rolling mean reward (last 100)
+#   wins, losses, draws  - Cumulative counts
+#   buffer_size          - Replay buffer size
+#   opponent_weak_count      - Episodes vs weak opponent
+#   opponent_strong_count    - Episodes vs strong opponent
+#   opponent_selfplay_count  - Episodes vs self-play pool
+#
+# episode/
+#   length_mean/std/min/max    - Episode duration stats
+#   reward_mean/std            - Sparse reward stats
+#   win_rate_100               - Win rate last 100 episodes
+#   draw_rate_100              - Timeout rate
+#
+# time/
+#   elapsed_hours              - Training time
+#   steps_per_second           - Env throughput
+#   episodes_per_hour          - Episode throughput
+#   gradient_steps_per_second  - Training speed
+#
+# -----------------------------------------------------------------------------
+# DUAL EVALUATION (separate weak/strong eval)
+# -----------------------------------------------------------------------------
+# eval/
+#   weak_win_rate              - Win rate vs weak opponent
+#   weak_mean_reward           - Mean reward vs weak
+#   weak_wins/losses/draws     - Outcome counts vs weak
+#
+#   strong_win_rate            - Win rate vs strong opponent
+#   strong_mean_reward         - Mean reward vs strong
+#   strong_wins/losses/draws   - Outcome counts vs strong
+#
+#   combined_win_rate          - Average of weak and strong win rates
+#
+#   gif_weak                   - GIF vs weak opponent
+#   gif_strong                 - GIF vs strong opponent
+#
+# -----------------------------------------------------------------------------
+# WORLD MODEL (is the model learning the environment?)
+# -----------------------------------------------------------------------------
+# world/
+#   loss                 - Total world model loss
+#   recon_loss           - Observation reconstruction loss
+#   reward_loss          - Reward prediction loss
+#   kl_loss              - KL divergence loss
+#   continue_loss        - Episode termination prediction loss (conditional)
+#
+#   recon_error_mean/std/max   - Reconstruction quality distribution
+#   reward_pred_error_mean/std - Reward prediction accuracy
+#   reward_pred_mean           - Predicted reward mean
+#   reward_actual_mean         - Actual reward mean
+#
+#   latent_entropy             - Diversity of latent space (higher=better)
+#   prior_posterior_kl         - World model uncertainty
+#
+#   continue_pred_mean         - Predicted continue probability (conditional)
+#   continue_actual_mean       - Actual continue rate (conditional)
+#
+# -----------------------------------------------------------------------------
+# BEHAVIOR / ACTOR-CRITIC (is the policy learning?)
+# -----------------------------------------------------------------------------
+# behavior/
+#   actor_loss                 - Policy loss
+#   critic_loss                - Value function loss
+#
+#   entropy_mean/std/min/max   - Policy entropy distribution
+#   logprobs_mean/std          - Action log probabilities
+#
+#   mean_reg_loss              - Actor mean regularization loss
+#   actor_mean_abs             - Mean absolute actor output
+#
+#   advantages_mean/std/min/max      - Policy gradient signal
+#   advantages_abs_mean              - Signal magnitude
+#
+# values/
+#   mean/std/min/max           - Critic value predictions
+#   lambda_returns_mean/std/min/max  - TD(lambda) targets
+#   norm_low/high/scale        - Value normalization stats
+#   critic_slow_diff           - EMA critic distance (stability)
+#
+# -----------------------------------------------------------------------------
+# IMAGINATION (what does the agent "see" when imagining?)
+# -----------------------------------------------------------------------------
+# imagination/
+#   reward_mean/std/min/max    - Predicted rewards in imagination
+#   reward_abs_mean            - Reward magnitude
+#   reward_nonzero_frac        - Fraction with any reward signal
+#   reward_significant_frac    - Fraction with sparse-level rewards
+#   continue_mean/min          - Episode continuation in imagination
+#
+# -----------------------------------------------------------------------------
+# ACTIONS (what is the policy outputting?)
+# -----------------------------------------------------------------------------
+# actions/
+#   mean/std/min/max           - Action distribution stats
+#   abs_mean                   - Action magnitude
+#   dim0_mean                  - Movement dimension 0
+#   dim1_mean                  - Movement dimension 1
+#   dim2_mean                  - Movement dimension 2
+#   dim3_mean                  - Movement dimension 3
+#
+# -----------------------------------------------------------------------------
+# GRADIENTS (is training stable?)
+# -----------------------------------------------------------------------------
+# gradients/
+#   world_model_norm           - World model gradient norm
+#   actor_norm                 - Actor gradient norm
+#   critic_norm                - Critic gradient norm
+#
+# -----------------------------------------------------------------------------
+# DIAGNOSTICS (entropy-advantage balance and return normalization)
+# -----------------------------------------------------------------------------
+# diagnostics/
+#   advantage_contribution     - Advantage term magnitude in actor loss
+#   entropy_contribution       - Entropy term magnitude in actor loss
+#   entropy_advantage_ratio    - Ratio of entropy to advantage
+#   return_range_S             - Return normalization range (should grow)
+#   return_range_at_floor      - 1.0 if range is at minimum (bad)
+#
+# -----------------------------------------------------------------------------
+# SPARSE REWARD SIGNAL (is the agent learning from sparse rewards?)
+# -----------------------------------------------------------------------------
+# sparse_signal/
+#   event_rate_in_batch        - How often sparse rewards appear in training
+#   num_sparse_events          - Count of sparse events per batch
+#   reward_variance            - Reward variance (should be >0)
+#   reward_min/max/range       - Reward range in batch
+#
+#   sparse_pred_error          - Prediction error ON sparse rewards
+#   sparse_pred_mean           - What model predicts for sparse rewards
+#   sparse_actual_mean         - Actual sparse reward values
+#   sparse_sign_accuracy       - Does model predict correct sign? (critical!)
+#   nonsparse_pred_error       - Prediction error on dense rewards
+#   sparse_vs_nonsparse_error_ratio - Is sparse harder to predict?
+#
+#   sparse_weight_applied      - Weight used for sparse reward emphasis
+#   unweighted_reward_loss     - Reward loss before weighting
+#   weighted_reward_loss       - Reward loss after weighting
+#
+#   lambda_return_abs_mean     - Lambda return magnitude (should be >0)
+#   lambda_return_nonzero_frac - Fraction with signal
+#   lambda_return_significant_frac - Fraction with strong signal
+#
+#   value_lambda_gap_mean      - How much imagination adds to values
+#   value_lambda_gap_abs_mean  - Gap magnitude
+#
+#   advantage_nonzero_frac     - Fraction of meaningful advantages
+#   advantage_significant_frac - Fraction of strong advantages
+#
+# -----------------------------------------------------------------------------
+# SELF-PLAY (curriculum learning through self-play)
+# -----------------------------------------------------------------------------
+# selfplay/
+#   active                     - Is self-play active? (0 or 1)
+#   pool_size                  - Number of opponents in pool
+#   weak_ratio_target          - Target ratio for anchor opponents
+#   episodes_since_activation  - Episodes since self-play started
+#
+#   anchor_weak_count          - Episodes trained against weak anchor
+#   anchor_strong_count        - Episodes trained against strong anchor
+#   selfplay_count             - Episodes trained against self-play pool
+#   anchor_ratio_actual        - Actual anchor vs pool ratio
+#   selfplay_ratio_actual      - Actual self-play ratio
+#   anchor_weak_ratio          - Weak vs strong within anchor
+#
+#   pfsp_num_tracked           - Opponents with enough data for PFSP
+#   pfsp_avg_winrate           - Average win rate across pool
+#   pfsp_std_winrate           - Std of win rates (diversity indicator)
+#   pfsp_min_winrate           - Hardest opponent win rate
+#   pfsp_max_winrate           - Easiest opponent win rate
+#
+#   current_opponent_idx       - Current pool opponent index
+#   current_opponent_episode   - Episode when current opponent was saved
+#
+#   winrate_oldest_third       - Win rate vs oldest 1/3 of pool
+#   winrate_middle_third       - Win rate vs middle 1/3 of pool
+#   winrate_newest_third       - Win rate vs newest 1/3 of pool
+#   winrate_vs_pool_overall    - Overall win rate against all pool opponents
+#   oldest_opponent_episode    - Episode when oldest pool member was saved
+#   newest_opponent_episode    - Episode when newest pool member was saved
+#
+# =============================================================================
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Download W&B run data for analysis')
+
+    parser.add_argument('--run_name', type=str, default=None,
+                        help='Run name (e.g., "DreamerV3-small-weak-seed43")')
+    parser.add_argument('--run_id', type=str, default=None,
+                        help='Run ID (alternative to run_name)')
+    parser.add_argument('--project', type=str, default='rl-hockey',
+                        help='W&B project name (default: rl-hockey)')
+    parser.add_argument('--entity', type=str, default='carlkueschalledu',
+                        help='W&B entity/username (default: carlkueschalledu)')
+    parser.add_argument('--max_chars', type=int, default=100000,
+                        help='Maximum characters in output (default: 100000)')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output file path (default: ./wandb_run_<name>.txt)')
+    parser.add_argument('--include_metrics', type=str, nargs='+', default=None,
+                        help='Specific metrics to include (default: ALL metrics)')
+    parser.add_argument('--fraction', type=float, default=1.0,
+                        help='Fraction of data points to keep (0.0-1.0, default: 1.0 = all)')
+    parser.add_argument('--max_points', type=int, default=200,
+                        help='Maximum points per metric after discretization (default: 200)')
+
+    return parser.parse_args()
+
+
+def get_run(entity, project, run_name=None, run_id=None):
+    """Get W&B run by name or ID"""
+    api = wandb.Api()
+
+    if run_id:
+        run = api.run(f"{entity}/{project}/{run_id}")
+    elif run_name:
+        runs = api.runs(f"{entity}/{project}", filters={"display_name": run_name})
+        runs_list = list(runs)
+
+        if len(runs_list) == 0:
+            raise ValueError(f"No run found with name: {run_name}")
+        elif len(runs_list) > 1:
+            print(f"Warning: Found {len(runs_list)} runs with name '{run_name}'")
+            print("Using most recent run")
+            runs_list.sort(key=lambda r: r.created_at, reverse=True)
+
+        run = runs_list[0]
+    else:
+        raise ValueError("Must provide either run_name or run_id")
+
+    return run
+
+
+def discretize_data(data, max_points=200):
+    """Intelligently discretize data to reduce size while preserving trends."""
+    if len(data) <= max_points:
+        return data
+
+    indices = []
+
+    # Keep first 50 points (early training)
+    n_start = min(50, len(data) // 4)
+    indices.extend(range(n_start))
+
+    # Keep last 50 points (final performance)
+    n_end = min(50, len(data) // 4)
+    indices.extend(range(len(data) - n_end, len(data)))
+
+    # Sample middle uniformly
+    n_middle = max_points - n_start - n_end
+    if n_middle > 0:
+        middle_start = n_start
+        middle_end = len(data) - n_end
+        middle_indices = np.linspace(middle_start, middle_end - 1, n_middle, dtype=int)
+        indices.extend(middle_indices)
+
+    indices = sorted(set(indices))
+    return [data[i] for i in indices]
+
+
+def subsample_data(data, fraction):
+    """Subsample data by keeping only a fraction of points (evenly spaced)."""
+    if fraction >= 1.0 or len(data) == 0:
+        return data
+
+    n_keep = max(1, int(len(data) * fraction))
+    indices = np.linspace(0, len(data) - 1, n_keep, dtype=int)
+    return [data[i] for i in indices]
+
+
+def format_run_data(run, include_metrics=None, max_chars=100000, fraction=1.0, max_points=200):
+    """Format run data for analysis
+
+    Args:
+        run: W&B run object
+        include_metrics: List of specific metrics to include (None = all)
+        max_chars: Maximum characters in output
+        fraction: Fraction of data points to keep (0.0-1.0)
+        max_points: Maximum points per metric after discretization
+    """
+
+    config = run.config
+    summary = run.summary
+
+    # Fetch history
+    print(f"Fetching run history for: {run.name}")
+    try:
+        history = run.history()
+        print(f"  Fetched {len(history)} rows with {len(history.columns)} columns")
+        if fraction < 1.0:
+            print(f"  Will keep {fraction*100:.1f}% of data points")
+    except Exception as e:
+        print(f"  Failed to fetch history: {e}")
+        history = None
+
+    # Build output
+    output_lines = []
+    output_lines.append("=" * 80)
+    output_lines.append(f"W&B RUN DATA: {run.name}")
+    output_lines.append("=" * 80)
+    output_lines.append("")
+
+    # Metadata
+    output_lines.append("## RUN METADATA")
+    output_lines.append(f"Run ID: {run.id}")
+    output_lines.append(f"Created: {run.created_at}")
+    output_lines.append(f"State: {run.state}")
+    output_lines.append(f"Duration: {summary.get('_runtime', 'N/A')} seconds")
+    output_lines.append("")
+
+    # Configuration - show key DreamerV3 settings
+    output_lines.append("## CONFIGURATION")
+    config_groups = {
+        'Environment': ['opponent', 'mode'],
+        'Training': ['batch_size', 'batch_length', 'replay_ratio', 'gradient_steps',
+                     'imagination_horizon', 'discount', 'lambda_'],
+        'Learning Rates': ['lr_world', 'lr_actor', 'lr_critic'],
+        'Entropy': ['entropy_scale'],
+        'PBRS': ['use_pbrs', 'pbrs_scale', 'pbrs_w_chase', 'pbrs_w_attack'],
+        'Self-Play': ['self_play_start', 'self_play_pool_size', 'self_play_save_interval',
+                      'self_play_weak_ratio', 'use_pfsp', 'pfsp_mode'],
+        'Architecture': ['recurrent_size', 'latent_length', 'latent_classes'],
+        'Meta': ['seed', 'algorithm'],
+    }
+
+    for section, keys in config_groups.items():
+        section_values = [(k, config.get(k)) for k in keys if config.get(k) is not None]
+        if section_values:
+            output_lines.append(f"  [{section}]")
+            for key, value in section_values:
+                output_lines.append(f"    {key}: {value}")
+    output_lines.append("")
+
+    # Summary
+    output_lines.append("## FINAL SUMMARY")
+    runtime = summary.get('_runtime', 0)
+    if runtime:
+        output_lines.append(f"  runtime: {runtime/3600:.2f} hours ({runtime:.0f} seconds)")
+    output_lines.append("")
+
+    # Process metrics
+    if history is not None and not history.empty:
+        metrics_data = defaultdict(list)
+
+        # Get all W&B metrics (columns with "/" in name)
+        all_metrics = [col for col in history.columns if '/' in col]
+
+        if include_metrics:
+            metrics_to_process = [m for m in include_metrics if m in history.columns]
+        else:
+            metrics_to_process = all_metrics
+
+        print(f"  Processing {len(metrics_to_process)} metrics...")
+
+        for metric in metrics_to_process:
+            values = history[metric].dropna()
+            if len(values) > 0:
+                data = values.tolist()
+                # Apply fraction subsampling first
+                if fraction < 1.0:
+                    data = subsample_data(data, fraction)
+                metrics_data[metric] = data
+
+        print(f"  Extracted data for {len(metrics_data)} metrics")
+        if fraction < 1.0:
+            total_points = sum(len(d) for d in metrics_data.values())
+            print(f"  Total data points after {fraction*100:.1f}% subsampling: {total_points:,}")
+    else:
+        metrics_data = {}
+
+    # Estimate size and apply discretization if needed
+    current_size = sum(len(line) for line in output_lines)
+    estimated_size = current_size + sum(len(d) * 20 for d in metrics_data.values())
+
+    # Use provided max_points, but reduce further if output would be too large
+    effective_max_points = max_points
+    if estimated_size > max_chars:
+        factor = int(np.ceil(estimated_size / max_chars))
+        effective_max_points = max(50, max_points // factor)
+
+    if fraction < 1.0 or effective_max_points < 10000:
+        output_lines.append(f"## NOTE: Data reduced (fraction={fraction}, max_points={effective_max_points})")
+        output_lines.append("")
+
+    # Format metrics by category
+    output_lines.append("## METRICS DATA")
+    output_lines.append("")
+
+    if not metrics_data:
+        output_lines.append("No metrics found")
+    else:
+        # Group metrics by prefix
+        metric_groups = defaultdict(list)
+        for metric in sorted(metrics_data.keys()):
+            prefix = metric.split('/')[0]
+            metric_groups[prefix].append(metric)
+
+        # Define display order
+        group_order = [
+            'stats', 'episode', 'time', 'eval',  # Progress
+            'selfplay',  # Self-play metrics
+            'world',  # World model
+            'behavior', 'values',  # Actor-critic
+            'imagination',  # Imagination
+            'actions',  # Actions
+            'gradients',  # Gradients
+            'diagnostics',  # Entropy-advantage balance
+            'sparse_signal',  # Sparse rewards
+            'pbrs', 'reward_composition', 'reward_hacking',  # Reward analysis
+        ]
+
+        # Add any groups not in order
+        for group in metric_groups:
+            if group not in group_order:
+                group_order.append(group)
+
+        for group in group_order:
+            if group not in metric_groups:
+                continue
+
+            output_lines.append(f"### {group.upper()}")
+
+            for metric in sorted(metric_groups[group]):
+                data = metrics_data[metric]
+                if not data:
+                    continue
+
+                # Discretize if still too many points
+                if len(data) > effective_max_points:
+                    data = discretize_data(data, effective_max_points)
+
+                metric_name = metric.split('/')[-1]
+                output_lines.append(f"#### {metric_name}")
+                output_lines.append(f"  Points: {len(data)}")
+
+                try:
+                    numeric = [float(v) for v in data]
+                    output_lines.append(f"  Min: {min(numeric):.4f}, Max: {max(numeric):.4f}, Mean: {np.mean(numeric):.4f}")
+                    output_lines.append("  Data: [")
+                    for i in range(0, len(numeric), 10):
+                        chunk = numeric[i:i+10]
+                        output_lines.append(f"    {', '.join(f'{v:.4f}' for v in chunk)},")
+                    output_lines.append("  ]")
+                except (ValueError, TypeError) as e:
+                    output_lines.append(f"  Error: {e}")
+
+                output_lines.append("")
+
+            output_lines.append("")
+
+    output_text = "\n".join(output_lines)
+
+    if len(output_text) > max_chars:
+        print(f"Warning: Output ({len(output_text)} chars) exceeds max ({max_chars})")
+
+    return output_text
+
+
+def main():
+    args = parse_args()
+
+    print(f"Connecting to W&B...")
+    run = get_run(args.entity, args.project, args.run_name, args.run_id)
+    print(f"Found run: {run.name} (ID: {run.id})")
+
+    output = format_run_data(
+        run,
+        include_metrics=args.include_metrics,
+        max_chars=args.max_chars,
+        fraction=args.fraction,
+        max_points=args.max_points
+    )
+
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = Path(f"./wandb_run_{run.name.replace('/', '_')}.txt")
+
+    output_path.write_text(output)
+    print(f"\nSaved to: {output_path}")
+    print(f"Size: {len(output):,} characters, {len(output.splitlines()):,} lines")
+
+    # Preview
+    print("\n" + "=" * 80)
+    print("PREVIEW (first 40 lines):")
+    print("=" * 80)
+    for line in output.splitlines()[:40]:
+        print(line)
+    print("...")
+
+
+if __name__ == "__main__":
+    main()
