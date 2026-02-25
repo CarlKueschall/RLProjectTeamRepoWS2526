@@ -74,6 +74,19 @@ def parse_args():
         action="store_true",
         help="Continue remaining jobs if one evaluation fails; write failures to failed_jobs.csv",
     )
+    parser.set_defaults(skip_incompatible=True)
+    parser.add_argument(
+        "--skip-incompatible",
+        dest="skip_incompatible",
+        action="store_true",
+        help="Pre-check and skip checkpoints incompatible with current architecture (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-skip-incompatible",
+        dest="skip_incompatible",
+        action="store_false",
+        help="Disable compatibility pre-check",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print planned commands only")
     return parser.parse_args()
 
@@ -182,6 +195,46 @@ def run_one_job(test_script: Path, config: str, seed: int, device: str, job: dic
     }
 
 
+def prefilter_compatible_checkpoints(checkpoints, config_path: str):
+    """
+    Pre-check checkpoint compatibility by trying model-only load once per checkpoint.
+    This avoids repeated runtime failures in matrix jobs for legacy architectures.
+    """
+    import torch
+    import hockey.hockey_env as h_env
+    from hockey.hockey_env import Mode
+
+    root = Path(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+    from utils import loadConfig
+    from dreamer import Dreamer
+
+    cfg = loadConfig(config_path)
+    device = torch.device("cpu")
+    env = h_env.HockeyEnv(mode=Mode.NORMAL, keep_mode=True)
+    observation_size = env.observation_space.shape[0]
+    action_size = env.action_space.shape[0] // 2
+    action_low = env.action_space.low[:action_size].tolist()
+    action_high = env.action_space.high[:action_size].tolist()
+
+    agent = Dreamer(observation_size, action_size, action_low, action_high, device, cfg.dreamer)
+
+    compatible = []
+    skipped = []
+    for cp in checkpoints:
+        try:
+            agent.loadCheckpoint(cp, load_optimizers=False)
+            compatible.append(cp)
+        except Exception as e:
+            msg = str(e).strip().splitlines()[0] if str(e).strip() else "unknown load error"
+            skipped.append({"checkpoint": cp, "error": msg})
+
+    env.close()
+    return compatible, skipped
+
+
 def main():
     args = parse_args()
     root = Path(__file__).resolve().parent.parent  # DreamerV3/
@@ -215,17 +268,69 @@ def main():
         if not Path(p).exists():
             raise RuntimeError(f"Checkpoint does not exist: {p}")
 
+    original_candidates = len(candidates)
+    original_opponents = len(opponents)
+    skipped_candidates = []
+    skipped_opponents = []
+    if args.skip_incompatible:
+        try:
+            candidates, skipped_candidates = prefilter_compatible_checkpoints(candidates, args.config)
+            opponents, skipped_opponents = prefilter_compatible_checkpoints(opponents, args.config)
+            print(
+                f"Compatibility pre-check:"
+                f" candidates kept {len(candidates)}/{original_candidates},"
+                f" opponents kept {len(opponents)}/{original_opponents}"
+            )
+        except Exception as e:
+            print(f"Warning: compatibility pre-check failed, continuing without filtering: {e}")
+            candidates = candidates
+            opponents = opponents
+            skipped_candidates = []
+            skipped_opponents = []
+
+    if not candidates:
+        raise RuntimeError(
+            f"No compatible candidate checkpoints after filtering (from {original_candidates})."
+        )
+    if not opponents:
+        raise RuntimeError(
+            f"No compatible opponent checkpoints after filtering (from {original_opponents})."
+        )
+
     plan_txt = out_dir / "plan.txt"
     with plan_txt.open("w") as f:
         f.write("Candidates:\n")
         for c in candidates:
             f.write(f"- {c}\n")
+        if skipped_candidates:
+            f.write("\nSkipped incompatible candidates:\n")
+            for item in skipped_candidates:
+                f.write(f"- {item['checkpoint']} :: {item['error']}\n")
         f.write("\nOpponents:\n")
         for o in opponents:
             f.write(f"- {o}\n")
+        if skipped_opponents:
+            f.write("\nSkipped incompatible opponents:\n")
+            for item in skipped_opponents:
+                f.write(f"- {item['checkpoint']} :: {item['error']}\n")
         f.write(
             f"\nEpisodes fixed: {args.episodes_fixed}\nEpisodes checkpoint: {args.episodes_checkpoint}\nSeed: {args.seed}\n"
         )
+
+    if skipped_candidates:
+        skipped_candidates_csv = out_dir / "skipped_incompatible_candidates.csv"
+        with skipped_candidates_csv.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["checkpoint", "error"])
+            writer.writeheader()
+            for item in skipped_candidates:
+                writer.writerow(item)
+    if skipped_opponents:
+        skipped_opponents_csv = out_dir / "skipped_incompatible_opponents.csv"
+        with skipped_opponents_csv.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["checkpoint", "error"])
+            writer.writeheader()
+            for item in skipped_opponents:
+                writer.writerow(item)
 
     jobs = []
 

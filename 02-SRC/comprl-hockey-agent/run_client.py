@@ -70,7 +70,7 @@ class HockeyAgent(Agent):
         return action
 
     def on_start_game(self, game_id) -> None:
-        game_id = uuid.UUID(int=int.from_bytes(game_id))
+        game_id = uuid.UUID(int=int.from_bytes(game_id, byteorder='big'))
         print(f"Game started (id: {game_id})")
 
     def on_end_game(self, result: bool, stats: list[float]) -> None:
@@ -87,7 +87,7 @@ DEFAULT_DREAMER_CHECKPOINT = os.environ.get(
     'DREAMER_CHECKPOINT',
     os.path.join(
         script_dir,
-        "666k.pth"
+        "results_checkpoints_summit-final24h-league80-seed42-1990193_weak_seed42_20260224_165708_692k.pth"
     )
 )
 
