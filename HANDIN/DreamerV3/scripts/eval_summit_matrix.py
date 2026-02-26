@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
-This file was developed with assistance from AI: autocomplete and discussion
-about the contents and behavior of the code.
-
-Summit eval matrix. Fixed-bot benchmark + cross-play. Outputs all_matches.csv,
-candidate_summary.csv, candidate_ranking.md
+This code was written entirely by claude code. 
 """
 
 import argparse

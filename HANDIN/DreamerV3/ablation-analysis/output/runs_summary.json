@@ -1,6 +1,0 @@
-[
-  {"run":"ABLATION-dreamsmooth-OFF_weak_seed42_20260129_234649","max_gradient_steps":288032,"win_rate_final":0.95,"mean_reward_final":8.131,"win_rate_mean":0.7,"mean_reward_mean":3.8245},
-  {"run":"fbench-ABLATION-dreamsmooth-ON_weak_seed42_20260129_234649","max_gradient_steps":393632,"win_rate_final":0.99,"mean_reward_final":9.4546,"win_rate_mean":0.7875,"mean_reward_mean":5.3398},
-  {"run":"ABLATION-twohot-OFF-gaussian_weak_seed42_20260129_234650","max_gradient_steps":249632,"win_rate_final":0.97,"mean_reward_final":8.9512,"win_rate_mean":0.7357,"mean_reward_mean":4.1779},
-  {"run":"ABLATION-twohot-ON_weak_seed42_20260128_234648","max_gradient_steps":259232,"win_rate_final":0.98,"mean_reward_final":9.3322,"win_rate_mean":0.725,"mean_reward_mean":4.2313}
-]

@@ -58,7 +58,6 @@ The hockey environment~\cite{martius2024} presents a challenging continuous cont
 
 I implement DreamerV3~\cite{hafner2024}, a world-model based reinforcement learning algorithm that addresses sparse rewards by learning entirely in ``imagination.'' The agent first learns a world model from real experience, then trains its policy through simulated rollouts in learned latent space. My implementation builds upon the NaturalDreamer codebase\footnote{\url{https://github.com/InexperiencedMe/NaturalDreamer}}, with significant modifications for hockey: Two-Hot Symlog for sparse reward prediction, DreamSmooth~\cite{dreamsmooth2023} temporal reward smoothing, inverse-frequency sparse-event loss weighting in world-model reward learning, PFSP self-play~\cite{vinyals2019}, and an adaptive opponent curriculum. A key project realization was that late-stage performance depends less on fixed bots and more on recursive opponent-pool management and curated league diversity.
 
-\textbf{Contributions:} (1) DreamerV3 hockey implementation with Two-Hot Symlog and DreamSmooth; (2) adaptive opponent curriculum with effective compute split of roughly 20\% anchor-only, 20\% bootstrap self-play, and 60\% league-dominant self-play; (3) robust checkpoint-selection tooling using worst-case and quantile metrics, not only mean win rate; (4) strong late checkpoints (556k/612k/634k) that consistently outperform older baselines in summit cross-play.
 
 % ============================================================================
 % SECTION 2: METHODS
@@ -75,7 +74,6 @@ DreamerV3~\cite{hafner2024} learns a world model that predicts future states and
 
 The world model uses a Recurrent State Space Model (RSSM) combining deterministic and stochastic dynamics. The state $s_t = (h_t, z_t)$ consists of a deterministic GRU hidden state $h_t \in \mathbb{R}^{256}$ and stochastic latent $z_t$ (16 categorical variables, 16 classes each). Dynamics: $h_t = \text{GRU}(h_{t-1}, z_{t-1}, a_{t-1})$; prior $\hat{z}_t \sim p_\theta(z_t | h_t)$; posterior $z_t \sim q_\phi(z_t | h_t, \text{Enc}(o_t))$. KL divergence with free nats thresholding trains the model. I additionally use a continuation head that predicts non-terminal probability and provides the imagination-time continuation factor in return computation.
 
-\textbf{Two-Hot Symlog.} MSE fails on hockey's sparse reward distribution $\{-10, 0, +10\}$. We use Two-Hot Symlog encoding~\cite{hafner2024}: $\text{symlog}(x) = \text{sign}(x) \cdot \ln(|x| + 1)$, discretizing into 255 bins. The two-hot encoding places mass on bins surrounding the target, enabling gradient flow. Applied to both reward and value prediction.
 
 \subsubsection{Key Modifications for Hockey}
 
@@ -88,7 +86,7 @@ Table~\ref{tab:modifications} summarizes our domain-specific modifications. \tex
 \toprule
 \textbf{Modification} & \textbf{Problem Addressed} & \textbf{Implementation} \\
 \midrule
-Two-Hot Symlog & MSE fails on sparse rewards & 255 bins in symlog space \\
+Two-Hot Symlog & Gaussian reward/value heads underfit sparse multimodal targets & 255 bins in symlog space \\
 DreamSmooth & Temporal credit assignment & $\tilde{r}_t = \alpha r_t + (1-\alpha)\tilde{r}_{t+1}$, $\alpha=0.5$ \\
 Sparse-event loss weighting & Rare goal events underweighted in reward loss & Inverse-frequency weighting for $|r|>1$, clipped for stability \\
 Anchor Opponents & Prevent catastrophic forgetting & 10\% weak + 10\% strong in late phase \\
@@ -150,13 +148,13 @@ C: Curated league self-play & $\sim$60\% & 80\% league, 10\% weak, 10\% strong &
 
 A compact visual of this end-to-end training strategy is included in Appendix Figure~\ref{fig:appendix-training-phases}.
 
-In the representative late run (\_weak\_seed42\_20260224\_040000, 474k$\rightarrow$639k in 10.7h), opponent sampling matched target behavior: self-play ratio $\approx0.80$, anchor ratio $\approx0.20$, and balanced weak/strong anchors. The self-play pool grew to 48 tracked opponents. Pool metrics improved substantially: overall pool win rate reached 0.804 and newest-third win rate rose to 0.725, indicating continued progress against recent opponents.
+In the representative late run opponent sampling matched target behavior: self-play ratio $\approx0.80$, anchor ratio $\approx0.20$, and balanced weak/strong anchors. The self-play pool grew to 48 tracked opponents. Pool metrics improved substantially: overall pool win rate reached 0.804 and newest-third win rate rose to 0.725, indicating continued progress against recent opponents.
 
 \subsection{Summit Cross-Play and Checkpoint Selection}
 
-I evaluate checkpoints with matrix cross-play against fixed bots plus a curated opponent bank. Results show clear improvement over older baselines, but also non-transitive behavior~\cite{vinyals2019,robustleague2023}: ranking between 556k/612k/634k changes with seed and opponent set, while all three outperform 357k and 474k.
+I evaluate checkpoints with matrix cross-play against fixed bots plus a curated opponent bank. Results show clear improvement over older baselines, but also non-transitive behavior~\cite{vinyals2019,robustleague2023}.
 
-The main lesson is methodological: fixed-bot win rate saturates early and becomes weakly informative, while \texttt{CP\_worst} and lower-quantile cross-play metrics identify robustness gaps and guide better pool curation. Across late snapshots, the top checkpoint is not perfectly stable (556k, then 612k, then 634k in different slices), which is consistent with non-transitive matchups and limited per-match episode budgets. I therefore introduced automated shortlist selection (\texttt{eval\_select\_pool.py}) with a two-stage procedure: Stage 1 fast screening (fixed weak/strong + sparse checkpoint cross-play) and Stage 2 dense top-$K$ refinement (optionally bidirectional), followed by greedy quality+diversity selection from pairwise profiles. The resulting 21-checkpoint ranked pool (Appendix Table~\ref{tab:appendix-recommended-pool}) makes the selection rule explicit. Appendix Figure~\ref{fig:appendix-pool-tradeoff} visualizes the same ranking as a fixed-bot-vs-cross-play tradeoff. Figure~\ref{fig:benchmark-progression-stitch} summarizes the benchmark chain as a single continuous timeline by merging four runs (from-scratch, self-play-only, league round 1, league round 2) and clipping overlap regions in gradient-step space.
+The main lesson is methodological: fixed-bot win rate saturates early and becomes weakly informative, while \texttt{CP\_worst} and lower-quantile cross-play metrics identify robustness gaps and guide better pool curation. To maximize confidence, I introduced automated shortlist selection (\texttt{eval\_select\_pool.py}) with a two-stage procedure: Stage 1 fast screening (fixed weak/strong + sparse checkpoint cross-play) and Stage 2 dense top-$K$ refinement (optionally bidirectional), followed by greedy quality+diversity selection from pairwise profiles. The resulting 21-checkpoint ranked pool (Appendix Table~\ref{tab:appendix-recommended-pool}) makes the selection rule explicit. Appendix Figure~\ref{fig:appendix-pool-tradeoff} visualizes the same ranking as a fixed-bot-vs-cross-play tradeoff. Figure~\ref{fig:benchmark-progression-stitch} summarizes the benchmark chain as a single continuous timeline by merging four runs (from-scratch, self-play-only, league round 1, league round 2) and clipping overlap regions in gradient-step space.
 
 \begin{figure}[h]
 \centering

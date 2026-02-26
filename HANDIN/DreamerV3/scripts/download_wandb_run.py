@@ -1,6 +1,5 @@
 """
-This file was developed with assistance from AI: autocomplete and discussion
-about the contents and behavior of the code.
+This code was written entirely by claude code.
 
 W&B Run Data Downloader for DreamerV3 Hockey
 
