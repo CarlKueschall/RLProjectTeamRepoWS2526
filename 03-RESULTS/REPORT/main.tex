@@ -18,10 +18,13 @@
 \usepackage{caption}
 \captionsetup{font=small,labelfont=bf}
 \captionsetup[subfigure]{font=footnotesize,labelfont=normalfont}
+\captionsetup{skip=4pt}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
 \usepackage{geometry}
 \usepackage{pdflscape}
+\usepackage{tikz}
+\usetikzlibrary{positioning,fit,arrows.meta}
 \usepackage{fancyhdr}
 \usepackage{hyperref}
 \usepackage{xcolor}
@@ -35,6 +38,11 @@
 \chead{}
 \rhead{\thepage}
 \cfoot{}
+\setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\floatsep}{6pt plus 2pt minus 2pt}
+\setlength{\intextsep}{8pt plus 2pt minus 2pt}
+\setlength{\abovedisplayskip}{6pt}
+\setlength{\belowdisplayskip}{6pt}
 
 \title{World-Model Based Reinforcement Learning for Hockey:\\
         DreamerV3 with Adaptive Opponent Curriculum}
@@ -56,7 +64,7 @@
 \medskip
 The hockey environment~\cite{martius2024} presents a challenging continuous control problem in an adversarial setting. Two agents compete in an air-hockey game with 18-dimensional state observations encoding positions, velocities, and puck state, while each player controls 4 continuous action dimensions. Episodes last up to 250 timesteps with extremely sparse rewards: $+10$ for scoring, $-10$ for conceding, and $0$ otherwise. This sparsity makes credit assignment difficult---agents must learn complex behaviors (positioning, puck control, shooting, defending) from reward signals that occur only at episode boundaries.
 
-I implement DreamerV3~\cite{hafner2024}, a world-model based reinforcement learning algorithm that addresses sparse rewards by learning entirely in ``imagination.'' The agent first learns a world model from real experience, then trains its policy through simulated rollouts in learned latent space. My implementation builds upon the NaturalDreamer codebase\footnote{\url{https://github.com/InexperiencedMe/NaturalDreamer}}, with significant modifications for hockey: Two-Hot Symlog for sparse reward prediction, DreamSmooth~\cite{dreamsmooth2023} temporal reward smoothing, inverse-frequency sparse-event loss weighting in world-model reward learning, PFSP self-play~\cite{vinyals2019}, and an adaptive opponent curriculum. A key project realization was that late-stage performance depends less on fixed bots and more on recursive opponent-pool management and curated league diversity.
+I implement DreamerV3~\cite{hafner2024}, which learns a world model from real rollouts and trains the policy in imagined latent trajectories. Starting from NaturalDreamer\footnote{\url{https://github.com/InexperiencedMe/NaturalDreamer}}, I add hockey-specific components: Two-Hot Symlog heads, DreamSmooth~\cite{dreamsmooth2023}, sparse-event loss weighting, PFSP self-play~\cite{vinyals2019}, and an adaptive opponent curriculum. The main practical result is that late gains are driven more by recursive pool curation than by further fixed-bot training.
 
 
 % ============================================================================
@@ -66,14 +74,67 @@ I implement DreamerV3~\cite{hafner2024}, a world-model based reinforcement learn
 
 \subsection{DreamerV3: World-Model Based RL}\label{subsec:dreamer-method}
 
-\subsubsection{Background}
-
-DreamerV3~\cite{hafner2024} learns a world model that predicts future states and rewards from actions, then trains actor-critic policies entirely through imagined rollouts in learned latent space. This is particularly suited for sparse-reward environments: the world model propagates reward information backward through imagined trajectories, enabling credit assignment even when real rewards are rare. Our implementation adapts this for the hockey domain, addressing (1) extremely sparse goal rewards, (2) continuous 4D action space, and (3) adversarial dynamics.
-
 \subsubsection{World Model Architecture}
 
-The world model uses a Recurrent State Space Model (RSSM) combining deterministic and stochastic dynamics. The state $s_t = (h_t, z_t)$ consists of a deterministic GRU hidden state $h_t \in \mathbb{R}^{256}$ and stochastic latent $z_t$ (16 categorical variables, 16 classes each). Dynamics: $h_t = \text{GRU}(h_{t-1}, z_{t-1}, a_{t-1})$; prior $\hat{z}_t \sim p_\theta(z_t | h_t)$; posterior $z_t \sim q_\phi(z_t | h_t, \text{Enc}(o_t))$. KL divergence with free nats thresholding trains the model. I additionally use a continuation head that predicts non-terminal probability and provides the imagination-time continuation factor in return computation.
+DreamerV3~\cite{hafner2024} uses an RSSM with deterministic and stochastic dynamics. The latent state is $s_t=(h_t,z_t)$ with GRU memory $h_t \in \mathbb{R}^{256}$ and categorical $z_t$ (16 variables, 16 classes each). Dynamics: $h_t=\text{GRU}(h_{t-1},z_{t-1},a_{t-1})$; prior $\hat z_t \sim p_\theta(z_t|h_t)$; posterior $z_t \sim q_\phi(z_t|h_t,\text{Enc}(o_t))$. Training uses KL with free nats, plus a continuation head for non-terminal prediction and imagination-time return weighting (Figure~\ref{fig:world_model}).
 
+\begin{figure}[htbp]
+\centering
+\resizebox{0.98\linewidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.3cm and 1.4cm,
+    block/.style={rectangle, draw, thick, fill=blue!10, text width=2.2cm, align=center, rounded corners, minimum height=0.9cm},
+    latent/.style={rectangle, draw, thick, fill=green!10, text width=2.2cm, align=center, rounded corners, minimum height=0.9cm, dashed},
+    arrow/.style={-{Stealth[scale=1.2]}, thick}
+]
+
+% Nodes
+\node[block] (obs) {Observation $x_t$};
+\node[block, above=of obs] (encoder) {Encoder};
+\node[block, left=of encoder] (rnn) {Recurrent Model (GRU)};
+\node[latent, above=of encoder] (posterior) {Posterior $q(z_t | h_t, x_t)$};
+\node[latent, above=of rnn] (prior) {Prior $p(z_t | h_t)$};
+
+\node[block, right=of posterior] (decoder) {Decoder};
+\node[block, above=of decoder] (reward) {Reward Model};
+\node[block, below=of decoder] (continue) {Continue Model};
+
+% State inputs
+\node[left=of rnn] (prevstate) {$h_{t-1}, z_{t-1}, a_{t-1}$};
+
+% Arrows
+\draw[arrow] (obs) -- (encoder);
+\draw[arrow] (prevstate) -- (rnn);
+\draw[arrow] (rnn) -- node[left] {$h_t$} (prior);
+% Route above encoder to avoid line crossing the node label
+\draw[arrow] (rnn.north) -- ++(0,0.45) -| node[pos=0.35, above] {$h_t$} (posterior.west);
+\draw[arrow] (encoder) -- node[right] {encoded $x_t$} (posterior);
+
+% KL Divergence line
+\draw[<->, thick, red, dashed] (prior) -- node[above] {KL Loss} (posterior);
+
+% Full state grouping
+\node[draw, thick, dotted, fit=(rnn) (posterior), inner sep=0.5cm, label=above:{\textbf{Full State} $s_t = [h_t, z_t]$}] (fullstate) {};
+
+% Outputs
+\draw[arrow] (posterior) -- (decoder);
+\draw[arrow] (posterior) |- (reward);
+% Route around the encoder row to avoid visual strike-through
+\draw[arrow] (posterior.east) -- ++(0.9,0) |- (continue.north);
+
+\node[right=of decoder] (recon) {$\hat{x}_t$};
+\node[right=of reward] (rew) {$\hat{r}_t$};
+\node[right=of continue] (cont) {$\hat{\gamma}_t$};
+
+\draw[arrow] (decoder) -- (recon);
+\draw[arrow] (reward) -- (rew);
+\draw[arrow] (continue) -- (cont);
+
+\end{tikzpicture}
+}
+\caption{DreamerV3 world-model training (reality mode): posterior inference from observations, prior matching via KL, and decoder/reward/continue heads from latent state; adapted from~\cite{hafner2024,naturaldreamer}.}
+\label{fig:world_model}
+\end{figure}
 
 \subsubsection{Key Modifications for Hockey}
 
@@ -99,26 +160,86 @@ Self-Play + PFSP~\cite{vinyals2019} & Limited diversity & 48-checkpoint pool, va
 
 \subsubsection{Recursive Opponent-Pool Management}
 
-The final training policy is controlled by opponent sampling rather than reward shaping. Let $\rho$ be the anchor probability; then
-\[
-\mathbb{P}(\text{anchor})=\rho,\quad \mathbb{P}(\text{self-play})=1-\rho.
-\]
+The final training policy is controlled by opponent sampling rather than reward shaping, with $\mathbb{P}(\text{anchor})=\rho$ and $\mathbb{P}(\text{self-play})=1-\rho$.
 In late runs we set $\rho=0.2$, yielding an empirical distribution close to 80/10/10 (self-play/weak/strong). This keeps fixed-bot competence while maximizing exposure to diverse, hard opponents.
 In league runs, PFSP sampling~\cite{vinyals2019} is further blended with a static checkpoint prior from curated league weights, using exponent $\alpha$ (\texttt{self\_play\_prior\_alpha}) so higher-quality checkpoints are sampled earlier without disabling PFSP adaptation.
 
 To avoid selecting brittle checkpoints, I rank candidates with robustness-aware metrics from cross-play:
-\[
-\text{RobustScore}=0.60\cdot \text{CP}_{\min}+0.25\cdot \text{Fixed}_{\text{combined}}+0.15\cdot \text{CP}_{\text{mean}},
-\]
-and in later tooling also use $\text{CP}_{q20}$ (20th percentile) for stability under non-transitive matchups.
+$\text{RobustScore}=0.60\cdot \text{CP}_{\min}+0.25\cdot \text{Fixed}_{\text{combined}}+0.15\cdot \text{CP}_{\text{mean}}$, and also use $\text{CP}_{q20}$ (20th percentile) for non-transitive settings.
 
 \subsubsection{Behavior Learning}
 
-\textbf{Actor:} Tanh-squashed Gaussian with $\sigma_{\min} = 0.1$ plus mean-regularization on pre-squash means (\texttt{mean\_reg\_scale}) to reduce tanh-saturation drift. \textbf{Critic:} Two-Hot Symlog with slow-critic EMA regularization ($\tau = 0.98$). \textbf{Lambda returns:} TD($\lambda$), $\lambda = 0.95$, $\gamma = 0.997$. \textbf{Value normalization:} Percentile-based scaling (5th/95th) for advantages. \textbf{Actor loss:}
-\begin{equation}
-\mathcal{L}_\text{actor} = -\mathbb{E}_{s \sim \text{imagine}} \left[ \frac{V^\lambda(s) - V(s)}{S} + \eta \cdot H[\pi(\cdot|s)] \right]
-\end{equation}
-with $\eta = 3 \times 10^{-4}$ fixed.
+\textbf{Actor:} Tanh-squashed Gaussian with $\sigma_{\min}=0.1$ plus mean regularization (\texttt{mean\_reg\_scale}) to reduce tanh-saturation drift. \textbf{Critic:} Two-Hot Symlog with slow-critic EMA regularization ($\tau=0.98$). \textbf{Returns:} TD($\lambda$), $\lambda=0.95$, $\gamma=0.997$, with percentile value normalization (5th/95th). \textbf{Actor loss:} $\mathcal{L}_\text{actor}=-\mathbb{E}_{s\sim\text{imagine}}\!\left[\frac{V^\lambda(s)-V(s)}{S}+\eta H[\pi(\cdot|s)]\right]$, fixed $\eta=3\times10^{-4}$.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.92\linewidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.4cm and 1.5cm,
+    worldmodel/.style={rectangle, draw, thick, fill=blue!10, text width=2.2cm, align=center, rounded corners, minimum height=0.9cm},
+    behavior/.style={rectangle, draw, thick, fill=red!10, text width=2.2cm, align=center, rounded corners, minimum height=0.9cm},
+    state/.style={rectangle, draw, thick, fill=green!10, text width=2.0cm, align=center, rounded corners, minimum height=0.8cm, dashed},
+    arrow/.style={-{Stealth[scale=1.1]}, thick}
+]
+
+% Start State
+\node[state] (s0) {State $s_{t-1}$};
+
+% Actor (Policy)
+\node[behavior, below=1cm of s0] (actor) {Actor\\$\pi_\theta(a_{t-1} | s_{t-1})$};
+
+% RSSM components
+\node[worldmodel, right=of s0] (gru) {Recurrent\\Model (GRU)};
+\node[worldmodel, right=of gru] (prior) {Prior\\$p_\theta(z_t | h_t)$};
+
+% Next State
+\node[state, right=of prior] (s1) {State $s_t$};
+
+% Predictions
+\node[worldmodel, above=1cm of s1] (reward) {Reward Model};
+\node[behavior, right=of s1] (critic) {Critic (Value)\\$v_\psi(s_t)$};
+\node[worldmodel, below=1cm of s1] (continue) {Continue Model};
+
+% Connect Start State to Actor and GRU
+\draw[arrow] (s0) -- (actor);
+\draw[arrow] (s0) -- (gru);
+
+% Route Action from Actor to GRU cleanly
+\draw[arrow] (actor.east) -| node[pos=0.25, below] {Action $a_{t-1}$} (gru.south);
+
+% RSSM Internal Routing
+\draw[arrow] (gru) -- node[above] {$h_t$} (prior);
+
+% Route z_t from Prior to Next State
+\draw[arrow] (prior) -- node[above] {$z_t$} (s1);
+
+% Route h_t over the Prior directly to Next State
+\draw[arrow] (gru.north) -- ++(0, 0.6) -| node[pos=0.25, above] {$h_t$ (det.)} (s1.north);
+
+% Connect Next State to Outputs
+\draw[arrow] (s1) -- (reward);
+\draw[arrow] (s1) -- (critic);
+\draw[arrow] (s1) -- (continue);
+
+% Output labels
+\node[right=0.45cm of reward] (r_out) {$\hat{r}_t$};
+\node[right=0.45cm of critic] (v_out) {$\hat{v}_t$};
+\node[right=0.45cm of continue] (c_out) {$\hat{\gamma}_t$};
+
+\draw[arrow] (reward) -- (r_out);
+\draw[arrow] (critic) -- (v_out);
+\draw[arrow] (continue) -- (c_out);
+
+% Imagination Bounding Box
+\node[draw, thick, dotted, inner sep=0.35cm, fit=(gru) (prior) (s1) (reward) (continue), label=above:{\textbf{Imagined Trajectory (World Model)}}] (imagination) {};
+
+\end{tikzpicture}
+}
+\caption{DreamerV3 behavior training (imagination mode): actor and critic are trained on prior-only latent rollouts (no observation encoder in-loop); adapted from~\cite{hafner2024,naturaldreamer}.}
+\label{fig:behavior_training}
+\end{figure}
+
+Figure~\ref{fig:behavior_training} shows the pure imagination loop used for policy optimization.
 
 % ============================================================================
 % SECTION 3: EXPERIMENTAL EVALUATION
@@ -127,45 +248,39 @@ with $\eta = 3 \times 10^{-4}$ fixed.
 
 \subsection{From 2-Phase Baseline to Adaptive 3-Stage Curriculum}
 
-The early project used a 2-phase recipe (mixed fixed bots, then self-play) and reached a strong fixed-bot baseline at 336k. The final push revealed a clearer compute-allocation structure (Table~\ref{tab:training-phases}): fixed-bot training is necessary but quickly saturates, while most late gains come from league-dominant self-play with curated opponents.
+The early setup (mixed fixed bots, then self-play) reached a strong 336k fixed-bot baseline. Final runs showed a clearer compute split (Table~\ref{tab:training-phases}): fixed-bot training is necessary but saturates early; most late gains come from curated league self-play.
 
 \begin{table}[h]
 \centering
 \footnotesize
-\setlength{\tabcolsep}{4pt}
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{0.96}
 \begin{tabularx}{\linewidth}{@{}p{0.20\linewidth}p{0.11\linewidth}p{0.23\linewidth}X@{}}
 \toprule
-\textbf{Stage} & \textbf{Compute Share} & \textbf{Main Opponents} & \textbf{Purpose / Outcome} \\
+\textbf{Stage} & \textbf{Share} & \textbf{Opponents} & \textbf{Outcome} \\
 \midrule
-A: Anchor competence & $\sim$20\% & Weak + strong fixed bots & Learn fundamentals and stabilize the world model; fast gains vs.\ fixed bots. \\
-B: Bootstrap self-play & $\sim$20\% & Internal self-play + anchors & Introduce adversarial adaptation; produce stronger checkpoints (e.g., 474k/556k). \\
-C: Curated league self-play & $\sim$60\% & 80\% league, 10\% weak, 10\% strong & Improve robustness against diverse opponents; yields best late checkpoints (612k/634k). \\
+A: Anchor competence & $\sim$20\% & Weak + strong fixed bots & Base skills + stable world model. \\
+B: Bootstrap self-play & $\sim$20\% & Self-play + anchors & Adversarial adaptation; stronger mids (474k/556k). \\
+C: Curated league self-play & $\sim$60\% & 80\% league, 10\% weak, 10\% strong & Robustness and best late checkpoints (612k/634k). \\
 \bottomrule
 \end{tabularx}
 \caption{Practical training-time allocation learned during the final push.}
 \label{tab:training-phases}
 \end{table}
 
-A compact visual of this end-to-end training strategy is included in Appendix Figure~\ref{fig:appendix-training-phases}.
-
-In the representative late run opponent sampling matched target behavior: self-play ratio $\approx0.80$, anchor ratio $\approx0.20$, and balanced weak/strong anchors. The self-play pool grew to 48 tracked opponents. Pool metrics improved substantially: overall pool win rate reached 0.804 and newest-third win rate rose to 0.725, indicating continued progress against recent opponents.
+Appendix Figure~\ref{fig:appendix-training-phases} gives the full flow. In a representative late run, sampling matched targets (self-play $\approx 0.80$, anchors $\approx 0.20$), the pool grew to 48 opponents, and pool metrics reached 0.804 overall / 0.725 newest-third win rate.
 
 \subsection{Summit Cross-Play and Checkpoint Selection}
 
-I evaluate checkpoints with matrix cross-play against fixed bots plus a curated opponent bank. Results show clear improvement over older baselines, but also non-transitive behavior~\cite{vinyals2019,robustleague2023}.
-
-The main lesson is methodological: fixed-bot win rate saturates early and becomes weakly informative, while \texttt{CP\_worst} and lower-quantile cross-play metrics identify robustness gaps and guide better pool curation. To maximize confidence, I introduced automated shortlist selection (\texttt{eval\_select\_pool.py}) with a two-stage procedure: Stage 1 fast screening (fixed weak/strong + sparse checkpoint cross-play) and Stage 2 dense top-$K$ refinement (optionally bidirectional), followed by greedy quality+diversity selection from pairwise profiles. The resulting 21-checkpoint ranked pool (Appendix Table~\ref{tab:appendix-recommended-pool}) makes the selection rule explicit. Appendix Figure~\ref{fig:appendix-pool-tradeoff} visualizes the same ranking as a fixed-bot-vs-cross-play tradeoff. Figure~\ref{fig:benchmark-progression-stitch} summarizes the benchmark chain as a single continuous timeline by merging four runs (from-scratch, self-play-only, league round 1, league round 2) and clipping overlap regions in gradient-step space.
+Matrix cross-play against fixed bots plus a curated opponent bank improved over earlier baselines, while still showing non-transitivity~\cite{vinyals2019,robustleague2023}. In practice, fixed-bot win rate saturates and becomes weakly informative; \texttt{CP\_worst} and lower-quantile metrics (\texttt{CP\_Q20}) are better late-stage selectors. I therefore used a two-stage automated shortlist pipeline (\texttt{eval\_select\_pool.py}): fast screening, then dense top-$K$ refinement, followed by greedy quality+diversity selection. The resulting 21-checkpoint pool is listed in Appendix Table~\ref{tab:appendix-recommended-pool}; Appendix Figure~\ref{fig:appendix-pool-tradeoff} shows its tradeoff view. Figure~\ref{fig:benchmark-progression-stitch} shows the overlap-clipped single timeline built from four runs.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.95\linewidth]{final_benchmark_eval_progression_stitch}
-\caption{Single-timeline benchmark progression for \texttt{eval/combined\_win\_rate}, constructed from four training runs and overlap-clipped on the x-axis (gradient steps). Colored phase segments indicate the source run of each retained datapoint.}
+\includegraphics[width=0.90\linewidth]{final_benchmark_eval_progression_stitch}
+\caption{Single-timeline \texttt{eval/combined\_win\_rate} from four runs, overlap-clipped in gradient-step space; colors mark source phase.}
 \label{fig:benchmark-progression-stitch}
 \end{figure}
 
-\subsection{Self-Play Metrics}
-
-Self-play progression is analyzed primarily through quantitative pool metrics from run traces (overall pool win rate and oldest/middle/newest-third breakdowns), while ablation-specific evidence is discussed in the next subsection.
 
 \subsection{Ablation Diagnostics Beyond Aggregate Win Rate}
 
@@ -173,44 +288,40 @@ Figures~\ref{fig:dreamsmooth-diagnostics} and~\ref{fig:twohot-diagnostics} are i
 
 \begin{figure}[h]
 \centering
-\subcaptionbox{DreamSmooth: combined win rate}{\includegraphics[width=0.32\linewidth]{dreamsmooth-combined-win-rate}}%
+\subcaptionbox{DreamSmooth: combined win rate}{\includegraphics[width=0.31\linewidth]{dreamsmooth-combined-win-rate}}%
 \hfill
-\subcaptionbox{DreamSmooth: sparse prediction error}{\includegraphics[width=0.32\linewidth]{dreamsmooth-sparse-pred-error}}%
+\subcaptionbox{DreamSmooth: sparse prediction error}{\includegraphics[width=0.31\linewidth]{dreamsmooth-sparse-pred-error}}%
 \hfill
-\subcaptionbox{DreamSmooth: gradient steps per second}{\includegraphics[width=0.32\linewidth]{dreamsmooth-gradient-steps-per-second}}
+\subcaptionbox{DreamSmooth: gradient steps per second}{\includegraphics[width=0.31\linewidth]{dreamsmooth-gradient-steps-per-second}}
 \caption{DreamSmooth ablation diagnostics beyond headline win rate.}
 \label{fig:dreamsmooth-diagnostics}
 \end{figure}
 
 \begin{figure}[h]
 \centering
-\subcaptionbox{Two-Hot: combined win rate}{\includegraphics[width=0.32\linewidth]{twohot-combined-win-rate}}%
+\subcaptionbox{Two-Hot: combined win rate}{\includegraphics[width=0.31\linewidth]{twohot-combined-win-rate}}%
 \hfill
-\subcaptionbox{Two-Hot: entropy mean}{\includegraphics[width=0.32\linewidth]{twohot-entropy-mean}}%
+\subcaptionbox{Two-Hot: entropy mean}{\includegraphics[width=0.31\linewidth]{twohot-entropy-mean}}%
 \hfill
-\subcaptionbox{Two-Hot: gradient steps per second}{\includegraphics[width=0.32\linewidth]{twohot-gradient-steps-per-sec}}
+\subcaptionbox{Two-Hot: gradient steps per second}{\includegraphics[width=0.31\linewidth]{twohot-gradient-steps-per-sec}}
 \caption{Two-Hot vs.\ Gaussian-head diagnostics (performance, entropy behavior, and throughput).}
 \label{fig:twohot-diagnostics}
 \end{figure}
 
-The diagnostic view is still informative. For DreamSmooth, Figure~\ref{fig:dreamsmooth-diagnostics}(b) shows a cleaner/lower sparse-prediction-error profile, while Figure~\ref{fig:dreamsmooth-diagnostics}(c) shows a runtime tradeoff (lower gradient-steps/sec). For Two-Hot, Figure~\ref{fig:twohot-diagnostics}(a) remains close to Gaussian in final win rate, but Figure~\ref{fig:twohot-diagnostics}(b) shows a measurable entropy-shape difference, i.e., a policy-behavior calibration effect rather than a large score jump. All these runs also use sparse-event loss weighting in the reward head (Section~\ref{subsec:dreamer-method}), so rare $|r|>1$ transitions receive more gradient mass; this class-imbalance handling is part of the baseline and was not isolated as a standalone ablation.
+The diagnostics are still useful: DreamSmooth reduces sparse-prediction error but lowers throughput (Figures~\ref{fig:dreamsmooth-diagnostics}b,c). Two-Hot gives similar final win rate to Gaussian but shifts entropy behavior (Figure~\ref{fig:twohot-diagnostics}b), i.e., policy-calibration effects without a large headline gain. Sparse-event loss weighting is active in all runs (Section~\ref{subsec:dreamer-method}); it was part of the baseline, not isolated as a separate ablation.
 
-\subsection{Fixed-Bot Benchmark Saturation}
 
-Fixed-bot performance stayed high throughout: the early 336k baseline reached 93.5\% combined (100 episodes/opponent), late 556k/634k checkpoints were both around 96.5--96.7\% (30 episodes/opponent matrix snapshots), and the final 692k checkpoint reached 99.0\% combined (100 episodes/opponent; 100.0\% weak, 98.0\% strong). This supports the same conclusion as Figure~\ref{fig:benchmark-progression-stitch}: fixed-bot metrics saturate, while cross-play robustness is the more useful late-stage selector. In the official final tournament, this DreamerV3 agent placed \textbf{16th among all agents} and \textbf{11th among teams}.
 
 % ============================================================================
 % SECTION 4: DISCUSSION
 % ============================================================================
 \section{Discussion}\label{sec:discussion}
 
-\textbf{Key Findings and Lessons Learned.} First, ablations indicate that DreamSmooth and Two-Hot did not massively change headline win rate in this single-seed setup, but they still served their intended roles: DreamSmooth improved sparse-signal prediction behavior, and Two-Hot changed policy-entropy behavior in a controlled way. Sparse-event loss weighting further supported rare-goal learning by countering class imbalance in reward-head training. Second, the dominant late-stage factor is opponent curriculum design: after fixed-bot competence is reached, most additional compute should be invested in self-play against a curated league. In my final runs, this effectively became a 20/20/60 allocation (anchor/bootstrap/curated-league) and produced stronger checkpoints than the earlier 2-phase baseline. Third, recursive opponent management~\cite{vinyals2019} (periodic checkpoint insertion, PFSP sampling, and matrix-based curation) is what unlocked peak performance, not further optimization on weak/strong bots.
+\textbf{Key Findings and Lessons Learned.} DreamSmooth and Two-Hot did not strongly change headline win rate in this single-seed setting, but they behaved as intended: DreamSmooth improved sparse-signal prediction, Two-Hot changed entropy behavior, and sparse-event weighting improved rare-goal gradient allocation. The dominant late-stage lever was opponent curriculum design: once fixed-bot competence saturated, extra compute was best spent on curated league self-play (about 20/20/60 for anchor/bootstrap/league). Recursive pool management~\cite{vinyals2019} (checkpoint insertion, PFSP, matrix-based curation) produced the largest gains.
 
-\textbf{Post-hoc algorithm-fit diagnosis.} To understand why this DreamerV3 implementation was competitive but not top-ranked in the tournament, I performed a targeted literature review after the final runs. The core message is that DreamerV3 is strongest when sample efficiency and high-dimensional modeling dominate, while in low-dimensional, fast-simulator continuous control, asymptotic performance is often led by strong model-free methods such as TD3/SAC~\cite{hafner2024,fujimoto2018,haarnoja2018}. This is consistent with my hockey setting and with newer world-model evidence showing that architecture and planning style matter strongly in continuous control (e.g., TD-MPC2 vs.\ DreamerV3)~\cite{hansen2024}. I include this reflection to make clear that the outcome was analyzed scientifically, not only empirically.
+\textbf{Post-hoc algorithm-fit diagnosis.} A targeted literature review suggests this result is plausible: DreamerV3 is often strongest when sample efficiency and high-dimensional modeling dominate, while low-dimensional, fast-simulator continuous control can favor strong model-free baselines (TD3/SAC) in asymptotic score~\cite{hafner2024,fujimoto2018,haarnoja2018}. This aligns with hockey and newer evidence that architecture/planning choices matter strongly in continuous control (e.g., TD-MPC2 vs.\ DreamerV3)~\cite{hansen2024}.
 
-\textbf{Limitations.} Matrix evaluations still use modest episode budgets in many snapshots (often 30), so ranking among close late checkpoints has variance. Non-transitivity remains visible~\cite{minimaxexploiter2023,robustleague2023}, and some tooling constraints (e.g., incompatible legacy checkpoints) required explicit filtering. The sparse-event loss weighting feature was also not isolated with a dedicated multi-seed ablation in the final phase.
-
-\textbf{Future Work.} Run higher-confidence bidirectional matrix evaluations (100+ episodes per matchup, multiple seeds), maintain a continuously refreshed multi-seed league, and integrate online tournament feedback into checkpoint promotion criteria.
+\textbf{Limitations and Future Work.} Many matrix snapshots still use modest budgets (often 30 episodes/matchup), so ranking among close late checkpoints has variance. Non-transitivity remains visible~\cite{minimaxexploiter2023,robustleague2023}, some legacy checkpoints required compatibility filtering, and sparse-event weighting was not isolated with a multi-seed ablation. Next steps are higher-budget bidirectional matrices (100+ episodes/matchup, multiple seeds), continuously refreshed multi-seed leagues, and online tournament feedback in promotion criteria.
 
 % ============================================================================
 % AI USAGE DECLARATION
@@ -218,6 +329,8 @@ Fixed-bot performance stayed high throughout: the early 336k baseline reached 93
 \section{AI Usage Declaration}\label{sec:ai-usage}
 
 My AI-use philosophy had three layers. First, I used agentic systems (primarily Claude Code) for discussion, debate, decision support, concept learning, and targeted paper discovery. Second, I used AI autocomplete for implementing core logic (agent internals, training loop, architecture-level essentials), followed by manual review and verification. Third, I used Claude Code for low-learning-value ``dirty work'' (repetitive scripting, formatting, and pipeline glue). The decision matrix is shown in Appendix Figure~\ref{fig:ai-use-matrix}.
+The report text itself was written by the author; AI was only used for grammar/spell checking (e.g., DeepL), in line with course guidance.
+Detailed prompts for larger code-generation tasks are provided in \texttt{AI\_PROMPTS.md} in the submitted code folder.
 
 % ============================================================================
 % REFERENCES
